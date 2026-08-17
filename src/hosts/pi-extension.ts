@@ -177,16 +177,21 @@ export default function (pi: ExtensionAPI) {
     const now = Date.now();
     if (now - lastTickSentAt < TICK_COOLDOWN_MS) return;
     lastTickSentAt = now;
-    // sendMessage never throws on streaming (followUp queues it) — but a
-    // rejection elsewhere must not surface as an unhandled extension error.
-    void pi
-      .sendMessage(
-        { customType: TICK_TYPE, content: message, display: true },
-        { triggerTurn: true, deliverAs: "followUp" },
-      )
-      .catch(() => {
+    // pi.sendMessage is declared `: void` (not a Promise) — the runtime
+    // sometimes returns a thenable and sometimes undefined. Never assume:
+    // guard the catch so an undefined return cannot crash pi (the live bug:
+    // uncaughtException 'Cannot read properties of undefined (reading catch)'
+    // in runSweep → sendTick). A rejection or dropped tick is re-attempted by
+    // the next settled sweep / timer, so silence is safe.
+    const sent = pi.sendMessage(
+      { customType: TICK_TYPE, content: message, display: true },
+      { triggerTurn: true, deliverAs: "followUp" },
+    );
+    if (sent && typeof (sent as Promise<void>).catch === "function") {
+      void (sent as Promise<void>).catch(() => {
         // silent — next event retries
       });
+    }
   }
 
   /** Publish structured domain events on the in-process bus (orch:*). */

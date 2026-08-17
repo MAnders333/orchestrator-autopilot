@@ -60,6 +60,29 @@ export function createPiBackend(pi: PiLike): SubagentBackend {
     });
   }
 
+  /**
+   * Resolve the child's steer-route control inbox — the mechanism the NATIVE
+   * subagent steer action uses. Workflow-mode detached runs nest it at
+   * <asyncDir>/control/workflow-foreground/<workflowId>/control (verified
+   * live: the worker publishes steer-capabilities there); plain runs use the
+   * flat <asyncDir>/control. Returns null when no route exists (run gone).
+   */
+  function steerRouteDir(asyncDir: string): string | null {
+    try {
+      const wfRoot = join(asyncDir, "control/workflow-foreground");
+      if (existsSync(wfRoot)) {
+        for (const id of readdirSync(wfRoot)) {
+          const nested = join(wfRoot, id, "control");
+          if (existsSync(join(nested, "steer-capabilities")) || existsSync(join(nested, "steer-targets"))) return nested;
+        }
+      }
+    } catch {
+      // unreadable — fall through to the flat dir
+    }
+    const flat = join(asyncDir, "control");
+    return existsSync(flat) ? flat : null;
+  }
+
   return {
     async spawn(task, opts) {
       const script = `return runs.run("main", ${JSON.stringify({
@@ -87,13 +110,14 @@ export function createPiBackend(pi: PiLike): SubagentBackend {
     async steer(runId, message, mode, ackTimeoutMs = 4000) {
       const asyncDir = this.asyncDirFor(runId);
       if (!asyncDir) throw new Error("run dir not found — it likely completed or died; stop + re-dispatch instead");
-      // 1. capability pre-check: the child pi publishes whether it can receive
-      //    steering (headless -p sessions report supported:false or nothing).
-      const controlDir = join(asyncDir, "control");
-      if (existsSync(join(controlDir, "steer-inbox-closed.json"))) {
-        throw new Error("run no longer accepts steering requests");
-      }
-      const capDir = join(controlDir, "steer-capabilities");
+      // The child's steer route: workflow-mode runs nest the control inbox at
+      // control/workflow-foreground/<workflowId>/control (the NATIVE subagent
+      // steer action's route) — the flat control dir is the plain-run fallback.
+      const routeDir = steerRouteDir(asyncDir);
+      if (!routeDir) throw new Error("run has no steer route — it likely completed or died; stop + re-dispatch instead");
+      // 1. capability pre-check: the child publishes whether it can receive
+      //    steering (headless children report supported:true — steering works).
+      const capDir = join(routeDir, "steer-capabilities");
       if (existsSync(capDir)) {
         for (const f of readdirSync(capDir).filter((n) => n.endsWith(".json"))) {
           let supported: boolean | undefined;
@@ -103,12 +127,19 @@ export function createPiBackend(pi: PiLike): SubagentBackend {
             continue; // unreadable capability file — fall through to the write
           }
           if (supported === false) {
-            throw new Error("the child Pi session does not support steering (headless / no sendUserMessage) — steer will NOT be delivered; stop + re-dispatch instead");
+            throw new Error("the child Pi session does not support steering (capability supported:false) — steer will NOT be delivered; stop + re-dispatch instead");
           }
         }
       }
-      const dir = join(controlDir, "steer-requests");
-      mkdirSync(dir, { recursive: true });
+      // 2. write the request to the child's STEP INBOX (steer-targets/<index>)
+      //    — the native mechanism (writeSteerRequestToExistingDir requires an
+      //    EXISTING dir: the child creates the inbox when its steering runtime
+      //    is ready; never mkdir here).
+      const index = "0";
+      const inbox = join(routeDir, "steer-targets", index);
+      if (!existsSync(inbox)) {
+        throw new Error("steer inbox not ready (steer-targets/0 missing) — the child has not initialized its steering runtime; retry shortly or stop + re-dispatch");
+      }
       const id = randomUUID();
       const request: Record<string, unknown> = {
         type: "steer",
@@ -119,18 +150,15 @@ export function createPiBackend(pi: PiLike): SubagentBackend {
         source: "queue_steer",
       };
       if (mode && mode !== "steer") request.mode = mode;
-      // match pi-subagents' writeSteerRequestToDir naming: <ts13>-<base64url id>.json
+      // match pi-subagents' steerRequestFileName: <ts13>-<base64url id>.json
       const name = `${String(request.ts as number).padStart(13, "0")}-${Buffer.from(id).toString("base64url")}.json`;
-      const p = join(dir, name);
-      const tmp = `${p}.tmp`;
-      writeFileSync(tmp, JSON.stringify(request), "utf8");
-      renameSync(tmp, p);
-      // 2. verify delivery: poll the child's steer-acks/<index>/ for our request
-      //    id. Delivered/queued acks confirm the child accepted it; a failed ack
-      //    or a silent timeout means the steer did NOT reach the child.
+      writeFileSync(join(inbox, name), JSON.stringify(request), "utf8");
+      // 3. verify delivery: poll the child's steer-acks/<index>/ at the ROUTE
+      //    dir for our request id. Delivered/queued = accepted; failed or
+      //    silent timeout = NOT delivered.
       const deadline = Date.now() + ackTimeoutMs;
       while (Date.now() < deadline) {
-        const ackDir = join(controlDir, "steer-acks", "0");
+        const ackDir = join(routeDir, "steer-acks", index);
         if (existsSync(ackDir)) {
           for (const f of readdirSync(ackDir).filter((n) => n.endsWith(".json"))) {
             let ack: { requestId?: string; state?: string; message?: string };
@@ -144,14 +172,13 @@ export function createPiBackend(pi: PiLike): SubagentBackend {
             if (ack.state === "failed") {
               throw new Error(`steer FAILED delivery: ${ack.message ?? "child rejected it"}`);
             }
-            // unknown ack state — keep polling (degrade gracefully, don't spurious-fail)
+            // unknown ack state — keep polling (degrade gracefully)
           }
         }
         await new Promise((r) => setTimeout(r, 100));
       }
       throw new Error(
-        "no steering acknowledgment within 4s — the child is NOT consuming its steering inbox " +
-        "(headless -p sessions do not support steering). The request was written but NOT delivered.",
+        `no steering acknowledgment within ${ackTimeoutMs}ms — the request was written but NOT delivered (the child did not consume its steer inbox; it may have completed). Stop + re-dispatch if it is gone.`,
       );
     },
 

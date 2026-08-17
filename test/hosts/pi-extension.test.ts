@@ -386,8 +386,9 @@ describe("pi adapter smoke", () => {
     // fake pi-subagents async dir for the run
     const scope = `pi-subagents-uid-${process.getuid?.() ?? ""}`;
     const fakeAsyncDir = join(tmpdir(), scope, "async-subagent-runs", "d67a18c6-c2be-4e7d-be25-5d07a2931601");
-    mkdirSync(join(fakeAsyncDir, "control", "steer-requests"), { recursive: true });
-    mkdirSync(join(fakeAsyncDir, "control", "steer-acks", "0"), { recursive: true });
+    const routeDir = join(fakeAsyncDir, "control", "workflow-foreground", "wf1", "control");
+    mkdirSync(join(routeDir, "steer-targets", "0"), { recursive: true });
+    mkdirSync(join(routeDir, "steer-acks", "0"), { recursive: true });
     writeFileSync(join(fakeAsyncDir, "status.json"), JSON.stringify({ runId: "d67a18c6-c2be-4e7d-be25-5d07a2931601", mode: "workflow" }));
     try {
       await runAutopilotCmd("on");
@@ -398,15 +399,15 @@ describe("pi adapter smoke", () => {
       // simulate the child's prompt-runtime: acknowledge as delivered
       const r = steer.execute("c4", { key: "G1", message: "switch to the DACH report" }, undefined, undefined, ctx);
       await new Promise((res) => setTimeout(res, 250));
-      const reqs = readdirSync(join(fakeAsyncDir, "control", "steer-requests"));
+      const reqs = readdirSync(join(routeDir, "steer-targets", "0"));
       expect(reqs.length).toBe(1);
-      const req = JSON.parse(readFileSync(join(fakeAsyncDir, "control", "steer-requests", reqs[0]), "utf8"));
+      const req = JSON.parse(readFileSync(join(routeDir, "steer-targets", "0", reqs[0]), "utf8"));
       expect(req.type).toBe("steer");
       expect(req.message).toBe("switch to the DACH report");
       expect(req.targetIndex).toBe(0);
       expect(req.source).toBe("queue_steer");
       writeFileSync(
-        join(fakeAsyncDir, "control", "steer-acks", "0", `${Buffer.from(req.id).toString("base64url")}.json`),
+        join(routeDir, "steer-acks", "0", `${Buffer.from(req.id).toString("base64url")}.json`),
         JSON.stringify({ type: "steer-ack", requestId: req.id, index: 0, ts: Date.now(), state: "delivered", message: "delivered" }),
       );
       const rr = await r;
@@ -419,9 +420,10 @@ describe("pi adapter smoke", () => {
   test("queue_steer REFUSES when the child publishes supported:false (headless worker)", async () => {
     const scope = `pi-subagents-uid-${process.getuid?.() ?? ""}`;
     const fakeAsyncDir = join(tmpdir(), scope, "async-subagent-runs", "d67a18c6-c2be-4e7d-be25-5d07a2931601");
-    mkdirSync(join(fakeAsyncDir, "control", "steer-capabilities"), { recursive: true });
+    const routeDir = join(fakeAsyncDir, "control", "workflow-foreground", "wf1", "control");
+    mkdirSync(join(routeDir, "steer-capabilities"), { recursive: true });
     writeFileSync(join(fakeAsyncDir, "status.json"), JSON.stringify({ runId: "d67a18c6-c2be-4e7d-be25-5d07a2931601", mode: "workflow" }));
-    writeFileSync(join(fakeAsyncDir, "control", "steer-capabilities", "0.json"), JSON.stringify({ type: "steer-capability", protocolVersion: 1, index: 0, pid: 1, readyAt: Date.now(), supported: false }));
+    writeFileSync(join(routeDir, "steer-capabilities", "0.json"), JSON.stringify({ type: "steer-capability", protocolVersion: 1, index: 0, pid: 1, readyAt: Date.now(), supported: false }));
     try {
       await runAutopilotCmd("on");
       const store0 = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
@@ -439,8 +441,9 @@ describe("pi adapter smoke", () => {
   test("queue_steer reports the child's explicit rejection (ack state failed)", async () => {
     const scope = `pi-subagents-uid-${process.getuid?.() ?? ""}`;
     const fakeAsyncDir = join(tmpdir(), scope, "async-subagent-runs", "d67a18c6-c2be-4e7d-be25-5d07a2931601");
-    mkdirSync(join(fakeAsyncDir, "control", "steer-requests"), { recursive: true });
-    mkdirSync(join(fakeAsyncDir, "control", "steer-acks", "0"), { recursive: true });
+    const routeDir = join(fakeAsyncDir, "control", "workflow-foreground", "wf1", "control");
+    mkdirSync(join(routeDir, "steer-targets", "0"), { recursive: true });
+    mkdirSync(join(routeDir, "steer-acks", "0"), { recursive: true });
     writeFileSync(join(fakeAsyncDir, "status.json"), JSON.stringify({ runId: "d67a18c6-c2be-4e7d-be25-5d07a2931601", mode: "workflow" }));
     try {
       await runAutopilotCmd("on");
@@ -450,10 +453,10 @@ describe("pi adapter smoke", () => {
       const steer = pi._tools()["queue_steer"];
       const r = steer.execute("c4", { key: "G1", message: "switch" }, undefined, undefined, ctx);
       await new Promise((res) => setTimeout(res, 200));
-      const reqs = readdirSync(join(fakeAsyncDir, "control", "steer-requests"));
-      const req = JSON.parse(readFileSync(join(fakeAsyncDir, "control", "steer-requests", reqs[0]), "utf8"));
+      const reqs = readdirSync(join(routeDir, "steer-targets", "0"));
+      const req = JSON.parse(readFileSync(join(routeDir, "steer-targets", "0", reqs[0]), "utf8"));
       writeFileSync(
-        join(fakeAsyncDir, "control", "steer-acks", "0", `${Buffer.from(req.id).toString("base64url")}.json`),
+        join(routeDir, "steer-acks", "0", `${Buffer.from(req.id).toString("base64url")}.json`),
         JSON.stringify({ type: "steer-ack", requestId: req.id, index: 0, ts: Date.now(), state: "failed", message: "already has an active steer" }),
       );
       const rr = await r;
@@ -467,7 +470,9 @@ describe("pi adapter smoke", () => {
   test("queue_steer reports silent no-ack (headless child) instead of claiming delivery", async () => {
     const scope = `pi-subagents-uid-${process.getuid?.() ?? ""}`;
     const fakeAsyncDir = join(tmpdir(), scope, "async-subagent-runs", "d67a18c6-c2be-4e7d-be25-5d07a2931601");
-    mkdirSync(join(fakeAsyncDir, "control", "steer-requests"), { recursive: true });
+    const routeDir = join(fakeAsyncDir, "control", "workflow-foreground", "wf1", "control");
+    mkdirSync(join(routeDir, "steer-targets", "0"), { recursive: true });
+    mkdirSync(join(routeDir, "steer-acks", "0"), { recursive: true });
     writeFileSync(join(fakeAsyncDir, "status.json"), JSON.stringify({ runId: "d67a18c6-c2be-4e7d-be25-5d07a2931601", mode: "workflow" }));
     try {
       await runAutopilotCmd("on");
