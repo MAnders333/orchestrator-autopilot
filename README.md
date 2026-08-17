@@ -25,10 +25,10 @@ src/
 │   ├── install.ts        ← agent registry + per-backend projection, version-stamped
 │   ├── reviewer/         ← orchestrator-reviewer (Verdict: PASS/FAIL gate, read-only)
 │   └── worker/           ← worker (worktree isolation, commit-early, full tools)
-└── hosts/                ← the tool adapters (loaded by pi / opencode)
+└── hosts/                ← one file per host (logic + tool adapter together)
     ├── pi-extension.ts   ← pi extension: tools + ticks + lifecycle events
-    ├── opencode-framework.ts ← opencode host framework (completion wiring, sweep)
-    └── opencode-plugin.ts← opencode plugin: queue tools via the tool hook
+    └── opencode-plugin.ts← opencode plugin: host logic (completion, sweep)
+                            + the tool()/event() adapter + tick delivery
 ```
 
 ## How the hosts wire it
