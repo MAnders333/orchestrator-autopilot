@@ -1,0 +1,16 @@
+# gitleaks config for orchestrator-autopilot. Auto-discovered by the global
+# pre-commit hook's gitleaks layer (repo-root gitleaks.toml).
+#
+# The test suite uses synthetic fixture values (queue item keys like
+# A9-TAGS-SURFACE-REDO, run ids) that trip the generic-api-key entropy rule —
+# they are fixtures, not secrets. Allowlist ONLY the test path; production src/
+# keeps the full default rule set.
+
+title = "orchestrator-autopilot"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "test fixtures: queue keys + synthetic run ids"
+paths = ["test/"]
