@@ -8,7 +8,8 @@
 // the orchestrator (the tool CALLER), per the framework's trigger-only rule.
 
 import type { SubagentBackend } from "../backends/types.ts";
-import type { Autopilot, AutopilotConfig } from "../core.ts";
+import type { Autopilot } from "../core.ts";
+import type { AutopilotConfigFile } from "../config.ts";
 import { loadStore, saveStore, newStore, addItem, updateItem, queryItems, queueLengths, type QueueStore } from "../queue-store.ts";
 
 export interface ToolResult {
@@ -22,7 +23,7 @@ export interface QueueOpsCtx {
   backend: SubagentBackend;
   storeOrNew(): QueueStore;
   autopilot(): Autopilot;
-  cfg(): AutopilotConfig;
+  cfg(): Required<AutopilotConfigFile>;
   /** Domain-event sink (orch:reviewer-dispatched, ...) — host-local bus. */
   emit(events: Array<{ name: string; data?: Record<string, unknown> }>): void;
   /** Fail-closed repo check for dispatch cwd (git toplevel + dirty tree). */

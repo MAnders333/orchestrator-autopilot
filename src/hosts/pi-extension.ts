@@ -18,8 +18,8 @@
 // migration input (imported into queue.json on first activation).
 //
 // All subagent-runtime specifics (RPC spawn/fleet, control-channel steer, run
-// dir resolution) live behind the subagent-backend seam
-// (lib/orchestrator-autopilot/src/subagent-backend.ts) so the queue tools depend
+// dir resolution) live behind the backend seam
+// (src/backends/) so the queue tools depend
 // on an interface, not on pi-subagents internals.
 //
 // Behavior gated per-session (autopilot.sessions.json), interactive TUI only:
@@ -45,9 +45,10 @@ const LIB_DIR = (() => {
   return join(__dirname, "..");
 })();
 // jiti resolves .ts imports at runtime; createRequire keeps this ESM-safe.
-const { Autopilot, loadAutopilotConfig, saveAutopilotConfig, readSessionAutopilotState, writeSessionAutopilotState, isAutopilotOn, appendTelemetry, parseStateDirFromCommand } = require(`${LIB_DIR}/core.ts`) as typeof import("./core.ts");
+const { Autopilot } = require(`${LIB_DIR}/core.ts`) as typeof import("./core.ts");
+const { loadAutopilotConfig, saveAutopilotConfig, readSessionAutopilotState, writeSessionAutopilotState, isAutopilotOn, appendTelemetry, parseStateDirFromCommand } = require(`${LIB_DIR}/config.ts`) as typeof import("./config.ts");
 const { loadStore, saveStore, newStore, queryItems, addItem, updateItem, queueLengths, migrateFromMd } = require(`${LIB_DIR}/queue-store.ts`) as typeof import("./queue-store.ts");
-const { createSubagentBackend, defaultRunsDir } = require(`${LIB_DIR}/subagent-backend.ts`) as typeof import("./subagent-backend.ts");
+const { createSubagentBackend, defaultRunsDir } = require(`${LIB_DIR}/backends/index.ts`) as typeof import("./backends/index.ts");
 const { queueList, queueAdd, queueUpdate, queueDispatch, queueReview, queueSteer, repoCheck } = require(`${LIB_DIR}/tools/queue-ops.ts`) as typeof import("./tools/queue-ops.ts");
 const { installPiReviewer } = require(`${LIB_DIR}/agents/install.ts`) as typeof import("./agents/install.ts");
 const { existsSync, readFileSync, renameSync } = require("node:fs") as typeof import("node:fs");
@@ -115,7 +116,7 @@ export default function (pi: ExtensionAPI) {
     return loadStore(stateDir) ?? newStore();
   }
 
-  /** Subagent-runtime seam — see lib/orchestrator-autopilot/src/subagent-backend.ts.
+  /** Subagent-runtime seam — see src/backends/.
    *  Backend selected by AUTOPILOT_BACKEND env (pi default; "opencode" for the
    *  port). The extension's pi lifecycle events are pi-only — the opencode
    *  plugin wires its own completion signal to the same queue tools. */

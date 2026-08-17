@@ -19,7 +19,8 @@
 
 import { createOpenCodeBackend, defaultRunsDir } from "../backends/opencode.ts";
 import type { OpenCodeRunRecord } from "../backends/types.ts";
-import { Autopilot, loadAutopilotConfig, type AutopilotConfig } from "../core.ts";
+import { Autopilot } from "../core.ts";
+import { loadAutopilotConfig, type AutopilotConfig } from "../config.ts";
 import { loadStore, newStore } from "../queue-store.ts";
 import { readFileSync } from "node:fs";
 import {

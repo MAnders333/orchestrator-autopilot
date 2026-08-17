@@ -77,7 +77,10 @@ export function createOpenCodeBackend(opts: OpenCodeBackendOptions): SubagentBac
         cwd: spawnOpts.cwd ?? process.cwd(),
         detached: true, // survives the orchestrator process (pi-style detached runs)
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env },
+        // The framework DEPENDS on opencode's async-subagent feature (workers
+        // use task(background=true)) — ensure the env flag is set on every
+        // spawned run rather than relying on the launcher wrapper exporting it.
+        env: { ...process.env, OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS: "1" },
       });
       child.stdout.pipe(out);
       child.stderr.pipe(err);

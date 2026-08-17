@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodS
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
-import { createOpenCodeFramework, readLatestText } from "../../src/hosts/opencode.ts";
+import { createOpenCodeFramework, readLatestText } from "../../src/hosts/opencode-framework.ts";
 import { newStore, addItem, updateItem, saveStore as _save } from "../../src/queue-store.ts";
 import { loadStore } from "../../src/queue-store.ts";
 

@@ -5,8 +5,8 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Autopilot } from "../src/core.ts";
 import {
-  Autopilot,
   loadAutopilotConfig,
   saveAutopilotConfig,
   writeSentinel,
@@ -16,7 +16,7 @@ import {
   parseStateDirFromCommand,
   readSessionAutopilotState,
   writeSessionAutopilotState,
-} from "../src/core.ts";
+} from "../src/config.ts";
 import {
   newStore,
   addItem,

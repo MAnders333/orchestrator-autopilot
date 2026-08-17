@@ -1,4 +1,4 @@
-// smoke.test.ts — loads the REAL pi adapter (src/hosts/pi-extension.ts) with
+// pi-extension.test.ts — loads the REAL pi adapter (src/hosts/pi-extension.ts) with
 // a mocked ExtensionAPI and verifies the
 // wiring: migration, queue tools (add/update/dispatch via RPC), event-driven
 // completion flips, per-session gating, and child-process inertness.

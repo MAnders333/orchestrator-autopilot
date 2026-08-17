@@ -1,5 +1,5 @@
 // orchestrator-autopilot.ts — the opencode PLUGIN (thin adapter). The framework
-// logic lives in lib/orchestrator-autopilot (src/hosts/opencode.ts — the
+// logic lives in this project (src/hosts/opencode-framework.ts — the
 // host-agnostic framework, shared queue ops, completion wiring, reviewer
 // projection); THIS file maps it to the opencode plugin API:
 //
@@ -17,7 +17,7 @@
 import { tool, type Plugin } from "@opencode-ai/plugin";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { createOpenCodeFramework, type ArgSpec } from "./opencode.ts";
+import { createOpenCodeFramework, type ArgSpec } from "./opencode-framework.ts";
 
 function resolveStateDir(): string {
   if (process.env.AUTOPILOT_STATE_DIR) return process.env.AUTOPILOT_STATE_DIR;

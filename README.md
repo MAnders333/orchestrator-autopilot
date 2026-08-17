@@ -15,8 +15,7 @@ src/
 ├── core.ts               ← Autopilot lifecycle: ticks (dispatch|intake|review),
 │                            completion attribution, verdict routing, review cap
 ├── queue-store.ts        ← programmatic queue (queue.json), validated transitions
-├── subagent-backend.ts   ← the portability seam (re-export)
-├── backends/             ← runtime executor adapters
+├── backends/             ← runtime executor adapters (the portability seam)
 │   ├── types.ts          ← SubagentBackend contract
 │   ├── pi.ts             ← pi-subagents RPC spawn + file control channel
 │   └── opencode.ts       ← detached `oc run` children (completion = process exit)
@@ -28,7 +27,7 @@ src/
 │   └── worker/           ← worker (worktree isolation, commit-early, full tools)
 └── hosts/                ← the tool adapters (loaded by pi / opencode)
     ├── pi-extension.ts   ← pi extension: tools + ticks + lifecycle events
-    ├── opencode.ts       ← opencode host framework (completion wiring, sweep)
+    ├── opencode-framework.ts ← opencode host framework (completion wiring, sweep)
     └── opencode-plugin.ts← opencode plugin: queue tools via the tool hook
 ```
 

@@ -16,6 +16,7 @@ const FAKE_OC = `#!/bin/bash
 #   FAIL        exit 1 after emitting
 #   HOLD        never exit (stuck-run simulation)
 if [ "\${1}" != "run" ]; then exit 1; fi
+echo "BG=$OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS" >&2
 shift
 TASK="\$*"
 if [[ "\$TASK" == *HOLD* ]]; then sleep 60; fi
@@ -150,6 +151,15 @@ describe("opencode backend (hermetic, fake oc)", () => {
     }, 3000);
     expect(ok).toBe(true);
     await waitFor(() => readStatus(f, runId)?.status !== "running");
+    rmSync(f.runsDir, { recursive: true, force: true });
+  });
+  test("spawn forces OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=1 on the child (framework dependency)", async () => {
+    const f = setup();
+    const b = createOpenCodeBackend({ runsDir: f.runsDir, ocBin: f.ocBin });
+    const runId = await b.spawn("env check", { cwd: tmpdir() });
+    await waitFor(() => readStatus(f, runId)?.status !== "running");
+    const stderr = readFileSync(join(f.runsDir, runId, "stderr.log"), "utf8");
+    expect(stderr).toContain("BG=1");
     rmSync(f.runsDir, { recursive: true, force: true });
   });
 });
