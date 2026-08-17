@@ -1,5 +1,5 @@
-// smoke.test.ts — loads the REAL pi adapter (~/.pi/shared/extensions/
-// orchestrator-autopilot.ts) with a mocked ExtensionAPI and verifies the
+// smoke.test.ts — loads the REAL pi adapter (src/hosts/pi-extension.ts) with
+// a mocked ExtensionAPI and verifies the
 // wiring: migration, queue tools (add/update/dispatch via RPC), event-driven
 // completion flips, per-session gating, and child-process inertness.
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
@@ -104,7 +104,7 @@ describe("pi adapter smoke", () => {
     process.env.AUTOPILOT_STATE_DIR = dir;
     pi = mockPi();
     ctx = { ui: { notify: () => {} }, cwd: dir };
-    mod = await import(process.env.AUTOPILOT_EXTENSION_PATH ?? "file://" + join(import.meta.dir, "../src/hosts/pi-extension.ts"));
+    mod = await import(process.env.AUTOPILOT_EXTENSION_PATH ?? "file://" + join(import.meta.dir, "../../src/hosts/pi-extension.ts"));
     mod.default(pi);
     startSession("tui");
   });

@@ -1,6 +1,6 @@
 // orchestrator-autopilot.ts — pi adapter for the orchestrator autopilot.
 //
-// Canonical shared core: ~/.config/agents/lib/orchestrator-autopilot/
+// The framework core lives in THIS project (src/).
 // (imported at runtime via jiti, same pattern as corrections.ts).
 //
 // The extension owns the PROGRAMMATIC QUEUE (queue.json) and the FLEET ledger
@@ -48,7 +48,7 @@ const LIB_DIR = (() => {
 const { Autopilot, loadAutopilotConfig, saveAutopilotConfig, readSessionAutopilotState, writeSessionAutopilotState, isAutopilotOn, appendTelemetry, parseStateDirFromCommand } = require(`${LIB_DIR}/core.ts`) as typeof import("./core.ts");
 const { loadStore, saveStore, newStore, queryItems, addItem, updateItem, queueLengths, migrateFromMd } = require(`${LIB_DIR}/queue-store.ts`) as typeof import("./queue-store.ts");
 const { createSubagentBackend, defaultRunsDir } = require(`${LIB_DIR}/subagent-backend.ts`) as typeof import("./subagent-backend.ts");
-const { queueList, queueAdd, queueUpdate, queueDispatch, queueReview, queueSteer, repoCheck } = require(`${LIB_DIR}/framework/queue-ops.ts`) as typeof import("./framework/queue-ops.ts");
+const { queueList, queueAdd, queueUpdate, queueDispatch, queueReview, queueSteer, repoCheck } = require(`${LIB_DIR}/tools/queue-ops.ts`) as typeof import("./tools/queue-ops.ts");
 const { installPiReviewer } = require(`${LIB_DIR}/agents/install.ts`) as typeof import("./agents/install.ts");
 const { existsSync, readFileSync, renameSync } = require("node:fs") as typeof import("node:fs");
 
@@ -337,9 +337,9 @@ export default function (pi: ExtensionAPI) {
   // -- queue tools -----------------------------------------------------------
 
   // Shared queue ops — the six tools are host-agnostic implementations in
-  // lib/orchestrator-autopilot/src/framework/queue-ops.ts (the opencode plugin
+  // lib/orchestrator-autopilot/src/tools/queue-ops.ts (the opencode plugin
   // registers the SAME handlers). This ctx binds them to the pi host.
-  const opsFor = (ctx?: { cwd?: string }): import("../../.config/agents/lib/orchestrator-autopilot/src/framework/queue-ops.ts").QueueOpsCtx => ({
+  const opsFor = (ctx?: { cwd?: string }): import("./tools/queue-ops.ts").QueueOpsCtx => ({
     stateDir,
     backend,
     storeOrNew,

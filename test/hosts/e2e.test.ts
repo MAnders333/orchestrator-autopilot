@@ -64,7 +64,7 @@ describe.skipIf(!ENABLED)("orchestrator-autopilot E2E (real pi)", () => {
     const out = await new Promise<string>((resolve, reject) => {
       const child = spawn(
         PI_BIN,
-        ["-e", process.env.AUTOPILOT_EXTENSION_PATH ?? join(import.meta.dir, "../src/hosts/pi-extension.ts"), "-p", prompt],
+        ["-e", process.env.AUTOPILOT_EXTENSION_PATH ?? join(import.meta.dir, "../../src/hosts/pi-extension.ts"), "-p", prompt],
         {
           cwd: sessionCwd,
           env: {

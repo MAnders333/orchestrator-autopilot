@@ -1,4 +1,4 @@
-// framework/queue-ops.ts — the SIX queue tools as host-agnostic operations.
+// tools/queue-ops.ts — the SIX queue tools as host-agnostic operations.
 // Both hosts (the pi extension and the opencode plugin) register these tools;
 // the logic lives here ONCE (single authoritative implementation — no dead
 // copies between hosts). Hosts adapt the result shape: pi wraps

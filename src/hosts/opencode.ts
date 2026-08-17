@@ -5,7 +5,7 @@
 //
 // What this wires:
 //   - the opencode backend (detached oc run children) behind the SubagentBackend
-//   - the SIX queue tools (shared implementations in framework/queue-ops.ts)
+//   - the SIX queue tools (shared implementations in tools/queue-ops.ts)
 //   - completion: backend onComplete → core.handleAsyncComplete → queue flips
 //     (active→reviewing/failed, reviewer verdict routing) — the opencode
 //     analog of the pi extension's subagent:async-complete handler
@@ -25,7 +25,7 @@ import { readFileSync } from "node:fs";
 import {
   queueList, queueAdd, queueUpdate, queueDispatch, queueReview, queueSteer, repoCheck,
   type QueueOpsCtx, type ToolResult,
-} from "../framework/queue-ops.ts";
+} from "../tools/queue-ops.ts";
 import { installOpenCodeReviewer, installOpenCodeWorker } from "../agents/install.ts";
 
 export interface ArgSpec {
