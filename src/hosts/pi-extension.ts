@@ -46,7 +46,7 @@ const LIB_DIR = (() => {
 })();
 // jiti resolves .ts imports at runtime; createRequire keeps this ESM-safe.
 const { Autopilot } = require(`${LIB_DIR}/core.ts`) as typeof import("./core.ts");
-const { loadAutopilotConfig, saveAutopilotConfig, readSessionAutopilotState, writeSessionAutopilotState, isAutopilotOn, appendTelemetry, parseStateDirFromCommand, autopilotModeMessage } = require(`${LIB_DIR}/config.ts`) as typeof import("./config.ts");
+const { loadAutopilotConfig, saveAutopilotConfig, readSessionAutopilotState, writeSessionAutopilotState, isAutopilotOn, appendTelemetry, parseStateDirFromCommand, autopilotModeMessage, resolveStateDir } = require(`${LIB_DIR}/config.ts`) as typeof import("./config.ts");
 const { loadStore, saveStore, newStore, queryItems, addItem, updateItem, queueLengths, migrateFromMd } = require(`${LIB_DIR}/queue-store.ts`) as typeof import("./queue-store.ts");
 const { createSubagentBackend, defaultRunsDir } = require(`${LIB_DIR}/backends/index.ts`) as typeof import("./backends/index.ts");
 const { queueList, queueAdd, queueUpdate, queueDispatch, queueReview, queueSteer, repoCheck } = require(`${LIB_DIR}/tools/queue-ops.ts`) as typeof import("./tools/queue-ops.ts");
@@ -69,26 +69,16 @@ try {
 
 const TICK_TYPE = "orchestrator-autopilot";
 
-function resolveStateDir(): string | null {
-  if (process.env.AUTOPILOT_STATE_DIR) return process.env.AUTOPILOT_STATE_DIR;
-  const agentDir = process.env.PI_CODING_AGENT_DIR ?? "";
-  if (agentDir) {
-    const promptFile = join(agentDir, "prompts/orchestrate.md");
-    if (existsSync(promptFile)) {
-      const parsed = parseStateDirFromCommand(promptFile);
-      if (parsed) return parsed;
-    }
-    return agentDir.includes("personal")
-      ? join(homedir(), ".local/state/orchestrator-personal")
-      : join(homedir(), ".local/state/orchestrator");
-  }
-  return null; // unknown mode → fail closed
-}
+let stateDir = resolveStateDir(
+  process.env.PI_CODING_AGENT_DIR ? join(process.env.PI_CODING_AGENT_DIR, "prompts/orchestrate.md") : undefined,
+);
 
 export default function (pi: ExtensionAPI) {
-  const stateDir = resolveStateDir();
-  // Fail closed: without a resolvable mode, stay fully inert.
-  if (!stateDir) return;
+  // Re-resolve per load (the test harness re-imports + mutates env between
+  // cases; the real runtime loads the extension once). Production: called once.
+  stateDir = resolveStateDir(
+    process.env.PI_CODING_AGENT_DIR ? join(process.env.PI_CODING_AGENT_DIR, "prompts/orchestrate.md") : undefined,
+  );
 
   let autopilot: InstanceType<typeof Autopilot> | null = null;
   let agentBusy = false;          // orchestrator (main agent) mid-turn

@@ -592,13 +592,14 @@ describe("pi adapter smoke", () => {
     expect(pi._sent.filter((s) => s.kind === "message").length).toBe(0);
   });
 
-  test("fail-closed: unknown mode (no env) → extension stays inert", async () => {
+  test("no env → the documented default state dir (the shared resolver never fails closed)", async () => {
     delete process.env.AUTOPILOT_STATE_DIR;
     delete process.env.PI_CODING_AGENT_DIR;
+    mod = await import("file://" + join(import.meta.dir, "../../src/hosts/pi-extension.ts") + "?fresh=" + Date.now());
     const pi2 = mockPi();
     mod.default(pi2);
-    expect(pi2._commands()["autopilot"]).toBeUndefined();
-    expect(Object.keys(pi2._handlers).length).toBe(0);
+    // the extension loads against the framework's documented default
+    expect(pi2._commands()["autopilot"]).toBeDefined();
   });
 
   test("state dir resolved authoritatively from the projected orchestrate.md", async () => {

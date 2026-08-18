@@ -5,6 +5,7 @@
 
 import { existsSync, readFileSync, writeFileSync, renameSync, appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 
 export interface AutopilotConfig {
   stateDir: string;
@@ -175,6 +176,29 @@ export function autopilotModeMessage(mode: "on" | "off"): string {
   return mode === "on"
     ? "Autopilot is now ON — the harness is active: it auto-dispatches approved items (scope + cwd + low/med risk), auto-dispatches reviews on completion, auto-re-dispatches on review FAIL, routes verdicts (PASS to done), and sends [orch-tick] state messages. You keep: approval, high-risk checkpoints, review overrides, flag_for_review, steering. Do not manually queue_dispatch/queue_review what the harness handles."
     : "Autopilot is now OFF — the harness is idle: no auto flips, no verdict routing, no auto-dispatch/review, no ticks. YOU must do everything manually: reconcile completions (queue_update active to reviewing/failed), route reviews (queue_review), read verdicts and move items (queue_update), dispatch (queue_dispatch), and flag (flag_for_review). The queue tools remain available. Re-enable by running the autopilot on command.";
+}
+
+/** Resolve the state dir ONCE, in the framework — no per-host copies (the
+ *  hosts' versions already diverged: opencode skipped the command's STATE_DIR
+ *  line and leaned on the pi-runtime var). Chain: AUTOPILOT_STATE_DIR env →
+ *  the host's orchestrate command STATE_DIR line (when a commandFile is given)
+ *  → the PI_CODING_AGENT_DIR mode name → the documented default. */
+export function resolveStateDir(commandFile?: string): string {
+  if (process.env.AUTOPILOT_STATE_DIR) return process.env.AUTOPILOT_STATE_DIR;
+  if (commandFile) {
+    try {
+      if (existsSync(commandFile)) {
+        const parsed = parseStateDirFromCommand(commandFile);
+        if (parsed) return parsed;
+      }
+    } catch {
+      // fall through to the name-based + default resolution
+    }
+  }
+  const agentDir = process.env.PI_CODING_AGENT_DIR ?? "";
+  return agentDir.includes("personal")
+    ? join(homedir(), ".local/state/orchestrator-personal")
+    : join(homedir(), ".local/state/orchestrator");
 }
 
 export function autopilotConfigPath(stateDir: string): string {

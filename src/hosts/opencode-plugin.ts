@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import { createOpenCodeBackend, defaultRunsDir } from "../backends/opencode.ts";
-import { isAutopilotOn, autopilotModeMessage } from "../config.ts";
+import { isAutopilotOn, autopilotModeMessage, resolveStateDir } from "../config.ts";
 import type { OpenCodeRunRecord } from "../backends/types.ts";
 import { Autopilot } from "../core.ts";
 import { loadAutopilotConfig, type AutopilotConfig } from "../config.ts";
@@ -270,13 +270,7 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
   };
 }
 
-function resolveStateDir(): string {
-  if (process.env.AUTOPILOT_STATE_DIR) return process.env.AUTOPILOT_STATE_DIR;
-  const agentDir = process.env.PI_CODING_AGENT_DIR ?? "";
-  return agentDir.includes("personal")
-    ? join(homedir(), ".local/state/orchestrator-personal")
-    : join(homedir(), ".local/state/orchestrator");
-}
+
 
 function argsSchema(specs: ArgSpec[]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -335,7 +329,7 @@ export function createTickDelivery(client: PromptClient, log: (line: string) => 
 export const OrchestratorAutopilot: Plugin = async (ctx) => {
   const delivery = createTickDelivery(ctx.client as unknown as PromptClient);
   const fw = createOpenCodeFramework({
-    stateDir: resolveStateDir(),
+    stateDir: resolveStateDir(process.env.OPENCODE_CONFIG_DIR ? join(process.env.OPENCODE_CONFIG_DIR, "command/orchestrate.md") : undefined),
     delivery,
   });
 
