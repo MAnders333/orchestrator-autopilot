@@ -363,3 +363,59 @@ describe("core config + sentinel", () => {
     expect(tick?.facts.slotsFree).toBe(4); // G1 freed, capacity 4
   });
 });
+
+describe("intake suppression (proposals pending)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-intake-"));
+  const make = () => new Autopilot({ stateDir: dir });
+  const writeStore = (items: QueueItem[]) => {
+    const store = newStore();
+    for (const it of items) addItem(store, it);
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(store));
+  };
+
+  test("intake fires with 0 proposals + low ready", () => {
+    const f = make();
+    writeStore([item({ key: "A1", status: "approved", ready: false, title: "a1" })]);
+    const t = f.sweep("timer", 1_000_000).tick;
+    expect(t?.reason).toBe("intake");
+  });
+
+  test("intake SUPPRESSED while proposals are pending (the user deliberates — the user's scenario)", () => {
+    const f = make();
+    // the previous intake proposed items; the approved buffer is still low
+    writeStore([
+      item({ key: "P1", status: "proposal", ready: false, title: "p1" }),
+      item({ key: "P2", status: "proposal", ready: false, title: "p2" }),
+    ]);
+    // even a hash change (adding more proposals) must NOT re-fire intake
+    const t1 = f.sweep("timer", 1_000_000).tick;
+    expect(t1).toBeNull();
+    const t2 = f.sweep("settled", 1_100_000).tick;
+    expect(t2).toBeNull();
+  });
+
+  test("intake re-arms when the proposals resolve (rejected → pending 0)", () => {
+    const f = make();
+    writeStore([
+      item({ key: "P1", status: "proposal", ready: false, title: "p1" }),
+      item({ key: "A1", status: "approved", ready: false, title: "a1" }),
+    ]);
+    expect(f.sweep("timer", 1_000_000).tick).toBeNull(); // suppressed
+    // the user rejects P1 → no proposals pending → intake re-arms
+    const store = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+    store.items["P1"].status = "rejected";
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(store));
+    const t = f.sweep("timer", 2_000_000).tick;
+    expect(t?.reason).toBe("intake");
+  });
+
+  test("dispatch is NOT suppressed by pending proposals (execution proceeds)", () => {
+    const f = make();
+    writeStore([
+      item({ key: "P1", status: "proposal", ready: false, title: "p1" }),
+      item({ key: "A1", status: "approved", ready: true, title: "a1" }),
+    ]);
+    const t = f.sweep("timer", 1_000_000).tick;
+    expect(t?.reason).toBe("dispatch"); // ready 1 + slot free → dispatch, not intake
+  });
+});

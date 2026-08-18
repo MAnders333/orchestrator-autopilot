@@ -49,6 +49,8 @@ interface QueueState {
   approved: Array<{ key: string; title: string; ready: boolean; line: string; lineIndex: number }>;
   occupied: number;
   ready: number;
+  /** Items awaiting the user's approval decision (status: proposal). */
+  proposalsPending: number;
   ok: boolean;
 }
 
@@ -357,6 +359,12 @@ export class Autopilot {
     // Queue drained below the buffer → intake tick (refill the approval buffer).
     // The ≤2-line rule does NOT apply here — intake ticks demand a REAL scan.
     if (ready < this.cfg.queueLowThreshold) {
+      // INTAKE SUPPRESSION: while proposals from the previous intake are still
+      // pending (the user is reading/thinking/discussing them), do NOT re-nudge
+      // — ADDING proposals changes the queue hash, which would otherwise re-fire
+      // this tick while the approved buffer is still low. The intake re-arms
+      // when the proposals resolve (approved/rejected) or the queue changes.
+      if (state.proposalsPending > 0) return null;
       this.rememberTick(state, now);
       return {
         reason: "intake",
@@ -418,7 +426,8 @@ export function storeToSnapshot(store: QueueStore): QueueState {
   const reviewingWithReviewer = items.filter((i) => i.status === "reviewing" && i.reviewerRunId);
   const occupied = active.length + reviewingWithReviewer.length;
   const ready = approved.filter((a) => a.ready).length;
-  return { active, approved, occupied, ready, ok: true };
+  const proposalsPending = items.filter((i) => i.status === "proposal").length;
+  return { active, approved, occupied, ready, proposalsPending, ok: true };
 }
 
 function stateHash(state: QueueState): string {
@@ -430,11 +439,11 @@ function stateHash(state: QueueState): string {
     .map((a) => `${a.key}:${a.ready}`)
     .sort()
     .join("|");
-  return `${state.occupied}|${state.ready}|${active}|${approved}`;
+  return `${state.occupied}|${state.ready}|${state.proposalsPending}|${active}|${approved}`;
 }
 
 function emptyState(): QueueState {
-  return { active: [], approved: [], occupied: 0, ready: 0, ok: false };
+  return { active: [], approved: [], occupied: 0, ready: 0, proposalsPending: 0, ok: false };
 }
 
 function empty(): AutopilotResult {
