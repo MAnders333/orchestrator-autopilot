@@ -66,18 +66,28 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
   // The auto-actions opt-out: env (AUTOPILOT_AUTO_DISPATCH=0) or the option.
   const autoDispatchOn = opts.autoDispatch ?? process.env.AUTOPILOT_AUTO_DISPATCH !== "0";
   const cfg = () => loadAutopilotConfig(opts.stateDir);
-  // ONE consolidated informational tick per pass — the orchestrator learns
-  // what the harness DID (dispatched / reviewed / re-dispatched), not one
-  // message per action. The router's gate + cooldown still apply.
+  // QUEUED harness info: auto-actions (dispatched / reviewed / re-dispatched)
+  // accumulate into ONE consolidated tick, flushed at the next natural boundary
+  // (the agent settles / the timer) instead of interrupting mid-turn. If the
+  // router drops the flush (busy / cooldown), the parts are requeued — never
+  // lost. The orchestrator learns what the harness DID without any gate bypass.
+  let pendingHarness: string[] = [];
+  let pendingFleet: number | undefined;
   const harnessTick = (parts: string[], fleetTotalActive?: number): void => {
-    if (!parts.length) return;
-    const fleet = fleetTotalActive !== undefined ? ` — fleet ${fleetTotalActive}` : "";
-    // priority: the harness event tick is a state update the orchestrator must
-    // see — it bypasses the cooldown (still gated on interactive/loaded/busy).
-    router.send(
-      `[orch-tick: harness] auto: ${parts.join("; ")}${fleet}. Your calls: approvals, high-risk checkpoints, review overrides, flag_for_review. Not a user request; respond ≤2 lines.`,
-      { priority: true },
+    pendingHarness.push(...parts);
+    if (fleetTotalActive !== undefined) pendingFleet = fleetTotalActive;
+    flushHarness();
+  };
+  const flushHarness = (): void => {
+    if (!pendingHarness.length) return;
+    const parts = pendingHarness;
+    pendingHarness = [];
+    const fleet = pendingFleet !== undefined ? ` — fleet ${pendingFleet}` : "";
+    const sent = router.send(
+      `[orch-tick: harness] auto: ${parts.join("; ")}.${fleet} Your calls: approvals, high-risk checkpoints, review overrides, flag_for_review. Not a user request; respond ≤2 lines.`,
+      { bypassCooldown: true },
     );
+    if (!sent) pendingHarness = [...parts, ...pendingHarness]; // requeue — flush at the next settle/timer
   };
   const sweep = async (source: "settled" | "activate" | "timer" | "worker-done"): Promise<void> => {
     if (!enabled()) return;
@@ -171,9 +181,13 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       }
     },
     onSettled() {
+      // flush the queued harness info FIRST (the agent just settled — the
+      // busy gate is clear), then the sweep's nudges (cooldown may drop those).
+      flushHarness();
       void sweep("settled");
     },
     onTimer() {
+      flushHarness(); // backstop if the agent never settles
       try {
         void sweep("timer");
       } catch {
@@ -181,6 +195,7 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       }
     },
     onActivate() {
+      flushHarness();
       void sweep("activate");
     },
     start() {

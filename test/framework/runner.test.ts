@@ -78,7 +78,7 @@ describe("framework runner (shared tick machinery)", () => {
     });
   });
 
-  test("REGRESSION: priority harness ticks DELIVER while busy (the orchestrator must see auto-actions)", async () => {
+  test("REGRESSION: harness info is QUEUED while busy, flushed on settle (no mid-turn injection)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "orch-runner-busy-"));
     writeFileSync(join(dir, "queue.json"), JSON.stringify(newStore()));
     const spawns: Array<{ task: string }> = [];
@@ -89,11 +89,12 @@ describe("framework runner (shared tick machinery)", () => {
       asyncDirFor: () => null,
     };
     const delivered: string[] = [];
+    const state = { busy: true }; // the agent is mid-turn — the exact moment completions land
     const runner = createFrameworkRunner({
       stateDir: dir,
       autopilot: new Autopilot({ stateDir: dir }),
       backend: recBackend,
-      host: { interactive: () => true, loaded: () => true, busy: () => true, compacting: () => false }, // BUSY mid-turn
+      host: { interactive: () => true, loaded: () => true, busy: () => state.busy, compacting: () => false },
       deliver: (m) => delivered.push(m),
       enabled: () => true,
       sweepIntervalMs: 0,
@@ -106,8 +107,13 @@ describe("framework runner (shared tick machinery)", () => {
     await new Promise((r) => setTimeout(r, 120));
 
     expect(spawns.length).toBe(1); // the auto-review STILL happens while busy
+    expect(delivered.some((m) => m.includes("[orch-tick: harness]"))).toBe(false); // NOT injected mid-turn
+
+    state.busy = false; // the turn ends
+    runner.onSettled();  // the queue flushes
+    await new Promise((r) => setTimeout(r, 80));
     const harness = delivered.find((m) => m.includes("[orch-tick: harness]"));
-    expect(harness).toBeTruthy(); // and the harness tick DELIVERS despite busy
+    expect(harness).toBeTruthy(); // delivered at the settle boundary, not lost
   });
 
   test("the gate: busy / not-interactive / not-loaded / compacting all block delivery", async () => {
@@ -276,6 +282,8 @@ describe("auto-review (C) through the runner", () => {
     const after = load({ dir } as Fixture);
     expect(after.items["C1"].status).toBe("reviewing");
     expect(after.items["C1"].reviewerRunId).toBe("rev-1");
+    runner.onSettled(); // the queued harness info flushes at the settle boundary
+    await new Promise((r) => setTimeout(r, 80));
     const harness = delivered.find((m) => m.includes("[orch-tick: harness]"));
     expect(harness).toBeTruthy();
     expect(harness).toContain("reviewer for C1");

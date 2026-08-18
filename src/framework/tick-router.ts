@@ -26,19 +26,18 @@ export function createTickRouter(
   host: TickHostState,
   deliver: (message: string) => void,
   cooldownMs = 1500,
-): { send(message: string, opts?: { priority?: boolean }): boolean } {
+): { send(message: string, opts?: { bypassCooldown?: boolean }): boolean } {
   let lastSentAt = 0;
   return {
     /** Apply the shared gate; deliver when it passes. Returns true if delivered.
-     *  priority (harness event ticks) bypasses the busy + cooldown gates — the
-     *  followUp/promptAsync delivery queues them to the turn end safely, and
-     *  the orchestrator must see what the harness DID even mid-turn (it
-     *  otherwise only discovers auto-dispatch/auto-review by polling the
-     *  fleet). compacting stays gated (a mid-compaction injection aborts it). */
-    send(message: string, opts?: { priority?: boolean }): boolean {
-      if (!host.interactive() || !host.loaded() || host.compacting()) return false;
+     *  The harness tick is QUEUED by the runner (held + flushed on settle) —
+     *  the busy/compacting gates stay intact (never mid-turn). The flush may
+     *  bypassCooldown: at the settle boundary the harness STATE update must
+     *  not be suppressed by a nudge that just fired. */
+    send(message: string, opts?: { bypassCooldown?: boolean }): boolean {
+      if (!host.interactive() || !host.loaded() || host.busy() || host.compacting()) return false;
       const now = Date.now();
-      if (!opts?.priority && (host.busy() || now - lastSentAt < cooldownMs)) return false;
+      if (!opts?.bypassCooldown && now - lastSentAt < cooldownMs) return false;
       lastSentAt = now;
       deliver(message);
       return true;
