@@ -19,7 +19,10 @@ the machinery is shared.
      for detached worker runs).
 3. Load the orchestrator command in your orchestrator session (a slash command
    that tells the agent to run the queue loop — the `docs/queue-model.md`
-   describes what the framework enforces vs. what the agent decides).
+   describes what the framework enforces vs. what the agent decides). That
+   command is also where you define YOUR intake sources: the framework nudges
+   a scan when the approved buffer is low, but it does not know where your
+   work comes from (trackers, meetings, diffs, goals — your call).
 4. The package installs its own agents (reviewer + worker) into the host's
    agent dirs at activation — version-stamped, idempotent.
 5. Point the orchestrator at the queue store (`AUTOPILOT_STATE_DIR` or the

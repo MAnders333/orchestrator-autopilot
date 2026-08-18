@@ -51,6 +51,14 @@ review loop starts with the human's findings in the re-dispatch task).
     queue hash but must NOT re-fire the tick. The intake re-arms when the
     proposals resolve (approved/rejected) or the queue changes.
   - The 10-min timer (sweep) also respects the suppression.
+  - **Sources are consumer-defined.** The framework owns the NUDGE (buffer low
+    → scan) and the QUEUE (proposal → approval); it does not know where work
+    comes from. Your orchestrator command defines the intake procedure: which
+    ticket trackers, meeting/action-item sources, file diffs, and goals to
+    scan, in what order, and how to scope a proposal (title + scope + cwd +
+    risk). The contract: scan → propose (`queue_add`, status=proposal) → the
+    user approves → the buffer refills. A framework config file for sources
+    would be over-engineering — intake is agent judgment + consumer tooling.
 - **review** — items stuck in `reviewing` (a reviewer completed) → "read the
   verdict, route each item".
 - **blocked** items never trigger ticks (they are waiting by design).

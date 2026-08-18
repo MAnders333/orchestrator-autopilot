@@ -34,6 +34,10 @@ only your own backend's notes.
   the relevant context, the success criteria, and the source/universe/repo the
   worker must use. Ambiguity about the data source is a blocker — never a
   worker guess.
+- **Intake sources are YOURS**: the intake tick only nudges a scan when the
+  approved buffer is low (and suppresses while proposals pend). WHERE the
+  orchestrator scans — ticket trackers, meeting action items, file diffs,
+  goals — is defined in your orchestrator command, not the framework.
 - **Commit-early is HARD**: never accumulate > ~15 min uncommitted; the first
   commit lands before any long-running test or fix cycle.
 - **Worker authority**: the worker executes its task; it must NOT modify
