@@ -2,7 +2,7 @@
 # pre-commit hook's gitleaks layer (repo-root gitleaks.toml).
 #
 # The test suite uses synthetic fixture values (queue item keys like
-# A9-TAGS-SURFACE-REDO, run ids) that trip the generic-api-key entropy rule —
+# run ids in the fixtures) that trip the generic-api-key entropy rule —
 # they are fixtures, not secrets. Allowlist ONLY the test path; production src/
 # keeps the full default rule set.
 

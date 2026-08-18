@@ -1,7 +1,6 @@
 {
   "name": "orchestrator-autopilot",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Deterministic orchestrator autopilot — keeps a subagent worker fleet at capacity. Host-agnostic framework: one queue store + lifecycle + tools, thin adapters for pi (extension) and opencode (plugin).",
   "scripts": {

@@ -35,7 +35,7 @@ describe.skipIf(!ENABLED)("orchestrator-autopilot E2E (real pi)", () => {
     stateDir = mkdtempSync(join(tmpdir(), "orch-e2e-state-"));
     // scratch CLEAN git repo (worktree isolation pre-flight + worker worktree)
     repo = mkdtempSync(join(tmpdir(), "orch-e2e-repo-"));
-    // session cwd is a NON-repo parent dir — the exact ~/work → mi-mono-repo
+    // session cwd is a NON-repo parent dir — the parent → target-repo
     // mismatch that broke every dispatch. queue_dispatch must target the repo
     // via its cwd param (which flows into runs.run) for the spawn to succeed.
     sessionCwd = mkdtempSync(join(tmpdir(), "orch-e2e-session-"));

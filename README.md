@@ -4,9 +4,27 @@ Deterministic orchestrator framework: keeps a subagent worker fleet at capacity,
 routes queue items through a review lifecycle, and ships its own agents —
 **one implementation, multiple hosts** (pi + opencode).
 
-Moved out of the dotfiles config into its own project: this is SOFTWARE, not
-configuration. The dotfiles repo holds only the wiring (pi settings, the
-opencode plugin array, env exports) that points the tools at this project.
+The framework is host-agnostic software: a programmatic queue store, a
+deterministic lifecycle (ticks, completion attribution, verdict routing), and
+thin per-host adapters. Hosts only wire events, gate state, and deliver ticks —
+the machinery is shared.
+
+## Getting started
+
+1. Clone + install: `bun install` (Bun required; the test suite is hermetic).
+2. Wire the host you use:
+   - **pi**: add `src/hosts/pi-extension.ts` to your settings `extensions` array.
+   - **opencode**: add `src/hosts/opencode-plugin.ts` to your `opencode.jsonc`
+     `plugin` array (requires `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=1`
+     for detached worker runs).
+3. Load the orchestrator command in your orchestrator session (a slash command
+   that tells the agent to run the queue loop — the `docs/queue-model.md`
+   describes what the framework enforces vs. what the agent decides).
+4. The package installs its own agents (reviewer + worker) into the host's
+   agent dirs at activation — version-stamped, idempotent.
+5. Point the orchestrator at the queue store (`AUTOPILOT_STATE_DIR` or the
+   defaults below) and add the `skills/orchestrator-operations/` skill to your
+   agent's skills config for the operating rules.
 
 ## Architecture
 
@@ -62,7 +80,7 @@ Canonical defaults; local setups override via env:
 |---|---|
 | `AUTOPILOT_STATE_DIR` | queue store location (default `~/.local/state/orchestrator[-personal]`) |
 | `AUTOPILOT_LIB_DIR` | override lib resolution (published layouts) |
-| `AUTOPILOT_OPENCODE_BIN` | opencode launcher (default `opencode`; the `oc` wrapper sets it) |
+| `AUTOPILOT_OPENCODE_BIN` | opencode launcher (default `opencode`; a local wrapper can pin its own binary) |
 | `AUTOPILOT_BACKEND` | `pi` (default) \| `opencode` |
 | `AUTOPILOT_OPENCODE_RUNS_DIR` | opencode run records (default `~/.local/state/orchestrator-opencode/runs`) |
 | `AUTOPILOT_*` (config) | `AUTOPILOT_MAX_SLOTS`, `AUTOPILOT_QUEUE_LOW`, `AUTOPILOT_WORKER_AGENTS`, `AUTOPILOT_REVIEWER_AGENTS`, `AUTOPILOT_REVIEW_CAP`, `AUTOPILOT_SWEEP_INTERVAL_MS` |
@@ -70,6 +88,7 @@ Canonical defaults; local setups override via env:
 ## Tests
 
 ```
-bun test                      # 89 hermetic (fake oc backend, fake pi API)
+bun test                      # 120 hermetic (fake oc backend, fake pi API)
 OPENCODE_E2E=1 bun test       # + real `oc run` e2e
+PI_E2E=1 bun test             # + real pi-subagents e2e
 ```

@@ -253,8 +253,8 @@ export default function (pi: ExtensionAPI) {
    *  created in the TARGET repo, which must be a clean git checkout. Mirrors
    *  pi-subagents' own check (status --porcelain, untracked included,
    *  .pi/subagents excluded) so we never pass a dispatch the launcher would
-   *  then reject. A session cwd that is NOT a repo (e.g. ~/work with workers
-   *  targeting ~/work/mi-mono-repo) is a clear error, not a silent skip — that
+   *  then reject. A session cwd that is NOT a repo (e.g. a parent dir with workers
+   *  targeting a repo the session is not inside) is a clear error, not a silent skip — that
    *  skip class caused every dispatch to fail at spawn with the cryptic
    *  'worktree isolation requires a git repository'. */
 
@@ -401,7 +401,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       key: Type.String({ description: "queue key of an approved item" }),
       task: Type.String({ description: "the scoped worker prompt (self-contained; KEY: <key> as first line is recommended)" }),
-      cwd: Type.Optional(Type.String({ description: "repo the worker operates on (worktree isolation runs THERE). REQUIRED when the session cwd is not the target repo, e.g. dispatching from ~/work into ~/work/mi-mono-repo." })),
+      cwd: Type.Optional(Type.String({ description: "repo the worker operates on (worktree isolation runs THERE). REQUIRED when the session cwd is not the target repo (e.g. dispatching from a parent dir into the repo the worker must touch)." })),
       timeoutMs: Type.Optional(Type.Number()),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

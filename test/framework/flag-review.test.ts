@@ -14,7 +14,7 @@ describe("flagForReview", () => {
         summary: "Implemented the flag-review targets.",
         risk: "medium",
         blast_radius: "The tool schema changed — callers must pass review_targets.",
-        review_targets: ["src/framework/flag-review.ts", "src/hosts/pi-extension.ts:440-460", "https://github.com/MAnders333/orchestrator-autopilot/pull/1"],
+        review_targets: ["src/framework/flag-review.ts", "src/hosts/pi-extension.ts:440-460", "https://example.com/orchestrator/pull/1"],
         self_reviewed: true,
         review_method: "reviewer-subagent",
         action_needed: "Review the diff + merge the PR.",
