@@ -40,7 +40,7 @@ describe("dialect builders", () => {
   test("pi file: frontmatter + markers + body + name", () => {
     const f = buildPiFile(body);
     expect(f).toContain(`name: ${REVIEWER_AGENT_NAME}`);
-    expect(f).toContain("tools: read, grep, find, ls");
+    expect(f).toContain("tools: read, grep, find, ls, bash");
     expect(f).toContain("systemPromptMode: replace");
     expect(f).toContain("orchestrator-reviewer: framework-managed canonical body");
     expect(f).toContain("<!-- /canonical-prompt -->");

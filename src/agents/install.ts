@@ -48,7 +48,10 @@ const AGENTS: Record<string, AgentDef> = {
     name: "orchestrator-reviewer",
     dir: "reviewer",
     description: REVIEWER_DESC,
-    piTools: "read, grep, find, ls",
+    // bash for READ-ONLY git inspection (git show/log/cat-file on commits that
+    // exist only as objects — the read tool cannot decompress loose objects).
+    // The canonical's read-only rule constrains it to non-mutating commands.
+    piTools: "read, grep, find, ls, bash",
     opencodeMode: "subagent",
     opencodePermission: `  "*": deny
   read:
@@ -61,10 +64,15 @@ const AGENTS: Record<string, AgentDef> = {
   glob: allow
   grep: allow
   bash:
-    "git status": allow
+    "git status*": allow
     "git diff*": allow
     "git log*": allow
     "git show*": allow
+    "git cat-file*": allow
+    "git ls-tree*": allow
+    "git reflog*": allow
+    "git branch*": allow
+    "git rev-parse*": allow
     "*": deny`,
     projectToPi: true,
   },
