@@ -349,10 +349,10 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
         switch (action) {
           case "on":
             writeSessionAutopilotState(stateDir, sid ?? "", "on");
-            return `Autopilot ON for session ${(sid ?? "?").slice(0, 8)} — ticks + capacity nudges enabled. (Turn it on in the session that should orchestrate.)`;
+            return `Autopilot ON for session ${(sid ?? "?").slice(0, 8)} — the harness is active: it auto-dispatches approved items (scope + cwd + low/med risk), auto-dispatches reviews on completion, auto-re-dispatches on review FAIL, routes verdicts (PASS to done), and ticks you. You keep: approval, high-risk checkpoints, review overrides, flag_for_review, steering. Do not manually queue_dispatch/queue_review what the harness handles.`;
           case "off":
             writeSessionAutopilotState(stateDir, sid ?? "", "off");
-            return `Autopilot OFF for session ${(sid ?? "?").slice(0, 8)} — ticks disabled; queue tools remain available.`;
+            return `Autopilot OFF for session ${(sid ?? "?").slice(0, 8)} — the harness is idle: no auto flips, no verdict routing, no auto-dispatch/review, no ticks. You must do everything manually: reconcile completions (queue_update active to reviewing/failed), route reviews (queue_review), read verdicts and move items (queue_update), dispatch (queue_dispatch), flag (flag_for_review). Queue tools remain available.`;
           case "status": {
             const st = isAutopilotOn(stateDir, sid);
             const cfg = loadAutopilotConfig(stateDir);

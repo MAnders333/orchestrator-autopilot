@@ -198,6 +198,20 @@ describe("pi adapter smoke", () => {
     expect(err.stack).toBeTruthy();
   });
 
+  test("the /autopilot toggle informs the ORCHESTRATOR of the mode (on → harness active; off → manual)", async () => {
+    startSession("tui");
+    await runAutopilotCmd("on");
+    const onMsg = pi._sent.find((m) => m.kind === "user" && String(m.args?.[0] ?? "").includes("Autopilot is now ON"));
+    expect(onMsg).toBeTruthy();
+    expect(String(onMsg.args[0])).toContain("auto-dispatches reviews on completion");
+    pi._sent.length = 0;
+    await runAutopilotCmd("off");
+    const offMsg = pi._sent.find((m) => m.kind === "user" && String(m.args?.[0] ?? "").includes("Autopilot is now OFF"));
+    expect(offMsg).toBeTruthy();
+    expect(String(offMsg.args[0])).toContain("do everything manually");
+    expect(String(offMsg.args[0])).toContain("queue_review");
+  });
+
   test("REGRESSION: a sync sendUserMessage throw mid-command cannot fail /autopilot (injection retries)", async () => {
     startSession("tui");
     const throwSend = { on: false };

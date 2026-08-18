@@ -208,6 +208,25 @@ export default function (pi: ExtensionAPI) {
     enabled: () => isAutopilotOn(stateDir, sessionId),
     sweepIntervalMs: loadAutopilotConfig(stateDir).sweepIntervalMs,
   });
+  /** Inform the ORCHESTRATOR (not the user) when the autopilot toggle changes —
+   *  the harness's behavior flips entirely between the two modes and the agent
+   *  must know which one it is running under. Best-effort: a busy-agent sync
+   *  throw must not fail the command (followUp + guard, same as injection). */
+  function informOrchestrator(mode: "on" | "off") {
+    const msg =
+      mode === "on"
+        ? "Autopilot is now ON in this session — the harness auto-dispatches approved items (scope + cwd + low/med risk), auto-dispatches reviews on completion, auto-re-dispatches on review FAIL, routes verdicts (PASS to done), and sends [orch-tick] state messages. You keep: approval, high-risk checkpoints, review overrides, flag_for_review, steering. Continue your loop with the harness active; do not manually queue_dispatch/queue_review what the harness handles."
+        : "Autopilot is now OFF in this session — the harness is idle: no auto flips, no verdict routing, no auto-dispatch/review, no ticks. YOU must do everything manually: reconcile completions (queue_update active to reviewing/failed), route reviews (queue_review), read verdicts and move items (queue_update), dispatch (queue_dispatch), and flag (flag_for_review). The queue tools remain available. Re-enable by running the autopilot on command.";
+    try {
+      const sent = pi.sendUserMessage(msg, { deliverAs: "followUp" });
+      if (sent && typeof (sent as Promise<void>).catch === "function") {
+        void (sent as Promise<void>).catch(() => {});
+      }
+    } catch {
+      // best-effort — the command itself already succeeded
+    }
+  }
+
   /** Publish structured domain events on the in-process bus (orch:*). */
   function emitDomain(events: Array<{ name: string; data: Record<string, unknown> }>) {
     for (const e of events) {
@@ -482,10 +501,12 @@ export default function (pi: ExtensionAPI) {
             writeSessionAutopilotState(stateDir, sessionId, "on");
             maybeInjectOrchestrate();
             runner.onActivate(); // nudge a pre-existing capacity gap immediately
+            informOrchestrator("on");
             ctx.ui.notify(`Autopilot ON (session ${sessionId.slice(0, 8)}) — orchestrator mode loaded, capacity ticks enabled`, "info");
             break;
           case "off":
             writeSessionAutopilotState(stateDir, sessionId, "off");
+            informOrchestrator("off");
             ctx.ui.notify(`Autopilot OFF (session ${sessionId.slice(0, 8)}) — ticks and queue tools remain available, ticks disabled`, "info");
             break;
           case "status": {
