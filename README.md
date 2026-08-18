@@ -84,7 +84,6 @@ Canonical defaults; local setups override via env:
 | `AUTOPILOT_STATE_DIR` | queue store location (default `~/.local/state/orchestrator[-personal]`) |
 | `AUTOPILOT_LIB_DIR` | override lib resolution (published layouts) |
 | `AUTOPILOT_OPENCODE_BIN` | opencode launcher (default `opencode`; a local wrapper can pin its own binary) |
-| `AUTOPILOT_BACKEND` | `pi` (default) \| `opencode` |
 | `AUTOPILOT_OPENCODE_RUNS_DIR` | opencode run records (default `~/.local/state/orchestrator-opencode/runs`) |
 | `AUTOPILOT_*` (config) | `AUTOPILOT_MAX_SLOTS`, `AUTOPILOT_QUEUE_LOW`, `AUTOPILOT_WORKER_AGENTS`, `AUTOPILOT_REVIEWER_AGENTS`, `AUTOPILOT_REVIEW_CAP`, `AUTOPILOT_SWEEP_INTERVAL_MS` |
 

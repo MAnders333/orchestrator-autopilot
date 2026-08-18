@@ -33,8 +33,8 @@ interface AgentDef {
   opencodeMode: "all" | "subagent" | "primary";
   /** opencode permission block, YAML body ALREADY indented two spaces. */
   opencodePermission: string;
-  /** Project to pi (~/.pi/shared/agents + mode symlinks)? Reviewer yes; the
-   *  worker is pi-subagents' builtin — no collision there, no projection. */
+  /** Project to pi (the runtime's agent scope)? Reviewer yes; the worker is
+   *  pi-subagents' builtin — no collision there, no projection. */
   projectToPi: boolean;
 }
 
@@ -182,11 +182,11 @@ export const reviewerPaths = {
 };
 
 export interface InstallOptions {
-  /** e.g. ~/.pi/shared/agents — real file + symlinks from mode dirs (dotfiles
-   *  convention). When absent, writes a real file into modeAgentsDirs[0]. */
+  /** Caller-chosen real-file location (+ symlinks from modeAgentsDirs) for a
+   *  shared+mode-symlink layout. When absent, the pi-standard user-agent scope
+   *  is used (no symlinks — a real file per mode dir). */
   sharedAgentsDir?: string;
-  /** e.g. [~/.pi/work/agents, ~/.pi/personal/agents]. Default: both pi mode
-   *  agent dirs that exist. */
+  /** Explicit mode agent dirs. Default: the pi runtime's own agent scope. */
   modeAgentsDirs?: string[];
   force?: boolean;
   log?: (line: string) => void;
@@ -228,10 +228,14 @@ export function installPiReviewer(opts: InstallOptions = {}): InstallResult {
     const version = canonicalVersion(body);
     const content = buildPiFile(body, def.name);
 
-    const shared = opts.sharedAgentsDir ?? join(homedir(), ".pi/shared/agents");
+    // pi OWNS where its agents live — we resolve, we don't invent. The pi
+    // runtime's own mode swap (PI_CODING_AGENT_DIR, set by the launcher) or
+    // the documented default user-agent scope (~/.pi/agent/agents) decides.
+    // Callers with a different layout pass explicit dirs.
+    const shared = opts.sharedAgentsDir ?? null; // shared+mode-symlink is a caller convention, not a default
     const modeDirs = opts.modeAgentsDirs !== undefined
       ? opts.modeAgentsDirs
-      : ["work", "personal"].map((m) => join(homedir(), `.pi/${m}/agents`)).filter((d) => existsSync(d));
+      : [join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi/agent"), "agents")];
 
     const log = opts.log ?? (() => {});
     const isCurrent = (file: string): boolean =>
@@ -254,7 +258,7 @@ export function installPiReviewer(opts: InstallOptions = {}): InstallResult {
     }
 
     const modeDir = modeDirs[0];
-    if (!modeDir) return { installed: false, skipped: true, path: "" };
+    if (!modeDir) return { installed: false, skipped: true, path: "" }; // no target — the host decides
     const file = join(modeDir, `${def.name}.md`);
     if (isCurrent(file)) return { installed: false, skipped: true, path: file };
     writeFile(content, file, def.name, log);
@@ -301,9 +305,9 @@ export function installOpenCodeWorker(opts: { agentsDir?: string; force?: boolea
  *  dirs so a live install on this machine doesn't mask results). */
 export function piReviewerCurrent(sharedAgentsDir?: string, modeAgentsDirs?: string[]): boolean {
   const name = AGENTS.reviewer.name;
-  const shared = sharedAgentsDir ?? join(homedir(), ".pi/shared/agents");
-  const modes = modeAgentsDirs ?? ["work", "personal"].map((m) => join(homedir(), `.pi/${m}/agents`));
-  const candidates = [join(shared, `${name}.md`), ...modes.map((d) => join(d, `${name}.md`))];
+  const shared = sharedAgentsDir ?? ""; // absent → check only the mode scopes
+  const modes = modeAgentsDirs ?? [join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi/agent"), "agents")];
+  const candidates = [...(shared ? [join(shared, `${name}.md`)] : []), ...modes.map((d) => join(d, `${name}.md`))];
   for (const candidate of candidates) {
     try {
       if (existsSync(candidate) && canonicalVersion(readFileSync(candidate, "utf8")) >= canonicalVersion(canonicalBody("reviewer"))) return true;

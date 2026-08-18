@@ -1,7 +1,7 @@
 // backends/index.ts — the subagent-backend factory. The queue tools and the
-// extension depend on the SubagentBackend interface (backends/types.ts); this
-// module picks the ACTIVE backend (pi today, opencode when the port lands) —
-// the portability seam of the framework.
+// hosts depend on the SubagentBackend interface (backends/types.ts); each
+// host DEDUCES its backend from the runtime it runs in (pi extension → pi,
+// opencode plugin → opencode) — the portability seam of the framework.
 
 import type { SubagentBackend, PiLike, OpenCodeBackendOptions } from "./types.ts";
 import { createPiBackend } from "./pi.ts";

@@ -118,13 +118,11 @@ export default function (pi: ExtensionAPI) {
     return loadStore(stateDir) ?? newStore();
   }
 
-  /** Subagent-runtime seam — see src/backends/.
-   *  Backend selected by AUTOPILOT_BACKEND env (pi default; "opencode" for the
-   *  port). The extension's pi lifecycle events are pi-only — the opencode
-   *  plugin wires its own completion signal to the same queue tools. */
-  const backend = process.env.AUTOPILOT_BACKEND === "opencode"
-    ? createSubagentBackend({ kind: "opencode", opencode: { runsDir: process.env.AUTOPILOT_OPENCODE_RUNS_DIR || defaultRunsDir() } })
-    : createSubagentBackend({ kind: "pi", pi: pi as never });
+  /** Subagent-runtime seam — see src/backends/. The backend is DEDUCED from
+   *  the runtime, never env: this extension IS pi, so workers spawn on the
+   *  pi-subagents backend (the opencode plugin wires its own opencode
+   *  backend + completion signal to the same queue tools). */
+  const backend = createSubagentBackend({ kind: "pi", pi: pi as never });
 
   /** One-time migration: import a legacy state.md into the programmatic store. */
   function ensureMigrated() {
