@@ -50,6 +50,7 @@ const { loadAutopilotConfig, saveAutopilotConfig, readSessionAutopilotState, wri
 const { loadStore, saveStore, newStore, queryItems, addItem, updateItem, queueLengths, migrateFromMd } = require(`${LIB_DIR}/queue-store.ts`) as typeof import("./queue-store.ts");
 const { createSubagentBackend, defaultRunsDir } = require(`${LIB_DIR}/backends/index.ts`) as typeof import("./backends/index.ts");
 const { queueList, queueAdd, queueUpdate, queueDispatch, queueReview, queueSteer, repoCheck } = require(`${LIB_DIR}/tools/queue-ops.ts`) as typeof import("./tools/queue-ops.ts");
+const { createFrameworkRunner } = require(`${LIB_DIR}/framework/runner.ts`) as typeof import("./framework/runner.ts");
 const { installPiReviewer } = require(`${LIB_DIR}/agents/install.ts`) as typeof import("./agents/install.ts");
 const { existsSync, readFileSync, renameSync } = require("node:fs") as typeof import("node:fs");
 
@@ -165,35 +166,37 @@ export default function (pi: ExtensionAPI) {
 
   let lastTickSentAt = 0;
   const TICK_COOLDOWN_MS = 1500;
-  function sendTick(message: string) {
-    // NEVER inject while the agent is processing: the runtime rejects
-    // triggerTurn mid-turn ("Agent is already processing a prompt. Use steer()
-    // or followUp()...") and the exception surfaces as an extension error in
-    // the TUI. The settled sweep + 10-min timer are the re-triggers, so a
-    // dropped tick is always re-attempted.
-    if (!interactive || !orchestratorLoaded || agentBusy || compacting) return;
-    // Dedupe rapid double-fire (e.g. the delayed /autopilot activate sweep
-    // landing right after the settled sweep's tick — the live bug).
-    const now = Date.now();
-    if (now - lastTickSentAt < TICK_COOLDOWN_MS) return;
-    lastTickSentAt = now;
-    // pi.sendMessage is declared `: void` (not a Promise) — the runtime
-    // sometimes returns a thenable and sometimes undefined. Never assume:
-    // guard the catch so an undefined return cannot crash pi (the live bug:
-    // uncaughtException 'Cannot read properties of undefined (reading catch)'
-    // in runSweep → sendTick). A rejection or dropped tick is re-attempted by
-    // the next settled sweep / timer, so silence is safe.
-    const sent = pi.sendMessage(
-      { customType: TICK_TYPE, content: message, display: true },
-      { triggerTurn: true, deliverAs: "followUp" },
-    );
-    if (sent && typeof (sent as Promise<void>).catch === "function") {
-      void (sent as Promise<void>).catch(() => {
-        // silent — next event retries
-      });
-    }
-  }
-
+  // The shared tick machinery (gate + cooldown + delivery) lives in
+  // src/framework/runner.ts — identical in both hosts. The pi host supplies
+  // its gate state + the sendMessage delivery; runSweep/onCompletion etc.
+  // wire the triggers.
+  const runner = createFrameworkRunner({
+    autopilot: ensureAutopilot(),
+    backend,
+    host: {
+      interactive: () => interactive,
+      loaded: () => orchestratorLoaded,
+      busy: () => agentBusy,
+      compacting: () => compacting,
+    },
+    deliver: (message) => {
+      // pi.sendMessage is declared `: void` (not a Promise) — the runtime
+      // sometimes returns a thenable and sometimes undefined. Never assume:
+      // guard the catch so an undefined return cannot crash pi.
+      const sent = pi.sendMessage(
+        { customType: TICK_TYPE, content: message, display: true },
+        { triggerTurn: true, deliverAs: "followUp" },
+      );
+      if (sent && typeof (sent as Promise<void>).catch === "function") {
+        void (sent as Promise<void>).catch(() => {
+          // silent — next event retries
+        });
+      }
+    },
+    emit: (e) => emitDomain(e as never),
+    enabled: () => isAutopilotOn(stateDir, sessionId),
+    sweepIntervalMs: loadAutopilotConfig(stateDir).sweepIntervalMs,
+  });
   /** Publish structured domain events on the in-process bus (orch:*). */
   function emitDomain(events: Array<{ name: string; data: Record<string, unknown> }>) {
     for (const e of events) {
@@ -242,22 +245,6 @@ export default function (pi: ExtensionAPI) {
    *  skip class caused every dispatch to fail at spawn with the cryptic
    *  'worktree isolation requires a git repository'. */
 
-  /** Shared sweep path: settled turns, activation, and the periodic timer. */
-  async function runSweep(source: "settled" | "activate" | "timer") {
-    if (!interactive || !sessionId) return;
-    if (!isAutopilotOn(stateDir, sessionId)) return;
-    maybeInjectOrchestrate();
-    if (!orchestratorLoaded) return;
-    const fleet = await backend.fleetStatus(); // reconcile cross-check (never occupancy)
-    const result = ensureAutopilot().sweep(source, Date.now(), fleet ? { totalActive: fleet.totalActive } : undefined);
-    if (result.tick) sendTick(result.tick.message);
-    // timer/activation safety net: stuck reviewing items get a review nudge
-    else if (source === "timer" || source === "activate") {
-      const t = ensureAutopilot().reviewTick();
-      if (t) sendTick(t.message);
-    }
-  }
-
   // -- lifecycle -------------------------------------------------------------
 
   pi.on("agent_start", () => {
@@ -266,7 +253,7 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on("agent_settled", () => {
     agentBusy = false;
-    runSweep("settled");
+    runner.onSettled(); // queue may have changed while the orchestrator worked
   });
   // A tick delivered DURING auto-compaction aborts it ('Turn prefix
   // summarization failed: This operation was aborted') — the runtime can't
@@ -284,23 +271,11 @@ export default function (pi: ExtensionAPI) {
   });
 
   // -- periodic capacity sweep (deterministic safety net) --------------------
-
-  let sweepTimer: ReturnType<typeof setInterval> | null = null;
-  const sweepIntervalMs = loadAutopilotConfig(stateDir).sweepIntervalMs;
-  if (sweepIntervalMs > 0) {
-    sweepTimer = setInterval(() => {
-      try {
-        runSweep("timer");
-      } catch {
-        // silent — never let the timer break pi
-      }
-    }, sweepIntervalMs);
-  }
+  // The timer is owned by the shared runner (identical machinery in both
+  // hosts); pi gates it via enabled() = autopilot-on for this session.
+  runner.start();
   pi.on("session_shutdown", () => {
-    if (sweepTimer) {
-      clearInterval(sweepTimer);
-      sweepTimer = null;
-    }
+    runner.stop();
   });
 
   // -- subagent lifecycle (in-process bus, emitted by pi-subagents) ----------
@@ -317,27 +292,9 @@ export default function (pi: ExtensionAPI) {
   pi.events.on("subagent:async-complete", (payload: unknown) => {
     if (!interactive || !isAutopilotOn(stateDir, sessionId)) return;
     maybeInjectOrchestrate();
-    // Attribute the completion to the store item (active→reviewing/failed),
-    // then sweep. The tick's FLEET number is store/ledger truth; the fleet RPC
-    // totalActive is a reconcile cross-check surfaced in the tick facts.
-    const result = ensureAutopilot().handleAsyncComplete((payload ?? {}) as Record<string, unknown>);
-    emitDomain(result.domainEvents);
-    if (result.tick) sendTick(result.tick.message);
-    if (result.freedSlot) {
-      // ANY run completing frees a slot (workers AND reviewers — capacity
-      // counts all session subagents) → dispatch sweep with the authoritative
-      // fleet count.
-      void (async () => {
-        const fleet = await backend.fleetStatus();
-        const sweep = ensureAutopilot().sweep("worker-done", Date.now(), fleet ? { totalActive: fleet.totalActive } : undefined);
-        if (sweep.tick) sendTick(sweep.tick.message);
-      })();
-    }
-    if (result.reviewerCompleted) {
-      // a reviewer finished → also nudge the orchestrator to route the verdict
-      const t = ensureAutopilot().reviewTick();
-      if (t) sendTick(t.message);
-    }
+    // Attribute the completion (active→reviewing/failed), route the verdict,
+    // and sweep — the shared runner owns this logic (identical in opencode).
+    runner.onCompletion((payload ?? {}) as never);
   });
 
   // -- queue tools -----------------------------------------------------------
@@ -492,7 +449,7 @@ export default function (pi: ExtensionAPI) {
             ensureMigrated(); // import legacy state.md into queue.json once
             writeSessionAutopilotState(stateDir, sessionId, "on");
             maybeInjectOrchestrate();
-            runSweep("activate"); // nudge a pre-existing capacity gap immediately
+            runner.onActivate(); // nudge a pre-existing capacity gap immediately
             ctx.ui.notify(`Autopilot ON (session ${sessionId.slice(0, 8)}) — orchestrator mode loaded, capacity ticks enabled`, "info");
             break;
           case "off":

@@ -37,7 +37,7 @@ describe("opencode tick delivery (hermetic)", () => {
     d.deliver("intake: approved buffer low");
     expect(calls.length).toBe(1);
     expect(calls[0].path.id).toBe("ses_orchestrator123");
-    expect(calls[0].body.parts[0]).toEqual({ type: "text", text: "[orch-tick] intake: approved buffer low" });
+    expect(calls[0].body.parts[0]).toEqual({ type: "text", text: "intake: approved buffer low" }); // the message already carries the [orch-tick: reason] prefix from core
   });
 
   test("setTarget ignores empty/undefined session ids", () => {

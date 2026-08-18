@@ -12,6 +12,7 @@ import {
   type QueueOpsCtx, type ToolResult,
 } from "../tools/queue-ops.ts";
 import { installOpenCodeReviewer, installOpenCodeWorker } from "../agents/install.ts";
+import { createFrameworkRunner } from "../framework/runner.ts";
 
 // opencode-plugin.ts — the opencode HOST (one file per host, symmetric with
 // hosts/pi-extension.ts). Two layers in one file:
@@ -54,8 +55,8 @@ export interface OpenCodeFrameworkOptions {
   runsDir?: string;
   ocBin?: string;
   config?: Partial<AutopilotConfig>;
-  /** Tick sink — the opencode plugin routes this to the orchestrator session. */
-  onTick?: (message: string) => void;
+  /** Tick delivery — the plugin's promptAsync injector (session-targeted). */
+  delivery?: TickDelivery;
   /** Domain-event sink (orch:reviewer-dispatched, orch:verdict, ...). */
   onDomainEvent?: (e: { name: string; data?: Record<string, unknown> }) => void;
   sweepIntervalMs?: number; // 0 disables the timer (default 10 min, like the pi extension)
@@ -65,6 +66,10 @@ export interface OpenCodeFramework {
   backend: ReturnType<typeof createOpenCodeBackend>;
   autopilot: Autopilot;
   tools: Record<string, OpenCodeToolDef>;
+  /** The orchestrator's session settled (session.idle) → settled sweep. */
+  onSettled(): void;
+  /** Feed a session event (busy tracking + settled + tick target). */
+  handleSessionEvent(event: unknown): void;
   dispose(): void;
 }
 
@@ -99,32 +104,41 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
   const storeOrNew = () => loadStore(stateDir) ?? newStore();
   const reviewerAgent = cfg.reviewerAgents[0] ?? "orchestrator-reviewer";
 
-  const onComplete = (runId: string, rec: OpenCodeRunRecord): void => {
+  const isHeadlessRun = process.argv.includes("run"); // oc run = one-shot (no live ticks)
+  let busy = false; // session.status busy/idle tracking
+
+  // The completion event build (reviewer verdict from the run output).
+  const buildEvent = (runId: string, rec: OpenCodeRunRecord): Record<string, unknown> => {
     const output = rec.agent === reviewerAgent ? readLatestText(rec.logPath) : undefined;
-    const ev = {
+    return {
       runId,
       agent: rec.agent,
       success: rec.status === "completed",
       status: rec.status === "completed" ? "completed" : "failed",
       results: output ? [{ agent: rec.agent, output }] : [],
-    } as Record<string, unknown>;
-    const result = autopilot.handleAsyncComplete(ev);
-    for (const e of result.domainEvents) opts.onDomainEvent?.(e as { name: string; data?: Record<string, unknown> });
-    if (result.tick?.message) opts.onTick?.(result.tick.message);
-    if (result.freedSlot) {
-      void (async () => {
-        const fleet = await backend.fleetStatus();
-        const sweep = autopilot.sweep("worker-done", Date.now(), fleet ? { totalActive: fleet.totalActive } : undefined);
-        if (sweep.tick?.message) opts.onTick?.(sweep.tick.message);
-      })();
-    }
-    if (result.reviewerCompleted) {
-      const t = autopilot.reviewTick();
-      if (t?.message) opts.onTick?.(t.message);
-    }
+    };
   };
 
-  const backend = createOpenCodeBackend({ runsDir, ocBin: opts.ocBin, onComplete });
+  const backend = createOpenCodeBackend({ runsDir, ocBin: opts.ocBin, onComplete: (runId, rec) => runner.onCompletion(buildEvent(runId, rec) as never) });
+
+  // The shared runner: identical trigger machinery in both hosts (see
+  // src/framework/runner.ts). The opencode host supplies its gate state +
+  // the promptAsync delivery; the pi host supplies the same shape with
+  // sendMessage.
+  const runner = createFrameworkRunner({
+    autopilot,
+    backend,
+    host: {
+      interactive: () => !!opts.delivery?.target() && !isHeadlessRun,
+      loaded: () => true, // the plugin IS the orchestrator context in opencode
+      busy: () => busy,
+      compacting: () => false,
+    },
+    deliver: (message) => opts.delivery?.deliver(message),
+    emit: (e) => e.forEach((x) => opts.onDomainEvent?.(x as { name: string; data?: Record<string, unknown> })),
+    enabled: () => true,
+    sweepIntervalMs: opts.sweepIntervalMs ?? cfg.sweepIntervalMs,
+  });
 
   const ctx: QueueOpsCtx = {
     stateDir,
@@ -226,29 +240,27 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
     // silent
   }
 
-  // Periodic capacity sweep (mirrors the pi extension's timer).
-  let timer: ReturnType<typeof setInterval> | null = null;
-  const intervalMs = opts.sweepIntervalMs ?? cfg.sweepIntervalMs ?? 600_000;
-  if (intervalMs > 0) {
-    timer = setInterval(() => {
-      try {
-        const sweep = autopilot.sweep("timer", Date.now());
-        if (sweep.tick?.message) opts.onTick?.(sweep.tick.message);
-        const rt = autopilot.reviewTick();
-        if (rt?.message) opts.onTick?.(rt.message);
-      } catch {
-        // never let the timer break opencode
-      }
-    }, intervalMs);
-  }
+  // Periodic capacity sweep — owned by the shared runner (identical machinery
+  // in both hosts).
+  runner.start();
 
   return {
     backend,
     autopilot,
     tools,
+    onSettled: () => runner.onSettled(),
+    handleSessionEvent(event: unknown) {
+      const e = event as { type?: string; properties?: { sessionID?: string; status?: { type?: string } } };
+      const sid = e.properties?.sessionID;
+      if (sid) opts.delivery?.setTarget(sid);
+      if (e.type === "session.status") busy = e.properties?.status?.type === "busy";
+      if (e.type === "session.idle") {
+        busy = false;
+        runner.onSettled();
+      }
+    },
     dispose() {
-      if (timer) clearInterval(timer);
-      timer = null;
+      runner.stop();
     },
   };
 }
@@ -308,7 +320,7 @@ export function createTickDelivery(client: PromptClient, log: (line: string) => 
       void client.session
         .promptAsync({
           path: { id: target },
-          body: { parts: [{ type: "text", text: `[orch-tick] ${message}` }] },
+          body: { parts: [{ type: "text", text: message }] },
         })
         .catch((err) => log(`[orch-tick] inject failed: ${err instanceof Error ? err.message : String(err)}`));
     },
@@ -319,9 +331,7 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
   const delivery = createTickDelivery(ctx.client as unknown as PromptClient);
   const fw = createOpenCodeFramework({
     stateDir: resolveStateDir(),
-    onTick: (message) => {
-      delivery.deliver(message);
-    },
+    delivery,
   });
 
   const tools: Record<string, ReturnType<typeof tool>> = {};
@@ -335,10 +345,10 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
 
   return {
     tool: tools,
-    // Track the orchestrator session (tick target) from session events.
+    // Feed session events to the framework: busy tracking, the tick target,
+    // and the settled sweep (session.idle).
     event: async ({ event }) => {
-      const sid = (event as { properties?: { sessionID?: string } }).properties?.sessionID;
-      if (sid) delivery.setTarget(sid);
+      fw.handleSessionEvent(event);
     },
   };
 };

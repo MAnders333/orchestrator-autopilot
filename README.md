@@ -20,7 +20,12 @@ src/
 │   ├── pi.ts             ← pi-subagents RPC spawn + file control channel
 │   └── opencode.ts       ← detached `oc run` children (completion = process exit)
 ├── framework/
-│   └── queue-ops.ts      ← the SIX queue tools, host-agnostic (single impl)
+│   ├── queue-ops.ts      ← the SIX queue tools, host-agnostic (single impl)
+│   ├── runner.ts         ← shared tick machinery: trigger routing (completion/
+│   │                        settled/timer/activation) + gate + cooldown — the
+│   │                        hosts only WIRE their events to it
+│   └── tick-router.ts    ← the delivery gate (interactive/loaded/busy/
+│                            compacting + cooldown + message format)
 ├── agents/               ← framework-owned agents (canonical prompt + installer)
 │   ├── install.ts        ← agent registry + per-backend projection, version-stamped
 │   ├── reviewer/         ← orchestrator-reviewer (Verdict: PASS/FAIL gate, read-only)
