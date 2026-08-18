@@ -13,10 +13,10 @@
 import { readFileSync, writeFileSync, existsSync, renameSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-export type QueueStatus = "proposal" | "approved" | "active" | "reviewing" | "failed" | "done" | "rejected";
+export type QueueStatus = "proposal" | "approved" | "blocked" | "active" | "reviewing" | "failed" | "done" | "rejected";
 export type BlockerReason = "parked" | "serialized" | "merge" | "decision" | null;
 
-const STATUSES: QueueStatus[] = ["proposal", "approved", "active", "reviewing", "failed", "done", "rejected"];
+const STATUSES: QueueStatus[] = ["proposal", "approved", "blocked", "active", "reviewing", "failed", "done", "rejected"];
 
 export function isValidStatus(s: unknown): s is QueueStatus {
   return typeof s === "string" && (STATUSES as string[]).includes(s);
@@ -25,8 +25,7 @@ export function isValidStatus(s: unknown): s is QueueStatus {
 export interface QueueItem {
   key: string;
   status: QueueStatus;
-  /** only meaningful for approved: is it dispatchable now? */
-  ready: boolean;
+  /** approved = dispatchable; blocked = approved-but-waiting (blocker says why). */
   blocker: BlockerReason;
   title: string;
   scope: string;
@@ -58,7 +57,8 @@ export type QueueLengths = Record<QueueStatus, number>;
 
 const ALLOWED: Record<QueueStatus, QueueStatus[]> = {
   proposal: ["approved", "rejected"],
-  approved: ["active", "rejected"],
+  approved: ["blocked", "active", "rejected"],
+  blocked: ["approved", "rejected"],   // unblock (approved) or drop (rejected)
   active: ["reviewing", "failed"],      // event-driven (extension)
   reviewing: ["done", "failed", "active"], // active = review-FAIL re-dispatch
   failed: ["active", "done"],             // recovery re-dispatch; done = verified-complete despite the failure record
@@ -92,7 +92,10 @@ export function loadStore(stateDir: string): QueueStore | null {
         if (it.attempts === undefined) it.attempts = 0;
         if (it.runId === undefined) it.runId = null;
         if (it.blocker === undefined) it.blocker = null;
-        if (it.ready === undefined) it.ready = it.status === "approved";
+        // The ready boolean was folded into the status: approved = dispatchable,
+        // approved+!ready → blocked. Normalize old stores on read.
+        if (it.status === "approved" && (it as { ready?: boolean }).ready === false) it.status = "blocked";
+        delete (it as { ready?: boolean }).ready;
       }
       return raw;
     }
@@ -115,7 +118,7 @@ export function newStore(): QueueStore {
 }
 
 export function queueLengths(store: QueueStore): QueueLengths {
-  const out: QueueLengths = { proposal: 0, approved: 0, active: 0, reviewing: 0, failed: 0, done: 0, rejected: 0 };
+  const out: QueueLengths = { proposal: 0, approved: 0, blocked: 0, active: 0, reviewing: 0, failed: 0, done: 0, rejected: 0 };
   for (const it of Object.values(store.items)) {
     if (isValidStatus(it.status)) out[it.status]++;
     // corrupt statuses (missing/invalid) are not counted here — they surface
@@ -287,10 +290,11 @@ export function migrateFromMd(md: string): QueueStore {
       const title = text[0].slice(text[0].indexOf(":") + 1).trim();
       const nonReady = /\b(BLOCKED|DISPATCHED|REMOVED|PARKED|SERIALIZED|HOLD|DEFERRED)\b/i.test(joined);
       const blocker = /\bPARKED\b/i.test(joined) ? "parked" : /\bSERIALIZED\b/i.test(joined) ? "serialized" : /\bBLOCKED\b/i.test(joined) ? "merge" : null;
+      // The fold: approved + a non-ready marker in the text → blocked.
+      const foldedStatus: QueueStatus = status === "approved" && nonReady ? "blocked" : status;
       addItem(store, {
         key,
-        status,
-        ready: status === "approved" ? !nonReady : false,
+        status: foldedStatus,
         blocker,
         title,
         // preserve the FULL original entry text (free-form) — nothing lost in the render

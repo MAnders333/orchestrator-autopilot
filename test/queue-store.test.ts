@@ -113,7 +113,7 @@ describe("queue-store transitions", () => {
 describe("queue-store queries", () => {
   function store(): QueueStore {
     const s = newStore();
-    addItem(s, sample({ key: "A9-TAGS-SURFACE-REDO", status: "approved", ready: false, blocker: "parked", title: "a9" }), "2026-08-16T10:00:00.000Z");
+    addItem(s, sample({ key: "A9-TAGS-SURFACE-REDO", status: "blocked", blocker: "parked", title: "a9" }), "2026-08-16T10:00:00.000Z");
     addItem(s, sample({ key: "B4-AGENTIC-JUDGE-TIMEOUT", title: "b4", notes: "n" }), "2026-08-16T11:00:00.000Z");
     addItem(s, sample({ key: "B3-POLICY-VERSION", status: "active", runId: "6f559944", title: "b3" }), "2026-08-16T12:00:00.000Z");
     return s;
@@ -122,8 +122,8 @@ describe("queue-store queries", () => {
   test("status filter + deterministic counts", () => {
     const s = store();
     const items = queryItems(s, { status: "approved" });
-    expect(items.map((i) => i.key).sort()).toEqual(["A9-TAGS-SURFACE-REDO", "B4-AGENTIC-JUDGE-TIMEOUT"]);
-    expect(queueLengths(s)).toEqual({ proposal: 0, approved: 2, active: 1, reviewing: 0, failed: 0, done: 0, rejected: 0 });
+    expect(items.map((i) => i.key)).toEqual(["B4-AGENTIC-JUDGE-TIMEOUT"]); // A9 is blocked, not approved
+    expect(queueLengths(s)).toEqual({ proposal: 0, approved: 1, blocked: 1, active: 1, reviewing: 0, failed: 0, done: 0, rejected: 0 });
     expect(readyItems(s).map((i) => i.key)).toEqual(["B4-AGENTIC-JUDGE-TIMEOUT"]);
   });
 
@@ -138,9 +138,9 @@ describe("queue-store queries", () => {
     const compact = queryItems(s, { status: "approved", sort: "key" })[0];
     expect(compact.notes).toBeUndefined();
     expect(compact.scope).toBeUndefined();
-    expect(compact.key).toBe("A9-TAGS-SURFACE-REDO");
+    expect(compact.key).toBe("B4-AGENTIC-JUDGE-TIMEOUT"); // A9 is blocked now; B4 is the approved item
     const full = queryItems(s, { status: "approved", sort: "key", includeNotes: true })[0];
-    expect(full.notes).toBe("free-form notes");
+    expect(full.notes).toBe("n"); // B4's free-form note
     expect(full.scope).toBeTruthy();
   });
 
@@ -172,17 +172,17 @@ describe("queue-store run attribution", () => {
 describe("queue-store migration", () => {
   test("imports legacy personal-format state.md faithfully", () => {
     const store = migrateFromMd(PERSONAL_MD);
-    expect(queueLengths(store)).toEqual({ proposal: 1, approved: 3, active: 2, reviewing: 1, failed: 0, done: 1, rejected: 0 });
+    expect(queueLengths(store)).toEqual({ proposal: 1, approved: 1, blocked: 2, active: 2, reviewing: 1, failed: 0, done: 1, rejected: 0 });
     const a9 = store.items["A9-TAGS-SURFACE-REDO"];
     expect(a9).toBeDefined();
-    expect(a9.ready).toBe(false);        // PARKED
+    expect(a9.status).toBe("blocked");   // PARKED → the fold
     expect(a9.blocker).toBe("parked");
     expect(a9.notes).toContain("ORIGINAL WORKER LOST"); // full text preserved
     const b3 = store.items["B3-POLICY-VERSION"];
-    expect(b3.ready).toBe(false);        // SERIALIZED
+    expect(b3.status).toBe("blocked");   // SERIALIZED → the fold
     expect(b3.blocker).toBe("serialized");
     const b4 = store.items["B4-AGENTIC-JUDGE-TIMEOUT"];
-    expect(b4.ready).toBe(true);         // [BEYOND] tag parsed, no blocker
+    expect(b4.status).toBe("approved");  // [BEYOND] tag parsed, no blocker → dispatchable
     expect(store.items["G-B2-REVIEW-PULLBACK"].runId).toBe("6f559944");
     expect(store.items["G-ARMD-RERUN-FINISHER"].status).toBe("active"); // failed md status → still active entry
     expect(store.items["C1"].status).toBe("done");

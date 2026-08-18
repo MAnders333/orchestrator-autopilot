@@ -178,7 +178,6 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
         { name: "urgency", type: "string", required: false },
         { name: "risk", type: "string", required: false },
         { name: "notes", type: "string", required: false },
-        { name: "ready", type: "boolean", required: false },
       ],
       (a) => queueAdd(ctx, a),
     ),
@@ -187,7 +186,6 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
       [
         { name: "key", type: "string", required: true },
         { name: "status", type: "string", required: false },
-        { name: "ready", type: "boolean", required: false },
         { name: "blocker", type: "string", required: false },
         { name: "title", type: "string", required: false },
         { name: "scope", type: "string", required: false },

@@ -346,7 +346,6 @@ export default function (pi: ExtensionAPI) {
       urgency: Type.Optional(Type.String()),
       risk: Type.Optional(Type.String()),
       notes: Type.Optional(Type.String({ description: "free-form notes/description" })),
-      ready: Type.Optional(Type.Boolean()),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const r = await queueAdd(opsFor(ctx), params as never);
@@ -359,12 +358,11 @@ export default function (pi: ExtensionAPI) {
     label: "Queue update",
     description:
       "Update a queue item: status (validated transitions: proposal→approved/rejected, approved→active/rejected, active→reviewing/failed, " +
-      "reviewing→done/failed/active, failed→active), ready flag, blocker (parked/serialized/merge/decision), or free-form notes. " +
+      "reviewing→done/failed/active, failed→active), blocker (parked/serialized/merge/decision), or free-form notes. " +
       "active→reviewing/failed are event-driven — do NOT set them by hand.",
     parameters: Type.Object({
       key: Type.String(),
       status: Type.Optional(Type.String({ description: "target status (see description for valid transitions)" })),
-      ready: Type.Optional(Type.Boolean()),
       blocker: Type.Optional(Type.String()),
       title: Type.Optional(Type.String()),
       scope: Type.Optional(Type.String()),
@@ -385,10 +383,10 @@ export default function (pi: ExtensionAPI) {
     label: "Queue dispatch",
     description:
       "Dispatch a queue item: spawns the worker (same executor as the subagent tool; fresh context, worktree isolation) AND records " +
-      "approved→active with the run id — atomically. Call with the key of an approved+ready item and the scoped worker prompt. " +
+      "approved→active with the run id — atomically. Call with the key of an approved item and the scoped worker prompt. " +
       "High-risk items: still surface the final checkpoint BEFORE calling this. Returns the run id (use it for the inspector pane).",
     parameters: Type.Object({
-      key: Type.String({ description: "queue key of an approved+ready item" }),
+      key: Type.String({ description: "queue key of an approved item" }),
       task: Type.String({ description: "the scoped worker prompt (self-contained; KEY: <key> as first line is recommended)" }),
       cwd: Type.Optional(Type.String({ description: "repo the worker operates on (worktree isolation runs THERE). REQUIRED when the session cwd is not the target repo, e.g. dispatching from ~/work into ~/work/mi-mono-repo." })),
       timeoutMs: Type.Optional(Type.Number()),

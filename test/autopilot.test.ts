@@ -47,7 +47,6 @@ B1: [circleback] some candidate
 function item(over: Partial<QueueItem> & { key: string }): QueueItem {
   return {
     status: "approved",
-    ready: true,
     blocker: null,
     title: "t",
     scope: "",
@@ -375,7 +374,7 @@ describe("intake suppression (proposals pending)", () => {
 
   test("intake fires with 0 proposals + low ready", () => {
     const f = make();
-    writeStore([item({ key: "A1", status: "approved", ready: false, title: "a1" })]);
+    writeStore([item({ key: "A1", status: "blocked", blocker: "parked", title: "a1" })]); // blocked: approved buffer is effectively low
     const t = f.sweep("timer", 1_000_000).tick;
     expect(t?.reason).toBe("intake");
   });
@@ -384,8 +383,8 @@ describe("intake suppression (proposals pending)", () => {
     const f = make();
     // the previous intake proposed items; the approved buffer is still low
     writeStore([
-      item({ key: "P1", status: "proposal", ready: false, title: "p1" }),
-      item({ key: "P2", status: "proposal", ready: false, title: "p2" }),
+      item({ key: "P1", status: "proposal", title: "p1" }),
+      item({ key: "P2", status: "proposal", title: "p2" }),
     ]);
     // even a hash change (adding more proposals) must NOT re-fire intake
     const t1 = f.sweep("timer", 1_000_000).tick;
@@ -397,8 +396,8 @@ describe("intake suppression (proposals pending)", () => {
   test("intake re-arms when the proposals resolve (rejected → pending 0)", () => {
     const f = make();
     writeStore([
-      item({ key: "P1", status: "proposal", ready: false, title: "p1" }),
-      item({ key: "A1", status: "approved", ready: false, title: "a1" }),
+      item({ key: "P1", status: "proposal", title: "p1" }),
+      item({ key: "A1", status: "blocked", blocker: "parked", title: "a1" }),
     ]);
     expect(f.sweep("timer", 1_000_000).tick).toBeNull(); // suppressed
     // the user rejects P1 → no proposals pending → intake re-arms
@@ -412,7 +411,7 @@ describe("intake suppression (proposals pending)", () => {
   test("dispatch is NOT suppressed by pending proposals (execution proceeds)", () => {
     const f = make();
     writeStore([
-      item({ key: "P1", status: "proposal", ready: false, title: "p1" }),
+      item({ key: "P1", status: "proposal", title: "p1" }),
       item({ key: "A1", status: "approved", ready: true, title: "a1" }),
     ]);
     const t = f.sweep("timer", 1_000_000).tick;

@@ -46,7 +46,7 @@ interface QueueState {
     lineIndex: number;
     section: string;
   }>;
-  approved: Array<{ key: string; title: string; ready: boolean; line: string; lineIndex: number }>;
+  approved: Array<{ key: string; title: string; line: string; lineIndex: number }>; // all dispatchable
   occupied: number;
   ready: number;
   /** Items awaiting the user's approval decision (status: proposal). */
@@ -330,7 +330,7 @@ export class Autopilot {
 
     const slotsFree = Math.max(0, this.cfg.maxSlots - state.occupied);
     const ready = state.ready;
-    const readyKeys = state.approved.filter((a) => a.ready).map((a) => a.key);
+    const readyKeys = state.approved.map((a) => a.key); // approved = dispatchable (the fold)
     // Cross-check: the fleet counts ALL session subagents; when it sees runs
     // the ledger/store haven't attributed (plain subagent calls, scouts), flag
     // it so the orchestrator can run `subagent status`. Occupied itself is the
@@ -422,10 +422,10 @@ export function storeToSnapshot(store: QueueStore): QueueState {
     .map((i) => ({ key: i.key, runId: i.runId ?? undefined, status: "working" as const, title: i.title, line: "", lineIndex: 0, section: "active" as const }));
   const approved = items
     .filter((i) => i.status === "approved")
-    .map((i) => ({ key: i.key, title: i.title, ready: i.ready, line: "", lineIndex: 0 }));
+    .map((i) => ({ key: i.key, title: i.title, line: "", lineIndex: 0 }));
   const reviewingWithReviewer = items.filter((i) => i.status === "reviewing" && i.reviewerRunId);
   const occupied = active.length + reviewingWithReviewer.length;
-  const ready = approved.filter((a) => a.ready).length;
+  const ready = approved.length; // approved = dispatchable (the fold)
   const proposalsPending = items.filter((i) => i.status === "proposal").length;
   return { active, approved, occupied, ready, proposalsPending, ok: true };
 }
@@ -436,7 +436,7 @@ function stateHash(state: QueueState): string {
     .sort()
     .join("|");
   const approved = state.approved
-    .map((a) => `${a.key}:${a.ready}`)
+    .map((a) => a.key)
     .sort()
     .join("|");
   return `${state.occupied}|${state.ready}|${state.proposalsPending}|${active}|${approved}`;

@@ -70,7 +70,6 @@ export async function queueAdd(ctx: QueueOpsCtx, params: Record<string, unknown>
     addItem(store, {
       key,
       status,
-      ready: (params.ready as boolean | undefined) ?? status === "approved",
       blocker: null,
       title: params.title as string,
       scope: (params.scope as string) ?? "",
@@ -88,13 +87,12 @@ export async function queueAdd(ctx: QueueOpsCtx, params: Record<string, unknown>
   }
 }
 
-/** queue_update — validated transitions, ready flag, blocker, free-form fields. */
+/** queue_update — validated transitions, blocker, free-form fields. */
 export async function queueUpdate(ctx: QueueOpsCtx, params: Record<string, unknown>): Promise<ToolResult> {
   try {
     const store = ctx.storeOrNew();
     updateItem(store, params.key as string, {
       status: params.status as never,
-      ready: params.ready as boolean | undefined,
       blocker: params.blocker as never,
       title: params.title as string | undefined,
       scope: params.scope as string | undefined,
@@ -120,9 +118,7 @@ export async function queueDispatch(ctx: QueueOpsCtx, params: Record<string, unk
     const item = store.items[key];
     if (!item) return { text: `queue_dispatch: no item '${key}'`, details: {} };
     if (item.status === "approved") {
-      if (!item.ready) {
-        return { text: `queue_dispatch: '${key}' is not ready (blocker: ${item.blocker ?? "none"})`, details: {} };
-      }
+      // approved = dispatchable (the fold); a blocked item is NOT approved
     } else if (item.status !== "reviewing" && item.status !== "failed") {
       return { text: `queue_dispatch: '${key}' is ${item.status}, not dispatchable`, details: {} };
     }
