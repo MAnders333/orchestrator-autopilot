@@ -65,7 +65,7 @@ const ALLOWED: Record<QueueStatus, QueueStatus[]> = {
   active: ["reviewing", "failed"],      // event-driven (extension)
   reviewing: ["done", "failed", "active"], // active = review-FAIL re-dispatch
   failed: ["active", "done"],             // recovery re-dispatch; done = verified-complete despite the failure record
-  done: [],
+  done: ["approved"],                     // human re-open: the user found issues in their review
   rejected: [],
 };
 
@@ -244,6 +244,9 @@ export function updateItem(store: QueueStore, key: string, patch: UpdatePatch, n
     }
   }
   const next: QueueItem = { ...item, ...clean, updatedAt: now };
+  // A human re-open (done → approved) starts a FRESH agent review loop — the
+  // attempts counter was the agent-review FAIL cap, not the human's judgment.
+  if (from === "done" && to === "approved") next.attempts = 0;
   store.items[key] = next;
   return next;
 }

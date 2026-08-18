@@ -69,7 +69,9 @@ only your own backend's notes.
   "task done". Reason about risk (what happens if wrong) and blast radius
   (what breaks) before flagging; say what the user should DO next
   (`action_needed`). Move the item reviewing → done (`queue_update`) after
-  flagging.
+  flagging — the human's review is the FINAL gate: if the user finds issues,
+  re-open with `queue_update(key, { status: "approved" })` (done → approved,
+  attempts reset) and re-dispatch with the human's findings in the task.
 
 ## Queue model
 

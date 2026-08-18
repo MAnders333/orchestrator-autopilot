@@ -202,3 +202,25 @@ describe("queue-store migration", () => {
     expect(queueLengths(store).approved).toBe(0);
   });
 });
+
+describe("done → approved (human re-open)", () => {
+  test("a done item re-opens to approved and the attempts counter resets", () => {
+    const store = newStore();
+    addItem(store, { key: "H1", status: "done", blocker: null, title: "h1", scope: "x", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: null, attempts: 4, notes: "", createdAt: "a", updatedAt: "b" });
+    const it = updateItem(store, "H1", { status: "approved" });
+    expect(it.status).toBe("approved");
+    expect(it.attempts).toBe(0); // fresh agent loop — the cap was the AGENT loop's
+    expect(it.updatedAt).not.toBe("b");
+  });
+
+  test("rejected stays terminal — no re-open path", () => {
+    const store = newStore();
+    addItem(store, { key: "R9", status: "rejected", blocker: null, title: "r9", scope: "x", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: null, attempts: 0, notes: "", createdAt: "a", updatedAt: "b" });
+    expect(() => updateItem(store, "R9", { status: "approved" })).toThrow(/illegal transition/);
+  });
+
+  test("the transition is in the table (validTransition)", () => {
+    expect(validTransition("done", "approved")).toBe(true);
+    expect(validTransition("done", "active")).toBe(false);
+  });
+});

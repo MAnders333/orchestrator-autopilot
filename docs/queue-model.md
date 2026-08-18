@@ -13,7 +13,8 @@ behavior. This is the AUTHORITATIVE model; the orchestrator skills reference it.
 | `active` | dispatched — worker running (runId set) |
 | `reviewing` | worker done — reviewer in flight (reviewerRunId set) |
 | `failed` | run failed (re-dispatchable) |
-| `done` / `rejected` | terminal |
+| `done` | agent-reviewed + handed to the human (re-openable) |
+| `rejected` | terminal — deliberately dropped |
 
 There is no separate `ready` boolean — an approved item IS ready to dispatch; a
 not-yet-dispatchable approved item is `blocked`. (The `ready` field was folded
@@ -28,12 +29,17 @@ blocked   ─► approved (unblock) │ rejected
 active    ─► reviewing │ failed        (event-driven: worker completion)
 reviewing ─► done │ failed │ active    (active = review-FAIL re-dispatch)
 failed    ─► active (recovery re-dispatch) │ done (verified-complete)
-done / rejected ─► (terminal)
+done      ─► approved (human re-open: issues found in the user's review)
+rejected  ─► (terminal)
 ```
 
 `active→reviewing/failed` are event-driven (the completion handler flips them —
 do not set by hand). `reviewing→active` is the re-dispatch path after a review
 FAIL (attempts increment, capped at `reviewCap` = 5).
+
+`done` is NOT a dead end: the human reviews the flagged work and, if issues
+are found, re-opens it via `done → approved` (attempts reset — a fresh agent
+review loop starts with the human's findings in the re-dispatch task).
 
 ## Tick behavior (what the orchestrator is nudged to do)
 

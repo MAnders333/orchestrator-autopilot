@@ -371,7 +371,7 @@ export default function (pi: ExtensionAPI) {
     label: "Queue update",
     description:
       "Update a queue item: status (validated transitions: proposal→approved/rejected, approved→active/rejected, active→reviewing/failed, " +
-      "reviewing→done/failed/active, failed→active), blocker (parked/serialized/merge/decision), or free-form notes. " +
+      "reviewing→done/failed/active, failed→active, done→approved (human re-open — you found issues in your review)), blocker (parked/serialized/merge/decision), or free-form notes. " +
       "active→reviewing/failed are event-driven — do NOT set them by hand.",
     parameters: Type.Object({
       key: Type.String(),
