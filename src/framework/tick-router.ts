@@ -26,14 +26,16 @@ export function createTickRouter(
   host: TickHostState,
   deliver: (message: string) => void,
   cooldownMs = 1500,
-): { send(message: string): boolean } {
+): { send(message: string, opts?: { priority?: boolean }): boolean } {
   let lastSentAt = 0;
   return {
-    /** Apply the shared gate; deliver when it passes. Returns true if delivered. */
-    send(message: string): boolean {
+    /** Apply the shared gate; deliver when it passes. Returns true if delivered.
+     *  priority (harness event ticks) bypasses the cooldown — those are the
+     *  state updates the orchestrator must see even if a nudge was just sent. */
+    send(message: string, opts?: { priority?: boolean }): boolean {
       if (!host.interactive() || !host.loaded() || host.busy() || host.compacting()) return false;
       const now = Date.now();
-      if (now - lastSentAt < cooldownMs) return false;
+      if (!opts?.priority && now - lastSentAt < cooldownMs) return false;
       lastSentAt = now;
       deliver(message);
       return true;

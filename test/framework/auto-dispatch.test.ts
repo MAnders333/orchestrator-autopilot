@@ -88,8 +88,8 @@ describe("autoDispatchEligible (A)", () => {
   test("fills free slots with eligible items (oldest first), records active + runId", async () => {
     const f = setup();
     seed(f, [item("A1"), item("A2", { updatedAt: "2026-08-17T01:00:00.000Z" })]);
-    const n = await autoDispatchEligible(f.dir, f.backend, 3); // fleet 1 → 2 free
-    expect(n).toBe(2);
+    const dispatched = await autoDispatchEligible(f.dir, f.backend, 3); // fleet 1 → 2 free
+    expect(dispatched.map((d) => d.key)).toEqual(["A1", "A2"]);
     const s = store(f);
     expect(s.items["A1"].status).toBe("active");
     expect(s.items["A1"].runId).toBeTruthy();
@@ -101,8 +101,8 @@ describe("autoDispatchEligible (A)", () => {
   test("respects the slot cap + skips ineligible items", async () => {
     const f = setup();
     seed(f, [item("A1"), item("A2", { updatedAt: "2026-08-17T01:00:00.000Z" }), item("H1", { risk: "high" })]);
-    const n = await autoDispatchEligible(f.dir, f.backend, 3, 2); // fleet 2 → 1 free
-    expect(n).toBe(1);
+    const dispatched = await autoDispatchEligible(f.dir, f.backend, 3, 2); // fleet 2 → 1 free
+    expect(dispatched.map((d) => d.key)).toEqual(["A1"]);
     const s = store(f);
     expect(s.items["A1"].status).toBe("active"); // oldest fills the single free slot
     expect(s.items["A2"].status).toBe("approved"); // no slot left
@@ -112,8 +112,8 @@ describe("autoDispatchEligible (A)", () => {
   test("no eligible work → no fleet call, nothing dispatched", async () => {
     const f = setup();
     seed(f, [item("H1", { risk: "high" })]);
-    const n = await autoDispatchEligible(f.dir, f.backend, 3);
-    expect(n).toBe(0);
+    const dispatched = await autoDispatchEligible(f.dir, f.backend, 3);
+    expect(dispatched.length).toBe(0);
     expect(f.spawns.length).toBe(0);
   });
 });
@@ -143,8 +143,8 @@ describe("autoReview (C)", () => {
   test("a completed item (reviewing) gets a reviewer with the SAME fields the dispatch used", async () => {
     const f = setup();
     seed(f, [item("R1", { status: "reviewing", runId: "worker-run", reviewerRunId: null })]);
-    const ok = await autoReview(f.dir, f.backend, "orchestrator-reviewer", "R1");
-    expect(ok).toBe(true);
+    const runId = await autoReview(f.dir, f.backend, "orchestrator-reviewer", "R1");
+    expect(runId).toBeTruthy();
     const s = store(f);
     expect(s.items["R1"].reviewerRunId).toBeTruthy();
     const spawned = f.spawns[0];
@@ -162,10 +162,10 @@ describe("autoReview (C)", () => {
       item("R3", { status: "reviewing", scope: "  " }),        // no scope
       item("R4", { status: "reviewing", cwd: null }),          // no cwd
     ]);
-    expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "A1")).toBe(false);
-    expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "R2")).toBe(false);
-    expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "R3")).toBe(false);
-    expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "R4")).toBe(false);
+    expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "A1")).toBeNull();
+    expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "R2")).toBeNull();
+    expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "R3")).toBeNull();
+    expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "R4")).toBeNull();
     expect(f.spawns.length).toBe(0);
   });
 

@@ -155,6 +155,32 @@ describe("framework runner (shared tick machinery)", () => {
     expect(f.delivered.some((m) => m.includes("[orch-tick: review]"))).toBe(true);
   });
 
+  test("REGRESSION: the stuck reviewTick (timer) does NOT claim 'A reviewer completed'", async () => {
+    const f = setup();
+    // all slots busy (fleet 3/3) + buffer full (2 ready) → the sweep yields
+    // nothing → the reviewTick fallback nudges with the cause-aware wording.
+    const s0 = load(f);
+    addItem(s0, { key: "S1", title: "s1", status: "reviewing", blocker: null, scope: "x", cwd: "/tmp", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: "rev-live", attempts: 0, notes: "", createdAt: "a", updatedAt: "b" });
+    addItem(s0, { key: "B1", title: "b1", status: "approved", blocker: null, scope: "x", cwd: "/tmp", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: null, attempts: 0, notes: "", createdAt: "a", updatedAt: "b" });
+    addItem(s0, { key: "B2", title: "b2", status: "approved", blocker: null, scope: "x", cwd: "/tmp", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: null, attempts: 0, notes: "", createdAt: "a", updatedAt: "b" });
+    save(f, s0);
+    f.runner = createFrameworkRunner({
+      autopilot: f.autopilot,
+      backend: { ...backend, fleetStatus: async () => ({ totalActive: 3 }) },
+      host: { interactive: () => f.interactive, loaded: () => f.loaded, busy: () => f.busy, compacting: () => f.compacting },
+      deliver: (m) => f.delivered.push(m),
+      enabled: () => f.enabled,
+      sweepIntervalMs: 0,
+    });
+    f.runner.onTimer();
+    await new Promise((r) => setTimeout(r, 80));
+    const stuck = f.delivered.find((m) => m.includes("[orch-tick: review]"));
+    expect(stuck).toBeTruthy();
+    expect(stuck).toContain("check each"); // cause-aware wording
+    expect(stuck).not.toContain("A reviewer completed"); // the old false premise
+    expect(stuck).toContain("still running");
+  });
+
   test("onTimer + reviewTick fire even when the sweep has no tick (stuck-review nudge)", async () => {
     const f = setup();
     // all slots busy (fleet 3/3) + buffer full (2 ready) → the sweep yields
@@ -218,6 +244,8 @@ describe("auto-review (C) through the runner", () => {
     const after = load({ dir } as Fixture);
     expect(after.items["C1"].status).toBe("reviewing");
     expect(after.items["C1"].reviewerRunId).toBe("rev-1");
-    expect(delivered.some((m) => m.includes("reviewer auto-dispatched"))).toBe(true);
+    const harness = delivered.find((m) => m.includes("[orch-tick: harness]"));
+    expect(harness).toBeTruthy();
+    expect(harness).toContain("reviewer for C1");
   });
 });

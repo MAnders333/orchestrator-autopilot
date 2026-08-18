@@ -280,7 +280,7 @@ export class Autopilot {
    * periodic timer. The verdict (PASS/FAIL) is the orchestrator's call — the
    * tick only says "route it".
    */
-  reviewTick(now = this.now()): Tick | null {
+  reviewTick(now = this.now(), why: "reviewer-completed" | "stuck" = "reviewer-completed"): Tick | null {
     const store = loadStore(this.cfg.stateDir);
     if (!store) return null;
     const reviewing = Object.values(store.items).filter((i) => i.status === "reviewing");
@@ -288,12 +288,17 @@ export class Autopilot {
     if (now - this.lastReviewTickAt < this.cfg.quietPeriodMs) return null;
     this.lastReviewTickAt = now;
     const keys = reviewing.map((i) => i.key);
+    // The message must reflect WHY it fired: a reviewer-completion event
+    // (read the verdicts) vs the periodic stuck-review nudge (reviewers may
+    // STILL be running — never claim completion for those).
+    const message = why === "stuck"
+      ? `[orch-tick: review] Items in reviewing: ${keys.join(", ") || "none"} — check each: if its reviewer finished, read the verdict (done / re-dispatch); if the reviewer is still running, leave it (its completion will notify); if it died, re-dispatch. Not a user request; respond ≤2 lines.`
+      : `[orch-tick: review] Items in reviewing: ${keys.join(", ") || "none"}. A reviewer completed — read its verdict and move each to done ` +
+        `(queue_update status: done) or re-dispatch (queue_dispatch) / mark failed. Not a user request; respond ≤2 lines.`;
     return {
       reason: "review",
-      message:
-        `[orch-tick: review] Items in reviewing: ${keys.join(", ") || "none"}. A reviewer completed — read its verdict and move each to done ` +
-        `(queue_update status: done) or re-dispatch (queue_dispatch) / mark failed. Not a user request; respond ≤2 lines.`,
-      facts: { reviewing: keys, count: keys.length },
+      message,
+      facts: { reviewing: keys, count: keys.length, why },
     };
   }
 

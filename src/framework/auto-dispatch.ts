@@ -62,27 +62,27 @@ export async function autoDispatchEligible(
   backend: SubagentBackend,
   maxSlots: number,
   fleetTotalActive?: number,
-): Promise<number> {
+): Promise<Array<{ key: string; runId: string }>> {
   const store = loadStore(stateDir);
-  if (!store) return 0;
+  if (!store) return [];
   const eligible = Object.values(store.items)
     .filter(isAutoDispatchable)
     .sort((a, b) => (a.updatedAt < b.updatedAt ? -1 : 1)); // oldest first
-  if (eligible.length === 0) return 0; // no fleet call when there is no work
+  if (eligible.length === 0) return []; // no fleet call when there is no work
   const slots = freeSlots(stateDir, backend, maxSlots, fleetTotalActive);
-  if (slots <= 0) return 0;
-  let dispatched = 0;
+  if (slots <= 0) return [];
+  const dispatched: Array<{ key: string; runId: string }> = [];
   for (const item of eligible.slice(0, slots)) {
     try {
       const runId = await backend.spawn(workerTask(item), { cwd: item.cwd! });
       if (!runId) continue;
       updateItem(store, item.key, { status: "active", runId });
-      dispatched++;
+      dispatched.push({ key: item.key, runId });
     } catch {
       break; // a spawn failure stops the batch — the orchestrator handles it
     }
   }
-  if (dispatched > 0) saveStore(stateDir, store);
+  if (dispatched.length > 0) saveStore(stateDir, store);
   return dispatched;
 }
 
@@ -140,22 +140,22 @@ export async function autoReview(
   backend: SubagentBackend,
   reviewerAgent: string,
   key: string,
-): Promise<boolean> {
+): Promise<string | null> {
   try {
     const store = loadStore(stateDir);
     const item = store?.items[key];
-    if (!item || item.status !== "reviewing" || item.reviewerRunId) return false;
-    if (!(item.scope ?? "").trim() || !item.cwd) return false; // safety net — the approval gate guarantees these
+    if (!item || item.status !== "reviewing" || item.reviewerRunId) return null;
+    if (!(item.scope ?? "").trim() || !item.cwd) return null; // safety net — the approval gate guarantees these
     const runId = await backend.spawn(reviewTask(item), {
       agent: reviewerAgent,
       worktree: false, // reviewers are read-only — no worktree
       cwd: item.cwd,
     });
-    if (!runId) return false;
+    if (!runId) return null;
     updateItem(store!, key, { reviewerRunId: runId });
     saveStore(stateDir, store!);
-    return true;
+    return runId;
   } catch {
-    return false; // the review tick nudges the orchestrator
+    return null; // the review tick nudges the orchestrator
   }
 }

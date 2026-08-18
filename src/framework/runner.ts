@@ -64,6 +64,19 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
 
   const autoDispatchOn = opts.autoDispatch ?? true;
   const cfg = () => loadAutopilotConfig(opts.stateDir);
+  // ONE consolidated informational tick per pass — the orchestrator learns
+  // what the harness DID (dispatched / reviewed / re-dispatched), not one
+  // message per action. The router's gate + cooldown still apply.
+  const harnessTick = (parts: string[], fleetTotalActive?: number): void => {
+    if (!parts.length) return;
+    const fleet = fleetTotalActive !== undefined ? ` — fleet ${fleetTotalActive}` : "";
+    // priority: the harness event tick is a state update the orchestrator must
+    // see — it bypasses the cooldown (still gated on interactive/loaded/busy).
+    router.send(
+      `[orch-tick: harness] auto: ${parts.join("; ")}${fleet}. Your calls: approvals, high-risk checkpoints, review overrides, flag_for_review. Not a user request; respond ≤2 lines.`,
+      { priority: true },
+    );
+  };
   const sweep = async (source: "settled" | "activate" | "timer" | "worker-done"): Promise<void> => {
     if (!enabled()) return;
     // The authoritative fleet, fetched ONCE — both the auto-dispatch (A) and
@@ -75,15 +88,17 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     // incomplete scope/cwd).
     if (source === "worker-done" && autoDispatchOn) {
       try {
-        await autoDispatchEligible(opts.stateDir, opts.backend, cfg().maxSlots, fleet?.totalActive);
+        const dispatched = await autoDispatchEligible(opts.stateDir, opts.backend, cfg().maxSlots, fleet?.totalActive);
+        if (dispatched.length) harnessTick([`dispatched ${dispatched.map((d) => d.key).join(", ")}`], fleet?.totalActive);
       } catch {
         // silent — the tick still nudges the manual cases
       }
     }
     const result = autopilot.sweep(source, Date.now(), fleet ? { totalActive: fleet.totalActive } : undefined);
     if (result.tick) sendTick(result.tick);
-    // timer/activate safety net: stuck reviewing items get a review nudge
-    else if (source === "timer" || source === "activate") sendTick(autopilot.reviewTick());
+    // timer/activate safety net: stuck reviewing items get a review nudge —
+    // the "stuck" wording (reviewers may still be running; never claim completion)
+    else if (source === "timer" || source === "activate") sendTick(autopilot.reviewTick(undefined, "stuck"));
   };
 
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -92,52 +107,52 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     onCompletion(ev) {
       const result = autopilot.handleAsyncComplete(ev);
       if (opts.emit) opts.emit(result.domainEvents);
-      // B — a review FAIL auto-re-dispatches with the findings (up to the cap;
-      // the engine already flipped to active when attempts < cap). Extract the
-      // reviewer's output (the findings) from the event.
-      if (autoDispatchOn && result.domainEvents.some((e) => e.name === "orch:verdict" && e.data?.verdict === "FAIL")) {
-        const findings = (Array.isArray(ev.results) ? ev.results : [])
-          .map((r) => (r as { agent?: string; output?: string })?.output ?? "")
-          .filter(Boolean)
-          .join("\n\n");
-        if (findings) {
-          try {
-            const key = String(result.domainEvents.find((e) => e.name === "orch:verdict")?.data?.key ?? "");
-            if (key) void autoRedispatch(opts.stateDir, opts.backend, key, findings);
-          } catch {
-            // silent — the tick nudges the orchestrator to re-dispatch
-          }
-        }
-      }
-      // C — a worker completion (active → reviewing) auto-dispatches its
-      // review: the same fields the dispatch used (KEY + scope + cwd). The
-      // orchestrator is informed via the tick; it can still queue_review to
-      // override/steer. PASS → done and FAIL → auto-re-dispatch are the
-      // engine's; flag_for_review stays the orchestrator's.
+      // B + C, ONE consolidated harness tick. B — a review FAIL
+      // auto-re-dispatches with the findings (up to the cap; the engine
+      // already flipped to active when attempts < cap). C — a worker
+      // completion (active → reviewing) auto-dispatches its review with the
+      // SAME fields the dispatch used (KEY + scope + cwd). The orchestrator
+      // learns what happened from the single harness tick and can still
+      // queue_review/queue_dispatch to override.
       if (autoDispatchOn) {
+        const verdict = result.domainEvents.find((e) => e.name === "orch:verdict" && e.data?.verdict === "FAIL");
         const completed = result.domainEvents.find(
           (e) => e.name === "orch:item-completed" && e.data?.outcome === "reviewing",
         );
-
+        const tasks: Array<Promise<{ part: string; ok: boolean }>> = [];
+        if (verdict) {
+          const findings = (Array.isArray(ev.results) ? ev.results : [])
+            .map((r) => (r as { agent?: string; output?: string })?.output ?? "")
+            .filter(Boolean)
+            .join("\n\n");
+          const key = String(verdict.data?.key ?? "");
+          if (key && findings) {
+            tasks.push(autoRedispatch(opts.stateDir, opts.backend, key, findings).then((ok) => ({ part: `re-dispatched ${key} with findings`, ok })));
+          }
+        }
         if (completed) {
           const key = String(completed.data?.key ?? "");
           if (key) {
-            void autoReview(opts.stateDir, opts.backend, cfg().reviewerAgents[0] ?? "orchestrator-reviewer", key)
-              .then((ok) => {
-                if (ok) {
-                  sendTick({
-                    reason: "review",
-                    message: `[orch-tick: review] ${key} completed — reviewer auto-dispatched (steer it or let it run; queue_review overrides). Not a user request; respond ≤2 lines.`,
-                    facts: { key },
-                  });
-                }
-              })
-              .catch(() => {
-                // silent — the review tick nudges the orchestrator
-              });
+            tasks.push(
+              autoReview(opts.stateDir, opts.backend, cfg().reviewerAgents[0] ?? "orchestrator-reviewer", key).then((runId) => ({
+                part: `reviewer for ${key}${runId ? ` (run ${String(runId).slice(0, 8)})` : ""}`,
+                ok: !!runId,
+              })),
+            );
           }
         }
+        if (tasks.length) {
+          void Promise.all(tasks)
+            .then((results) => {
+              const parts = results.filter((r) => r.ok).map((r) => r.part);
+              if (parts.length) harnessTick(parts);
+            })
+            .catch(() => {
+              // silent — the review tick nudges the orchestrator
+            });
+        }
       }
+      
       sendTick(result.tick);
       if (result.freedSlot) {
         // ANY run completing frees a slot → dispatch sweep with the
