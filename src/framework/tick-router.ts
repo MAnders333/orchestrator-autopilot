@@ -30,12 +30,15 @@ export function createTickRouter(
   let lastSentAt = 0;
   return {
     /** Apply the shared gate; deliver when it passes. Returns true if delivered.
-     *  priority (harness event ticks) bypasses the cooldown — those are the
-     *  state updates the orchestrator must see even if a nudge was just sent. */
+     *  priority (harness event ticks) bypasses the busy + cooldown gates — the
+     *  followUp/promptAsync delivery queues them to the turn end safely, and
+     *  the orchestrator must see what the harness DID even mid-turn (it
+     *  otherwise only discovers auto-dispatch/auto-review by polling the
+     *  fleet). compacting stays gated (a mid-compaction injection aborts it). */
     send(message: string, opts?: { priority?: boolean }): boolean {
-      if (!host.interactive() || !host.loaded() || host.busy() || host.compacting()) return false;
+      if (!host.interactive() || !host.loaded() || host.compacting()) return false;
       const now = Date.now();
-      if (!opts?.priority && now - lastSentAt < cooldownMs) return false;
+      if (!opts?.priority && (host.busy() || now - lastSentAt < cooldownMs)) return false;
       lastSentAt = now;
       deliver(message);
       return true;

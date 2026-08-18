@@ -78,6 +78,38 @@ describe("framework runner (shared tick machinery)", () => {
     });
   });
 
+  test("REGRESSION: priority harness ticks DELIVER while busy (the orchestrator must see auto-actions)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "orch-runner-busy-"));
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(newStore()));
+    const spawns: Array<{ task: string }> = [];
+    const recBackend: SubagentBackend = {
+      spawn: async (task) => { spawns.push({ task }); return "rev-1"; },
+      fleetStatus: async () => ({ totalActive: 0 }),
+      steer: async () => "req",
+      asyncDirFor: () => null,
+    };
+    const delivered: string[] = [];
+    const runner = createFrameworkRunner({
+      stateDir: dir,
+      autopilot: new Autopilot({ stateDir: dir }),
+      backend: recBackend,
+      host: { interactive: () => true, loaded: () => true, busy: () => true, compacting: () => false }, // BUSY mid-turn
+      deliver: (m) => delivered.push(m),
+      enabled: () => true,
+      sweepIntervalMs: 0,
+    });
+    const s0 = load({ dir } as Fixture);
+    addItem(s0, { key: "C1", title: "c1", status: "active", blocker: null, scope: "do the thing", cwd: "/tmp/repo", evidence: "", value: "", urgency: "", risk: "low", runId: "worker-1", reviewerRunId: null, attempts: 0, notes: "", createdAt: "a", updatedAt: "b" });
+    save({ dir } as Fixture, s0);
+
+    runner.onCompletion({ runId: "worker-1", agent: "worker", success: true, results: [{ agent: "worker" }] });
+    await new Promise((r) => setTimeout(r, 120));
+
+    expect(spawns.length).toBe(1); // the auto-review STILL happens while busy
+    const harness = delivered.find((m) => m.includes("[orch-tick: harness]"));
+    expect(harness).toBeTruthy(); // and the harness tick DELIVERS despite busy
+  });
+
   test("the gate: busy / not-interactive / not-loaded / compacting all block delivery", async () => {
     const f = setup();
     seed(f, "A1");
