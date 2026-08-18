@@ -21,10 +21,38 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync } from "node:fs";
-import type { SubagentBackend, PiLike } from "./types.ts";
+import type { SubagentBackend, PiLike, CompletionEvent } from "./types.ts";
 
 const RPC_REQUEST = "subagents:rpc:v1:request";
 const RPC_REPLY = (id: string) => `subagents:rpc:v1:reply:${id}`;
+
+/** The pi child session's LAST assistant text — the run's final deliverable
+ *  (the reviewer's verdict line + the review body). Line-based read of the
+ *  session.jsonl (assistant text parts only). */
+export function readLastAssistantText(sessionFile: string): string | null {
+  try {
+    let last = "";
+    for (const line of readFileSync(sessionFile, "utf8").split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      let msg: { message?: { role?: string; content?: Array<{ type?: string; text?: string }> } } | null = null;
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const m = msg?.message;
+      if (m?.role !== "assistant" || !Array.isArray(m.content)) continue;
+      const text = (m.content ?? [])
+        .filter((x) => x?.type === "text" && typeof x.text === "string")
+        .map((x) => x.text ?? "")
+        .join("");
+      if (text.trim()) last = text;
+    }
+    return last || null;
+  } catch {
+    return null;
+  }
+}
 
 export function createPiBackend(pi: PiLike): SubagentBackend {
   /** Extract the async workflow id from a spawn RPC reply (structured or text). */
@@ -180,6 +208,41 @@ export function createPiBackend(pi: PiLike): SubagentBackend {
       throw new Error(
         `no steering acknowledgment within ${ackTimeoutMs}ms — the request was written but NOT delivered (the child did not consume its steer inbox; it may have completed). Stop + re-dispatch if it is gone.`,
       );
+    },
+
+    /** Normalize the RAW async-complete payload into the CompletionEvent the
+     *  shared machinery expects. The pi runtime's payload is flat
+     *  ({id, success, state, asyncDir, sessionId}) — NO per-child agent or
+     *  output — so the reviewer attribution (isReviewerRun) NEVER fired and
+     *  queue_review wedged on the first reviewer run. Enrich from the run
+     *  record: status.json's step agent + the child session's last assistant
+     *  text. Same shape the opencode backend builds. */
+    buildCompletionEvent(raw: unknown) {
+      const base = (raw ?? {}) as Record<string, unknown>;
+      const p = base as { id?: string; runId?: string; success?: boolean; state?: string; asyncDir?: string };
+      const runId = p.id ?? p.runId ?? "";
+      const success = p.success !== false && p.state !== "failed";
+      // Start from the raw payload (its own results survive when the run
+      // record is missing — e.g. tests, or a cleaned-up run dir); the run
+      // record enrichment below overrides agent/results when found.
+      const event: Record<string, unknown> = { ...base, runId, id: runId, agent: "workflow", success, status: success ? "completed" : "failed" };
+      try {
+        const dir = p.asyncDir && existsSync(p.asyncDir) ? p.asyncDir : this.asyncDirFor(runId);
+        if (dir && existsSync(join(dir, "status.json"))) {
+          const status = JSON.parse(readFileSync(join(dir, "status.json"), "utf8")) as { steps?: Array<{ agent?: string; sessionFile?: string }> };
+          const step = (status.steps ?? [])[0];
+          const agent = step?.agent ?? "";
+          let output: string | null = null;
+          if (step?.sessionFile && existsSync(step.sessionFile)) output = readLastAssistantText(step.sessionFile);
+          if (agent) {
+            event.agent = agent;
+            event.results = output ? [{ agent, output }] : [{ agent }];
+          }
+        }
+      } catch {
+        // best-effort — the raw event still routes worker flips by run id
+      }
+      return event as never;
     },
 
     asyncDirFor(runId) {

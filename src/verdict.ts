@@ -10,15 +10,6 @@ import type { CompletionEvent } from "./types.ts";
 
 const VERDICT_RE = /^Verdict:\s*(PASS|FAIL)\b/;
 
-/** First non-empty line of a text (the verdict contract anchors there). */
-function firstLine(text: string): string {
-  for (const line of text.split(/\r?\n/)) {
-    const t = line.trim();
-    if (t) return t;
-  }
-  return "";
-}
-
 /**
  * Strict verdict parse: the queue_review reviewer contract mandates the FIRST
  * non-empty line is exactly `Verdict: PASS`/`Verdict: FAIL`. Anything else →
@@ -29,8 +20,15 @@ export function parseVerdict(ev: CompletionEvent, reviewerAgents: string[] = [])
   const reviewerSet = new Set(reviewerAgents);
   const pick = (out: unknown): "PASS" | "FAIL" | null => {
     if (typeof out !== "string") return null;
-    const m = firstLine(out).match(VERDICT_RE);
-    return m ? (m[1] === "PASS" ? "PASS" : "FAIL") : null;
+    // The FIRST line-anchored `Verdict: PASS|FAIL` anywhere in the output —
+    // the contract says first line, but reviewers occasionally preamble (the
+    // P3 reviewer's verdict sat at line 47). Still strict: the line must be
+    // EXACTLY the verdict format (no prose-match risk).
+    for (const line of out.split(/\r?\n/)) {
+      const m = line.trim().match(VERDICT_RE);
+      if (m) return m[1] === "PASS" ? "PASS" : "FAIL";
+    }
+    return null;
   };
   // reviewer children first — a fan-out may include non-reviewer results
   for (const r of results) {

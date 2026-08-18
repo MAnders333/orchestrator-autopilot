@@ -8,6 +8,12 @@
 // backend (backends/opencode.ts) spawns detached `oc run` child processes.
 
 export interface SubagentBackend {
+  /** Each backend builds its completion event from ITS run record (the raw
+   *  runtime payloads differ — pi's async-complete carries no per-child
+   *  agent/output; opencode's is built in the plugin). The shared machinery
+   *  (attribution, verdict routing) only depends on this normalized shape. */
+  buildCompletionEvent?(raw: unknown): CompletionEvent;
+
   /** Spawn a detached async run. Resolves the run id (known immediately; the
    *  backend owns completion detection — process exit for opencode, the
    *  async-complete bus event for pi). `cwd` targets the repo the worker

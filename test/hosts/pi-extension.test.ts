@@ -212,6 +212,21 @@ describe("pi adapter smoke", () => {
     expect(String(offMsg.args[0])).toContain("queue_review");
   });
 
+  test("REGRESSION: a FLAT reviewer completion (raw payload, no results) still routes the verdict — the wedge", async () => {
+    startSession("tui");
+    await runAutopilotCmd("on");
+    // seed a reviewing item whose reviewerRunId matches the workflow id
+    const s0 = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+    s0.items["WEDGE-1"] = { key: "WEDGE-1", title: "wedge", status: "reviewing", blocker: null, scope: "x", cwd: "/tmp", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: "rev-abc-1234", attempts: 0, notes: "", createdAt: "a", updatedAt: "b" };
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(s0));
+    // the REAL pi async-complete payload: flat, no results, no agent
+    emit("subagent:async-complete", { id: "rev-abc-1234", success: true, state: "complete", asyncDir: join(dir, "no-such-run") });
+    await new Promise((r) => setTimeout(r, 100));
+    const after = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+    // no run record → no verdict → the item must NOT flip silently (manual path)
+    expect(after.items["WEDGE-1"].status).toBe("reviewing");
+  });
+
   test("REGRESSION: a sync sendUserMessage throw mid-command cannot fail /autopilot (injection retries)", async () => {
     startSession("tui");
     const throwSend = { on: false };

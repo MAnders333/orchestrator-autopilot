@@ -311,9 +311,13 @@ export default function (pi: ExtensionAPI) {
   pi.events.on("subagent:async-complete", (payload: unknown) => {
     if (!interactive) return; // the RUNNER gates the autopilot toggle (shared)
     maybeInjectOrchestrate();
-    // Attribute the completion (active→reviewing/failed), route the verdict,
-    // and sweep — the shared runner owns this logic (identical in opencode).
-    runner.onCompletion((payload ?? {}) as never);
+    // The pi runtime's raw payload is flat (no per-child agent/output) — the
+    // backend normalizes it from the run record (same shape the opencode
+    // backend builds), so the shared attribution + verdict routing work
+    // identically on both hosts. Without this, reviewer completions never
+    // route (queue_review wedged on its first reviewer run).
+    const ev = backend.buildCompletionEvent ? backend.buildCompletionEvent(payload) : ((payload ?? {}) as never);
+    runner.onCompletion(ev);
   });
 
   // -- queue tools -----------------------------------------------------------
