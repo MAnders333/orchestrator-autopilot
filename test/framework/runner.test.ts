@@ -249,3 +249,37 @@ describe("auto-review (C) through the runner", () => {
     expect(harness).toContain("reviewer for C1");
   });
 });
+
+describe("the shared autopilot gate (toggle off → harness idle)", () => {
+  test("enabled=false → completions are IGNORED: no flip, no auto-review, no ticks", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "orch-runner-gate-"));
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(newStore()));
+    const spawns: Array<{ task: string }> = [];
+    const gateBackend: SubagentBackend = {
+      spawn: async (task) => { spawns.push({ task }); return "rev-1"; },
+      fleetStatus: async () => ({ totalActive: 0 }),
+      steer: async () => "req",
+      asyncDirFor: () => null,
+    };
+    const delivered: string[] = [];
+    const runner = createFrameworkRunner({
+      stateDir: dir,
+      autopilot: new Autopilot({ stateDir: dir }),
+      backend: gateBackend,
+      host: { interactive: () => true, loaded: () => true, busy: () => false, compacting: () => false },
+      deliver: (m) => delivered.push(m),
+      enabled: () => false, // the toggle is OFF
+      sweepIntervalMs: 0,
+    });
+    const s0 = load({ dir } as Fixture);
+    addItem(s0, { key: "C1", title: "c1", status: "active", blocker: null, scope: "do the thing", cwd: "/tmp/repo", evidence: "", value: "", urgency: "", risk: "low", runId: "worker-1", reviewerRunId: null, attempts: 0, notes: "", createdAt: "a", updatedAt: "b" });
+    save({ dir } as Fixture, s0);
+
+    runner.onCompletion({ runId: "worker-1", agent: "worker", success: true, results: [{ agent: "worker" }] });
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(load({ dir } as Fixture).items["C1"].status).toBe("active"); // NO flip
+    expect(spawns.length).toBe(0);                                       // NO auto-review
+    expect(delivered.length).toBe(0);                                    // NO ticks
+  });
+});

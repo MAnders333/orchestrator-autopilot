@@ -11,6 +11,7 @@ import { execFileSync } from "node:child_process";
 import { createOpenCodeFramework, readLatestText } from "../../src/hosts/opencode-plugin.ts";
 import { newStore, addItem, updateItem, saveStore as _save } from "../../src/queue-store.ts";
 import { loadStore } from "../../src/queue-store.ts";
+import { writeSessionAutopilotState } from "../../src/config.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -64,9 +65,17 @@ exit 0
   writeFileSync(join(f.repo, "a.txt"), "x\n");
   execFileSync("git", ["add", "a.txt"], { cwd: f.repo, stdio: "pipe" });
   execFileSync("git", ["-c", "core.hooksPath=/dev/null", "commit", "-qm", "init"], { cwd: f.repo, stdio: "pipe" });
-  // seed an empty store
+  // seed an empty store + autopilot ON (these framework tests exercise the
+  // harness mechanics — the toggle gate is covered by the pi host tests)
   writeFileSync(join(stateDir, "queue.json"), JSON.stringify(newStore()));
+  writeSessionAutopilotState(stateDir, "test-session", "on");
   return f;
+}
+
+/** A delivery stub with a REAL session target — the shared autopilot gate
+ *  (enabled = isAutopilotOn(stateDir, target)) needs it; ticks go to f.ticks. */
+function delivery(f: Fixture) {
+  return { target: () => "test-session", setTarget: () => {}, deliver: (m: string) => f.ticks.push(m) };
 }
 
 function store(f: Fixture) {
@@ -75,14 +84,14 @@ function store(f: Fixture) {
 
 function seedItem(f: Fixture, key: string, over: Record<string, unknown> = {}): void {
   const s = store(f);
-  addItem(s, { key, title: key.toLowerCase(), status: "approved", ready: true, blocker: null, scope: "", evidence: "", value: "", urgency: "", risk: "", runId: null, notes: "", ...over });
+  addItem(s, { key, title: key.toLowerCase(), status: "approved", blocker: null, scope: "", evidence: "", value: "", urgency: "", risk: "", runId: null, notes: "", ...over });
   writeFileSync(join(f.stateDir, "queue.json"), JSON.stringify(s));
 }
 
 describe("opencode host framework (hermetic, fake oc)", () => {
   test("registers the six queue tools with arg specs", () => {
     const f = setup();
-    const fw = createOpenCodeFramework({ stateDir: f.stateDir, runsDir: f.runsDir, ocBin: f.ocBin, sweepIntervalMs: 0 });
+    const fw = createOpenCodeFramework({ stateDir: f.stateDir, runsDir: f.runsDir, ocBin: f.ocBin, sweepIntervalMs: 0, delivery: delivery(f) });
     const names = Object.keys(fw.tools).sort();
     expect(names).toEqual(["queue_add", "queue_dispatch", "queue_list", "queue_review", "queue_steer", "queue_update"]);
     expect(fw.tools.queue_dispatch.args.some((a) => a.name === "task" && a.required)).toBe(true);
@@ -93,7 +102,7 @@ describe("opencode host framework (hermetic, fake oc)", () => {
 
   test("queue_add + queue_list mutate the store", async () => {
     const f = setup();
-    const fw = createOpenCodeFramework({ stateDir: f.stateDir, runsDir: f.runsDir, ocBin: f.ocBin, sweepIntervalMs: 0 });
+    const fw = createOpenCodeFramework({ stateDir: f.stateDir, runsDir: f.runsDir, ocBin: f.ocBin, sweepIntervalMs: 0, delivery: delivery(f) });
     const add = await fw.tools.queue_add.execute({ key: "TEST-1", title: "test one", notes: "free-form" });
     expect(add.text).toContain("added 'TEST-1'");
     const list = await fw.tools.queue_list.execute({});
@@ -106,7 +115,7 @@ describe("opencode host framework (hermetic, fake oc)", () => {
 
   test("worker completion flips active→reviewing (backend onComplete wiring)", async () => {
     const f = setup();
-    const fw = createOpenCodeFramework({ stateDir: f.stateDir, runsDir: f.runsDir, ocBin: f.ocBin, sweepIntervalMs: 0, onTick: (m) => f.ticks.push(m) });
+    const fw = createOpenCodeFramework({ stateDir: f.stateDir, runsDir: f.runsDir, ocBin: f.ocBin, sweepIntervalMs: 0, delivery: delivery(f), onTick: (m) => f.ticks.push(m) });
     // seed an approved+ready item, then dispatch it
     seedItem(f, "W1");
     const r = await fw.tools.queue_dispatch.execute({ key: "W1", task: "SLEEP-1200 do work", cwd: f.repo });
@@ -121,7 +130,7 @@ describe("opencode host framework (hermetic, fake oc)", () => {
 
   test("reviewer completion → Verdict: PASS → done", async () => {
     const f = setup("Verdict: PASS\\nEverything checks out.");
-    const fw = createOpenCodeFramework({ stateDir: f.stateDir, runsDir: f.runsDir, ocBin: f.ocBin, sweepIntervalMs: 0, onDomainEvent: (e) => f.events.push(e) });
+    const fw = createOpenCodeFramework({ stateDir: f.stateDir, runsDir: f.runsDir, ocBin: f.ocBin, sweepIntervalMs: 0, delivery: delivery(f), onDomainEvent: (e) => f.events.push(e) });
     seedItem(f, "R1", { status: "reviewing" });
     const r = await fw.tools.queue_review.execute({ key: "R1" });
     expect(r.details.runId).toBeTruthy();

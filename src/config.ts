@@ -167,6 +167,16 @@ export interface AutopilotConfigFile {
   sweepIntervalMs?: number; // periodic capacity sweep; 0 disables (default 10 min)
 }
 
+/** The ONE mode explanation for the orchestrator — the toggle means the
+ *  SAME thing on every host. Hosts only DELIVER it (pi: sendUserMessage
+ *  followUp; opencode: the autopilot tool return); they never re-word it.
+ *  The per-session state (isAutopilotOn) is the shared gate for all of it. */
+export function autopilotModeMessage(mode: "on" | "off"): string {
+  return mode === "on"
+    ? "Autopilot is now ON — the harness is active: it auto-dispatches approved items (scope + cwd + low/med risk), auto-dispatches reviews on completion, auto-re-dispatches on review FAIL, routes verdicts (PASS to done), and sends [orch-tick] state messages. You keep: approval, high-risk checkpoints, review overrides, flag_for_review, steering. Do not manually queue_dispatch/queue_review what the harness handles."
+    : "Autopilot is now OFF — the harness is idle: no auto flips, no verdict routing, no auto-dispatch/review, no ticks. YOU must do everything manually: reconcile completions (queue_update active to reviewing/failed), route reviews (queue_review), read verdicts and move items (queue_update), dispatch (queue_dispatch), and flag (flag_for_review). The queue tools remain available. Re-enable by running the autopilot on command.";
+}
+
 export function autopilotConfigPath(stateDir: string): string {
   return join(stateDir, "autopilot.config.json");
 }

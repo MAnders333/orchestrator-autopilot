@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import { createOpenCodeBackend, defaultRunsDir } from "../backends/opencode.ts";
+import { isAutopilotOn, autopilotModeMessage } from "../config.ts";
 import type { OpenCodeRunRecord } from "../backends/types.ts";
 import { Autopilot } from "../core.ts";
 import { loadAutopilotConfig, type AutopilotConfig } from "../config.ts";
@@ -138,7 +139,10 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
     },
     deliver: (message) => opts.delivery?.deliver(message),
     emit: (e) => e.forEach((x) => opts.onDomainEvent?.(x as { name: string; data?: Record<string, unknown> })),
-    enabled: () => true,
+    // The toggle means the same as on pi: OFF = the harness is idle (the
+    // runner gates completions/sweeps/ticks on this). The session id is the
+    // tick-delivery target (the session this plugin serves).
+    enabled: () => isAutopilotOn(stateDir, opts.delivery?.target() ?? ""),
     sweepIntervalMs: opts.sweepIntervalMs ?? cfg.sweepIntervalMs,
   });
 
@@ -349,10 +353,10 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
         switch (action) {
           case "on":
             writeSessionAutopilotState(stateDir, sid ?? "", "on");
-            return `Autopilot ON for session ${(sid ?? "?").slice(0, 8)} — the harness is active: it auto-dispatches approved items (scope + cwd + low/med risk), auto-dispatches reviews on completion, auto-re-dispatches on review FAIL, routes verdicts (PASS to done), and ticks you. You keep: approval, high-risk checkpoints, review overrides, flag_for_review, steering. Do not manually queue_dispatch/queue_review what the harness handles.`;
+            return autopilotModeMessage("on");
           case "off":
             writeSessionAutopilotState(stateDir, sid ?? "", "off");
-            return `Autopilot OFF for session ${(sid ?? "?").slice(0, 8)} — the harness is idle: no auto flips, no verdict routing, no auto-dispatch/review, no ticks. You must do everything manually: reconcile completions (queue_update active to reviewing/failed), route reviews (queue_review), read verdicts and move items (queue_update), dispatch (queue_dispatch), flag (flag_for_review). Queue tools remain available.`;
+            return autopilotModeMessage("off");
           case "status": {
             const st = isAutopilotOn(stateDir, sid);
             const cfg = loadAutopilotConfig(stateDir);

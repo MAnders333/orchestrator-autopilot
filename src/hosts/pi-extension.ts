@@ -46,7 +46,7 @@ const LIB_DIR = (() => {
 })();
 // jiti resolves .ts imports at runtime; createRequire keeps this ESM-safe.
 const { Autopilot } = require(`${LIB_DIR}/core.ts`) as typeof import("./core.ts");
-const { loadAutopilotConfig, saveAutopilotConfig, readSessionAutopilotState, writeSessionAutopilotState, isAutopilotOn, appendTelemetry, parseStateDirFromCommand } = require(`${LIB_DIR}/config.ts`) as typeof import("./config.ts");
+const { loadAutopilotConfig, saveAutopilotConfig, readSessionAutopilotState, writeSessionAutopilotState, isAutopilotOn, appendTelemetry, parseStateDirFromCommand, autopilotModeMessage } = require(`${LIB_DIR}/config.ts`) as typeof import("./config.ts");
 const { loadStore, saveStore, newStore, queryItems, addItem, updateItem, queueLengths, migrateFromMd } = require(`${LIB_DIR}/queue-store.ts`) as typeof import("./queue-store.ts");
 const { createSubagentBackend, defaultRunsDir } = require(`${LIB_DIR}/backends/index.ts`) as typeof import("./backends/index.ts");
 const { queueList, queueAdd, queueUpdate, queueDispatch, queueReview, queueSteer, repoCheck } = require(`${LIB_DIR}/tools/queue-ops.ts`) as typeof import("./tools/queue-ops.ts");
@@ -213,10 +213,9 @@ export default function (pi: ExtensionAPI) {
    *  must know which one it is running under. Best-effort: a busy-agent sync
    *  throw must not fail the command (followUp + guard, same as injection). */
   function informOrchestrator(mode: "on" | "off") {
-    const msg =
-      mode === "on"
-        ? "Autopilot is now ON in this session — the harness auto-dispatches approved items (scope + cwd + low/med risk), auto-dispatches reviews on completion, auto-re-dispatches on review FAIL, routes verdicts (PASS to done), and sends [orch-tick] state messages. You keep: approval, high-risk checkpoints, review overrides, flag_for_review, steering. Continue your loop with the harness active; do not manually queue_dispatch/queue_review what the harness handles."
-        : "Autopilot is now OFF in this session — the harness is idle: no auto flips, no verdict routing, no auto-dispatch/review, no ticks. YOU must do everything manually: reconcile completions (queue_update active to reviewing/failed), route reviews (queue_review), read verdicts and move items (queue_update), dispatch (queue_dispatch), and flag (flag_for_review). The queue tools remain available. Re-enable by running the autopilot on command.";
+    // The message is the framework's (autopilotModeMessage) — this host only
+    // DELIVERS it (followUp so a busy agent cannot fail the command).
+    const msg = autopilotModeMessage(mode);
     try {
       const sent = pi.sendUserMessage(msg, { deliverAs: "followUp" });
       if (sent && typeof (sent as Promise<void>).catch === "function") {
@@ -320,7 +319,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.events.on("subagent:async-complete", (payload: unknown) => {
-    if (!interactive || !isAutopilotOn(stateDir, sessionId)) return;
+    if (!interactive) return; // the RUNNER gates the autopilot toggle (shared)
     maybeInjectOrchestrate();
     // Attribute the completion (active→reviewing/failed), route the verdict,
     // and sweep — the shared runner owns this logic (identical in opencode).

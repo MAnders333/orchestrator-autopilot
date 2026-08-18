@@ -105,6 +105,11 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
 
   return {
     onCompletion(ev) {
+      // The SHARED autopilot gate: when the toggle is off, the harness ignores
+      // completions entirely (no flips, no verdict routing, no auto-actions) —
+      // the orchestrator reconciles manually. Both hosts inherit this; they
+      // must not re-implement the gate in their own handlers.
+      if (!enabled()) return;
       const result = autopilot.handleAsyncComplete(ev);
       if (opts.emit) opts.emit(result.domainEvents);
       // B + C, ONE consolidated harness tick. B — a review FAIL
