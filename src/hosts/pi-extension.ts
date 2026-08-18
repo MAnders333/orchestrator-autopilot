@@ -158,11 +158,22 @@ export default function (pi: ExtensionAPI) {
     // already processing..." while the agent is streaming (e.g. mid-command),
     // and the rejection is async so a sync try/catch cannot contain it.
     // followUp queues the injection until the current turn finishes.
-    void pi
-      .sendUserMessage("/orchestrate", { expandPromptTemplates: true, deliverAs: "followUp" })
-      .catch(() => {
-        orchestratorLoaded = false;
+    try {
+      const sent = pi.sendUserMessage("/orchestrate", {
+        expandPromptTemplates: true,
+        deliverAs: "followUp",
       });
+      if (sent && typeof (sent as Promise<void>).catch === "function") {
+        void (sent as Promise<void>).catch(() => {
+          orchestratorLoaded = false;
+        });
+      }
+    } catch {
+      // A synchronous throw (busy agent edge cases) must NOT take down the
+      // /autopilot command — the runner + ticks keep working; the injection
+      // retries on the next settled/completion event.
+      orchestratorLoaded = false;
+    }
   }
 
   let lastTickSentAt = 0;
@@ -505,7 +516,22 @@ export default function (pi: ExtensionAPI) {
           default:
             ctx.ui.notify("Usage: /autopilot on | off | status | capacity <n>", "info");
         }
-      } catch {
+      } catch (e) {
+        const err = e instanceof Error ? e : new Error(String(e));
+        // ALWAYS log the failure (even when autopilot is off) — the notify
+        // promises "see autopilot.jsonl"; without this line the promise is a
+        // lie and the failure is undebuggable.
+        try {
+          appendTelemetry(stateDir, JSON.stringify({
+            t: new Date().toISOString(),
+            type: "command-error",
+            command: args,
+            error: err.message,
+            stack: err.stack?.split("\n").slice(0, 6).join("\n"),
+          }));
+        } catch {
+          // jsonl write failing is not worth a second notification
+        }
         ctx.ui.notify("Autopilot command failed (see autopilot.jsonl)", "error");
       }
     },

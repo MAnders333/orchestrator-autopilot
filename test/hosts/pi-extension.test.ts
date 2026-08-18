@@ -172,6 +172,53 @@ describe("pi adapter smoke", () => {
     for (const h of pi._handlers[`subagents:rpc:v1:reply:${requestId}`] ?? []) h({ success: true, data: { fleet: { version: 1, entries, totalActive, omitted: 0 } } });
   }
 
+  test("a failing /autopilot command logs the real error to autopilot.jsonl (the notify's promise)", async () => {
+    startSession("tui");
+    const failNotify = { on: false };
+    ctx = { ui: { notify: (m: string, kind: string) => { if (failNotify.on) throw new Error("boom: notify"); } }, cwd: dir };
+    const logPath = join(dir, "autopilot.jsonl");
+    expect(existsSync(logPath)).toBe(false);
+    // The final "Autopilot ON" notify throws → the catch runs → logs the
+    // command-error, then its own notify throws again (flag still on) — the
+    // test absorbs that.
+    failNotify.on = true;
+    try {
+      await runAutopilotCmd("on");
+    } catch {
+      // expected — the catch's own notify re-threw
+    } finally {
+      failNotify.on = false;
+      ctx = { ui: { notify: () => {} }, cwd: dir };
+    }
+    const entries = readFileSync(logPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    const err = entries.find((e) => e.type === "command-error");
+    expect(err).toBeDefined();
+    expect(err.command).toBe("on");
+    expect(err.error).toContain("boom: notify");
+    expect(err.stack).toBeTruthy();
+  });
+
+  test("REGRESSION: a sync sendUserMessage throw mid-command cannot fail /autopilot (injection retries)", async () => {
+    startSession("tui");
+    const throwSend = { on: false };
+    const origSend = pi.sendUserMessage;
+    pi.sendUserMessage = ((_m: string, _o?: unknown) => {
+      if (throwSend.on) throw new Error("Agent is already processing...");
+      return origSend(_m, _o);
+    }) as typeof pi.sendUserMessage;
+    const notes: Array<[string, string]> = [];
+    ctx = { ui: { notify: (m: string, k: string) => notes.push([m, k]) }, cwd: dir };
+    try {
+      await runAutopilotCmd("on");
+      expect(notes.filter(([, k]) => k === "error")).toHaveLength(0); // no failure
+      expect(notes.some(([m]) => m.startsWith("Autopilot ON"))).toBe(true);
+    } finally {
+      throwSend.on = false;
+      pi.sendUserMessage = origSend;
+      ctx = { ui: { notify: () => {} }, cwd: dir };
+    }
+  });
+
   test("registers /autopilot + the four queue tools", () => {
     expect(pi._commands()["autopilot"]).toBeDefined();
     for (const t of ["queue_list", "queue_add", "queue_update", "queue_dispatch"]) {
