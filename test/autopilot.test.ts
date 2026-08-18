@@ -90,7 +90,7 @@ describe("core.Autopilot (store-first)", () => {
   test("completion flips the store item (active→reviewing) and fires dispatch tick", () => {
     writeStore(dir, [
       item({ key: "G1", status: "active", runId: "371d1bb9", title: "g1" }),
-      item({ key: "B1", status: "approved", ready: true, title: "b1" }),
+      item({ key: "B1", status: "approved", title: "b1" }),
     ]);
     const a = make();
     const r = a.handleAsyncComplete({
@@ -124,14 +124,14 @@ describe("core.Autopilot (store-first)", () => {
   });
 
   test("non-orchestrator run (not in store, not a worker agent) → no tick, no flip", () => {
-    writeStore(dir, [item({ key: "B1", status: "approved", ready: true, title: "b1" })]);
+    writeStore(dir, [item({ key: "B1", status: "approved", title: "b1" })]);
     const r = make().handleAsyncComplete({ runId: "99999999-aaaa", agent: "orchestrator-reviewer", success: true });
     expect(r.flipped).toBe(false);
     expect(r.freedSlot).toBe(true); // a reviewer completion frees its slot — capacity counts all subagents
   });
 
   test("ledger-tracked completion without store match still ticks (fail-safe)", () => {
-    writeStore(dir, [item({ key: "B1", status: "approved", ready: true, title: "b1" })]);
+    writeStore(dir, [item({ key: "B1", status: "approved", title: "b1" })]);
     const a = make();
     a.handleAsyncStarted("d67a18c6-c2be-4e7d-be25-5d07a2931601", "worker");
     const r = a.handleAsyncComplete({ runId: "d67a18c6-c2be-4e7d-be25-5d07a2931601", agent: "workflow", success: true });
@@ -144,7 +144,7 @@ describe("core.Autopilot (store-first)", () => {
   test("sweep(activate) nudges a pre-existing capacity gap with zero dispatches", () => {
     writeStore(dir, [
       item({ key: "G1", status: "active", runId: "371d1bb9", title: "g1" }),
-      item({ key: "B1", status: "approved", ready: true, title: "b1" }),
+      item({ key: "B1", status: "approved", title: "b1" }),
     ]);
     const r = make().sweep("activate");
     expect(r.tick?.reason).toBe("dispatch");
@@ -152,7 +152,7 @@ describe("core.Autopilot (store-first)", () => {
   });
 
   test("settled re-ticks only on state change; timer re-nudges a persistent gap", () => {
-    writeStore(dir, [item({ key: "B1", status: "approved", ready: true, title: "b1" })]);
+    writeStore(dir, [item({ key: "B1", status: "approved", title: "b1" })]);
     const a = make();
     // settled: first tick, then suppressed for unchanged state
     expect(a.sweep("settled", 1_000_000).tick).not.toBeNull();
@@ -165,8 +165,8 @@ describe("core.Autopilot (store-first)", () => {
       item({ key: "G1", status: "active", runId: "aaaa1111", title: "g1" }),
       item({ key: "G2", status: "active", runId: "aaaa2222", title: "g2" }),
       item({ key: "G3", status: "active", runId: "aaaa3333", title: "g3" }),
-      item({ key: "B1", status: "approved", ready: true, title: "b1" }),
-      item({ key: "B2", status: "approved", ready: true, title: "b2" }),
+      item({ key: "B1", status: "approved", title: "b1" }),
+      item({ key: "B2", status: "approved", title: "b2" }),
     ]);
     expect(a.sweep("timer", 3_000_000).tick).toBeNull();
   });
@@ -251,7 +251,7 @@ describe("core.Autopilot (store-first)", () => {
     writeStore(dir, [
       item({ key: "G1", status: "active", runId: "371d1bb9", title: "g1" }),
       item({ key: "R1", status: "reviewing", title: "r1", reviewerRunId: "6f559944" }),
-      item({ key: "B1", status: "approved", ready: true, title: "b1" }),
+      item({ key: "B1", status: "approved", title: "b1" }),
     ]);
     const a = make();
     const r = a.sweep("timer", 1_000_000); // no fleet → store fallback
@@ -261,7 +261,7 @@ describe("core.Autopilot (store-first)", () => {
 
   test("fleet ledger guards against store undercount (no false free slots)", () => {
     // store has 0 active (orchestrator forgot to dispatch-record), ledger says 2 running
-    writeStore(dir, [item({ key: "B1", status: "approved", ready: true, title: "b1" })]);
+    writeStore(dir, [item({ key: "B1", status: "approved", title: "b1" })]);
     const a = make();
     a.handleAsyncStarted("run-1-aaaa-1111", "worker");
     a.handleAsyncStarted("run-2-aaaa-2222", "worker");
@@ -273,7 +273,7 @@ describe("core.Autopilot (store-first)", () => {
   test("tick carries transparent FLEET:/QUEUE: facts with readyKeys", () => {
     writeStore(dir, [
       item({ key: "G1", status: "active", runId: "371d1bb9", title: "g1" }),
-      item({ key: "B1", status: "approved", ready: true, title: "b1" }),
+      item({ key: "B1", status: "approved", title: "b1" }),
     ]);
     const a = make();
     a.handleAsyncComplete({ runId: "371d1bb9-aaaa", agent: "worker", success: true });
@@ -354,7 +354,7 @@ describe("core config + sentinel", () => {
   test("capacity change reflects in tick facts", () => {
     writeStore(dir, [
       item({ key: "G1", status: "active", runId: "371d1bb9", title: "g1" }),
-      item({ key: "B1", status: "approved", ready: true, title: "b1" }),
+      item({ key: "B1", status: "approved", title: "b1" }),
     ]);
     const a = make({ maxSlots: 4 });
     a.handleAsyncComplete({ runId: "371d1bb9-aaaa", agent: "worker", success: true });
@@ -412,7 +412,7 @@ describe("intake suppression (proposals pending)", () => {
     const f = make();
     writeStore([
       item({ key: "P1", status: "proposal", title: "p1" }),
-      item({ key: "A1", status: "approved", ready: true, title: "a1" }),
+      item({ key: "A1", status: "approved", title: "a1" }),
     ]);
     const t = f.sweep("timer", 1_000_000).tick;
     expect(t?.reason).toBe("dispatch"); // ready 1 + slot free → dispatch, not intake

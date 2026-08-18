@@ -44,7 +44,6 @@ function sample(over: Partial<Parameters<typeof addItem>[1]> = {}): Parameters<t
   return {
     key: "B4-AGENTIC-JUDGE-TIMEOUT",
     status: "approved",
-    ready: true,
     blocker: null,
     title: "judge timeout",
     scope: "add timeout to the eval harness",
@@ -102,7 +101,7 @@ describe("queue-store transitions", () => {
     const it = addItem(store, sample());
     // simulate the corruption: status got clobbered to undefined
     store.items[it.key] = { ...it, status: undefined as never };
-    updateItem(store, "B4-AGENTIC-JUDGE-TIMEOUT", { status: "approved", ready: true });
+    updateItem(store, "B4-AGENTIC-JUDGE-TIMEOUT", { status: "approved" });
     expect(store.items["B4-AGENTIC-JUDGE-TIMEOUT"].status).toBe("approved");
     expect(queueLengths(store).approved).toBe(1);
     // but a legit illegal transition still throws
@@ -124,7 +123,6 @@ describe("queue-store queries", () => {
     const items = queryItems(s, { status: "approved" });
     expect(items.map((i) => i.key)).toEqual(["B4-AGENTIC-JUDGE-TIMEOUT"]); // A9 is blocked, not approved
     expect(queueLengths(s)).toEqual({ proposal: 0, approved: 1, blocked: 1, active: 1, reviewing: 0, failed: 0, done: 0, rejected: 0 });
-    expect(readyItems(s).map((i) => i.key)).toEqual(["B4-AGENTIC-JUDGE-TIMEOUT"]);
   });
 
   test("since filter (last change) + updatedAt desc sort", () => {
@@ -161,8 +159,8 @@ describe("queue-store run attribution", () => {
 
   test("itemByRunId finds active items; itemByReviewerRunId only reviewing items", () => {
     const store = newStore();
-    addItem(store, { key: "W1", status: "active", ready: false, blocker: null, title: "w1", scope: "", evidence: "", value: "", urgency: "", risk: "low", runId: "371d1bb9-aaaa-bbbb", reviewerRunId: null, attempts: 0, notes: "", createdAt: "x", updatedAt: "x" });
-    addItem(store, { key: "R1", status: "reviewing", ready: false, blocker: null, title: "r1", scope: "", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: "6f559944-cccc", attempts: 0, notes: "", createdAt: "x", updatedAt: "x" });
+    addItem(store, { key: "W1", status: "active", blocker: null, title: "w1", scope: "", evidence: "", value: "", urgency: "", risk: "low", runId: "371d1bb9-aaaa-bbbb", reviewerRunId: null, attempts: 0, notes: "", createdAt: "x", updatedAt: "x" });
+    addItem(store, { key: "R1", status: "reviewing", blocker: null, title: "r1", scope: "", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: "6f559944-cccc", attempts: 0, notes: "", createdAt: "x", updatedAt: "x" });
     expect(itemByRunId(store, "371d1bb9-dead-beef")?.key).toBe("W1");
     expect(itemByRunId(store, "6f559944-dead-beef")).toBeNull(); // reviewer run is not a worker run
     expect(itemByReviewerRunId(store, "6f559944-cccc-dddd")?.key).toBe("R1");

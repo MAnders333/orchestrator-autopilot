@@ -1,7 +1,7 @@
 // auto-dispatch.ts — the framework ACTS on the queue instead of only nudging.
 // Two automations (both gated on the item being FULLY specified):
 //
-//  A. autoDispatchEligible — when a slot frees, fill it with approved+ready
+//  A. autoDispatchEligible — when a slot frees, fill it with approved items
 //     items that have a complete scope + cwd + low/medium risk. The task is
 //     `KEY: <key>` + the scope (the orchestrator writes scopes at
 //     proposal/approval time — the dispatch-time scoping moves earlier).

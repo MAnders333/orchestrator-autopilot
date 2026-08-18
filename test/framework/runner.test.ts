@@ -61,7 +61,7 @@ function setup(opts: { sweepIntervalMs?: number } = {}): Fixture {
 
 function seed(f: Fixture, key: string, over: Record<string, unknown> = {}): void {
   const s = load(f);
-  addItem(s, { key, title: key.toLowerCase(), status: "approved", ready: true, blocker: null, scope: "", evidence: "", value: "", urgency: "", risk: "", runId: null, notes: "", ...over });
+  addItem(s, { key, title: key.toLowerCase(), status: "approved", blocker: null, scope: "", evidence: "", value: "", urgency: "", risk: "", runId: null, notes: "", ...over });
   save(f, s);
 }
 function load(f: Fixture) { return JSON.parse(readFileSync(join(f.dir, "queue.json"), "utf8")); }

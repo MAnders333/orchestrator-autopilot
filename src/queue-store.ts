@@ -131,11 +131,6 @@ export function queueLengths(store: QueueStore): QueueLengths {
   return out;
 }
 
-/** Approved items that are ready to dispatch (the extension's deterministic count). */
-export function readyItems(store: QueueStore): QueueItem[] {
-  return Object.values(store.items).filter((it) => it.status === "approved" && it.ready);
-}
-
 export interface QueueQuery {
   /** filter by one or more statuses (omitted = all) */
   status?: QueueStatus | QueueStatus[];
@@ -173,7 +168,6 @@ export function queryItems(store: QueueStore, q: QueueQuery = {}): Array<Partial
     const base = {
       key: i.key,
       status: i.status,
-      ready: i.status === "approved" ? i.ready : undefined,
       blocker: i.blocker,
       title: i.title,
       runId: i.runId,
@@ -215,7 +209,6 @@ export function runIdMatches(fullRunId: string, token: string): boolean {
 
 export interface UpdatePatch {
   status?: QueueStatus;
-  ready?: boolean;
   blocker?: BlockerReason;
   runId?: string | null;
   reviewerRunId?: string | null;

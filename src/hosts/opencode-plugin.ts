@@ -184,7 +184,7 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
       (a) => queueAdd(ctx, a),
     ),
     queue_update: def(
-      "Update a queue item: status (validated transitions: proposal→approved/rejected, approved→active/rejected, active→reviewing/failed, reviewing→done/failed/active, failed→active), ready flag, blocker, or free-form notes. active→reviewing/failed are event-driven — do NOT set them by hand.",
+      "Update a queue item: status (validated transitions: proposal→approved/rejected, approved→active/rejected, active→reviewing/failed, reviewing→done/failed/active, failed→active), blocker, or free-form notes. active→reviewing/failed are event-driven — do NOT set them by hand.",
       [
         { name: "key", type: "string", required: true },
         { name: "status", type: "string", required: false },
@@ -200,9 +200,9 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
       (a) => queueUpdate(ctx, a),
     ),
     queue_dispatch: def(
-      "Dispatch a queue item: spawns the worker (fresh context, worktree isolation) AND records approved→active with the run id — atomically. Call with the key of an approved+ready item and the scoped worker prompt. High-risk items: surface the final checkpoint BEFORE calling. Returns the run id.",
+      "Dispatch a queue item: spawns the worker (fresh context, worktree isolation) AND records approved→active with the run id — atomically. Call with the key of an approved item and the scoped worker prompt. High-risk items: surface the final checkpoint BEFORE calling. Returns the run id.",
       [
-        { name: "key", type: "string", required: true, description: "queue key of an approved+ready item" },
+        { name: "key", type: "string", required: true, description: "queue key of an approved item" },
         { name: "task", type: "string", required: true, description: "the scoped worker prompt (self-contained; KEY: <key> as first line is recommended)" },
         { name: "cwd", type: "string", required: false, description: "repo the worker operates on (worktree isolation runs THERE). REQUIRED when the session cwd is not the target repo." },
         { name: "timeoutMs", type: "number", required: false },
