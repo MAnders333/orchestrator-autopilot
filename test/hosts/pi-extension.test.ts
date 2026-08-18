@@ -4,6 +4,8 @@
 // completion flips, per-session gating, and child-process inertness.
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolveStateDir } from "../../src/config.ts";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -607,17 +609,17 @@ describe("pi adapter smoke", () => {
     expect(pi._sent.filter((s) => s.kind === "message").length).toBe(0);
   });
 
-  test("no env → the documented default state dir (the shared resolver never fails closed)", async () => {
+  test("no env → the documented default state dir (the shared resolver never fails closed)", () => {
     delete process.env.AUTOPILOT_STATE_DIR;
     delete process.env.PI_CODING_AGENT_DIR;
-    mod = await import("file://" + join(import.meta.dir, "../../src/hosts/pi-extension.ts") + "?fresh=" + Date.now());
-    const pi2 = mockPi();
-    mod.default(pi2);
-    // the extension loads against the framework's documented default
-    expect(pi2._commands()["autopilot"]).toBeDefined();
+    // PURE resolution check — never load the extension against the real dir
+    // (a previous version of this test did, and LEAKED session state into
+    // ~/.local/state/orchestrator: the fake-sid artifact).
+    expect(resolveStateDir(undefined)).toBe(join(homedir(), ".local/state/orchestrator"));
   });
 
-  test("state dir resolved authoritatively from the projected orchestrate.md", async () => {
+
+  test("state dir resolved authoritatively from the projected orchestrate.md", () => {
     delete process.env.AUTOPILOT_STATE_DIR;
     const fakeAgentDir = join(dir, "fake-mode");
     const fakeState = join(dir, "resolved-state");
@@ -626,13 +628,11 @@ describe("pi adapter smoke", () => {
       join(fakeAgentDir, "prompts", "orchestrate.md"),
       `# Orchestrator Mode\n\n## Workspace (fake mode — not synced)\n\n- \`STATE_DIR\`: \`${fakeState}/\`\n`,
     );
-    process.env.PI_CODING_AGENT_DIR = fakeAgentDir;
-    const pi2 = mockPi();
-    mod.default(pi2);
-    expect(pi2._commands()["autopilot"]).toBeDefined();
-    for (const h of pi2._handlers["session_start"] ?? []) h({ reason: "new" }, { mode: "tui", sessionManager: { getSessionId: () => "fake-sid" } });
-    await pi2._commands()["autopilot"].handler("on", { ui: { notify: () => {} }, cwd: dir });
-    expect(existsSync(join(fakeState, "autopilot.sessions.json"))).toBe(true);
+    // PURE resolution check — the command file's STATE_DIR line wins. No
+    // extension load, no writes (this test previously ran '/autopilot on'
+    // against the resolved dir and leaked fake-sid into the REAL sessions
+    // file when the resolution fell back to the default).
+    expect(resolveStateDir(join(fakeAgentDir, "prompts/orchestrate.md"))).toBe(fakeState);
     delete process.env.PI_CODING_AGENT_DIR;
   });
 });
