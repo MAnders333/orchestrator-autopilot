@@ -50,6 +50,7 @@ const { loadAutopilotConfig, saveAutopilotConfig, readSessionAutopilotState, wri
 const { loadStore, saveStore, newStore, queryItems, addItem, updateItem, queueLengths, migrateFromMd } = require(`${LIB_DIR}/queue-store.ts`) as typeof import("./queue-store.ts");
 const { createSubagentBackend, defaultRunsDir } = require(`${LIB_DIR}/backends/index.ts`) as typeof import("./backends/index.ts");
 const { queueList, queueAdd, queueUpdate, queueDispatch, queueReview, queueSteer, repoCheck } = require(`${LIB_DIR}/tools/queue-ops.ts`) as typeof import("./tools/queue-ops.ts");
+const { CONTRACTS } = require(`${LIB_DIR}/tools/contracts.ts`) as typeof import("./tools/contracts.ts");
 const { createFrameworkRunner } = require(`${LIB_DIR}/framework/runner.ts`) as typeof import("./framework/runner.ts");
 const { flagForReview } = require(`${LIB_DIR}/framework/flag-review.ts`) as typeof import("./framework/flag-review.ts");
 const { installPiReviewer } = require(`${LIB_DIR}/agents/install.ts`) as typeof import("./agents/install.ts");
@@ -335,9 +336,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "queue_list",
     label: "Queue list",
-    description:
-      "List the orchestrator task queue (pi host — the programmatic store). Filter by status and/or last-change timestamp; compact view by default " +
-      "(heavy free-form fields only with includeNotes). Returns per-status counts + fleet occupancy (event-derived) + matching items.",
+    description: CONTRACTS.queue_list,
     parameters: Type.Object({
       status: Type.Optional(Type.Union([Type.String({ description: "status filter (proposal|approved|active|reviewing|failed|done)" }), Type.Array(Type.String())])),
       since: Type.Optional(Type.String({ description: "ISO timestamp — only items with updatedAt >= since" })),
@@ -354,7 +353,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "queue_add",
     label: "Queue add",
-    description: "Add a new queue item (proposal by default, or approved). Notes/scope are free-form — no schema constraints on content.",
+    description: CONTRACTS.queue_add,
     parameters: Type.Object({
       key: Type.String({ description: "unique key, e.g. B4-AGENTIC-JUDGE-TIMEOUT" }),
       status: Type.Optional(Type.String({ description: "proposal (default) | approved" })),
@@ -375,10 +374,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "queue_update",
     label: "Queue update",
-    description:
-      "Update a queue item: status (validated transitions: proposal→approved/rejected, approved→active/rejected, active→reviewing/failed, " +
-      "reviewing→done/failed/active, failed→active, done→approved (human re-open — you found issues in your review)), blocker (parked/serialized/merge/decision), or free-form notes. " +
-      "active→reviewing/failed are event-driven — do NOT set them by hand.",
+    description: CONTRACTS.queue_update,
     parameters: Type.Object({
       key: Type.String(),
       status: Type.Optional(Type.String({ description: "target status (see description for valid transitions); approved REQUIRES a complete scope + cwd" })),
@@ -401,10 +397,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "queue_dispatch",
     label: "Queue dispatch",
-    description:
-      "Dispatch a queue item: spawns the worker (same executor as the subagent tool; fresh context, worktree isolation) AND records " +
-      "approved→active with the run id — atomically. Call with the key of an approved item and the scoped worker prompt. " +
-      "High-risk items: still surface the final checkpoint BEFORE calling this. Returns the run id (use it for the inspector pane).",
+    description: CONTRACTS.queue_dispatch,
     parameters: Type.Object({
       key: Type.String({ description: "queue key of an approved item" }),
       task: Type.String({ description: "the scoped worker prompt (self-contained; KEY: <key> as first line is recommended)" }),
@@ -420,10 +413,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "queue_review",
     label: "Queue review",
-    description:
-      "Dispatch the reviewer for a `reviewing` item: spawns the reviewer subagent (read-only, no worktree) via the same executor, records the " +
-      "reviewerRunId on the item, and emits orch:reviewer-dispatched. When the reviewer completes, the extension parses its 'Verdict: PASS/FAIL' " +
-      "line and auto-transitions (PASS → done, FAIL → active re-dispatch, cap → failed) — see the queue model. Returns the run id.",
+    description: CONTRACTS.queue_review,
     parameters: Type.Object({
       key: Type.String({ description: "queue key of a `reviewing` item" }),
       task: Type.Optional(Type.String({ description: "optional reviewer prompt; the verdict contract is injected if omitted" })),
@@ -438,11 +428,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "queue_steer",
     label: "Queue steer",
-    description:
-      "Steer a RUNNING worker or reviewer (dispatched via queue_dispatch/queue_review). Writes a steer request to pi-subagents' control channel " +
-      "(the same mechanism FleetView uses) and VERIFIES the child's acknowledgment. Headless (-p) children do not support steering (supported:false " +
-      "capability or silent no-ack) — the tool reports that honestly instead of claiming delivery. If the run dir is gone, the run completed/died — " +
-      "stop + re-dispatch instead.",
+    description: CONTRACTS.queue_steer,
     parameters: Type.Object({
       key: Type.String({ description: "queue key of the running worker/reviewer" }),
       message: Type.String({ description: "the steering instruction (interrupt-and-deliver)" }),
@@ -458,8 +444,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "flag_for_review",
     label: "Flag for review",
-    description:
-      "Flag that you believe the current task is complete and ready for the user's judgment. Call this ONLY when you believe the work is done — not after every turn, not when you have a question. Before calling, reason explicitly about the risk (what happens if this is wrong) and blast radius (what breaks). If the work produced a commit and the pre-commit reviewer passed, set self_reviewed=true and review_method='commit-hook'. If you ran a reviewer subagent, set review_method='reviewer-subagent'. If no automated review ran, set self_reviewed=false.",
+    description: CONTRACTS.flag_for_review,
     parameters: Type.Object({
       summary: Type.String({ description: "What was done (one line)" }),
       risk: Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")], { description: "low = mistake has no real-world impact; medium = contained but visible; high = affects production/data/auth/pipelines" }),

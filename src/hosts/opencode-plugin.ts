@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import { createOpenCodeBackend, defaultRunsDir } from "../backends/opencode.ts";
 import { isAutopilotOn, autopilotModeMessage, resolveStateDir } from "../config.ts";
+import { CONTRACTS } from "../tools/contracts.ts";
 import type { OpenCodeRunRecord } from "../backends/types.ts";
 import { Autopilot } from "../core.ts";
 import { loadAutopilotConfig, type AutopilotConfig } from "../config.ts";
@@ -172,8 +173,7 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
       ],
       (a) => queueList(ctx, a),
     ),
-    queue_add: def(
-      "Add a new queue item (proposal by default, or approved). Notes/scope are free-form — no schema constraints on content.",
+    queue_add: def(CONTRACTS.queue_add,
       [
         { name: "key", type: "string", required: true, description: "unique key, e.g. B4-AGENTIC-JUDGE-TIMEOUT" },
         { name: "title", type: "string", required: true },
@@ -187,8 +187,7 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
       ],
       (a) => queueAdd(ctx, a),
     ),
-    queue_update: def(
-      "Update a queue item: status (validated transitions: proposal→approved/rejected, approved→active/rejected, active→reviewing/failed, reviewing→done/failed/active, failed→active, done→approved (human re-open — you found issues in your review)); approved REQUIRES a complete scope + cwd. blocker, or free-form notes. active→reviewing/failed are event-driven — do NOT set them by hand.",
+    queue_update: def(CONTRACTS.queue_update,
       [
         { name: "key", type: "string", required: true },
         { name: "status", type: "string", required: false },
@@ -204,8 +203,7 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
       ],
       (a) => queueUpdate(ctx, a),
     ),
-    queue_dispatch: def(
-      "Dispatch a queue item: spawns the worker (fresh context, worktree isolation) AND records approved→active with the run id — atomically. Call with the key of an approved item and the scoped worker prompt. High-risk items: surface the final checkpoint BEFORE calling. Returns the run id.",
+    queue_dispatch: def(CONTRACTS.queue_dispatch,
       [
         { name: "key", type: "string", required: true, description: "queue key of an approved item" },
         { name: "task", type: "string", required: true, description: "the scoped worker prompt (self-contained; KEY: <key> as first line is recommended)" },
@@ -215,7 +213,7 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
       (a) => queueDispatch(ctx, a),
     ),
     queue_review: def(
-      "Dispatch the reviewer for a `reviewing` item: spawns the reviewer (read-only, no worktree), records the reviewerRunId, and emits orch:reviewer-dispatched. When the reviewer completes, the framework parses its first-line 'Verdict: PASS/FAIL' and auto-transitions (PASS → done, FAIL → active re-dispatch, cap → failed).",
+      CONTRACTS.queue_review,
       [
         { name: "key", type: "string", required: true, description: "queue key of a `reviewing` item" },
         { name: "task", type: "string", required: false, description: "optional reviewer prompt; the verdict contract is injected if omitted" },
@@ -224,7 +222,7 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
       (a) => queueReview(ctx, a),
     ),
     queue_steer: def(
-      "Steer a RUNNING worker or reviewer. Headless opencode runs (oc run) have NO steering channel — the backend honestly refuses; stop + re-dispatch instead.",
+      CONTRACTS.queue_steer,
       [
         { name: "key", type: "string", required: true, description: "queue key of the running worker/reviewer" },
         { name: "message", type: "string", required: true, description: "the steering instruction (interrupt-and-deliver)" },
@@ -372,8 +370,7 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
   });
 
   tools.flag_for_review = tool({
-    description:
-      "Flag that you believe the current task is complete and ready for the user's judgment. Call this ONLY when you believe the work is done — not after every turn, not when you have a question. Reason explicitly about risk (what happens if wrong) and blast radius (what breaks) before flagging. self_reviewed=true when an automated review passed (commit-hook / reviewer-subagent), else false.",
+    description: CONTRACTS.flag_for_review,
     args: {
       summary: tool.schema.string().describe("What was done (one line)"),
       risk: tool.schema.string().describe("low | medium | high"),
