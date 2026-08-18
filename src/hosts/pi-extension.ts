@@ -51,6 +51,7 @@ const { loadStore, saveStore, newStore, queryItems, addItem, updateItem, queueLe
 const { createSubagentBackend, defaultRunsDir } = require(`${LIB_DIR}/backends/index.ts`) as typeof import("./backends/index.ts");
 const { queueList, queueAdd, queueUpdate, queueDispatch, queueReview, queueSteer, repoCheck } = require(`${LIB_DIR}/tools/queue-ops.ts`) as typeof import("./tools/queue-ops.ts");
 const { createFrameworkRunner } = require(`${LIB_DIR}/framework/runner.ts`) as typeof import("./framework/runner.ts");
+const { flagForReview } = require(`${LIB_DIR}/framework/flag-review.ts`) as typeof import("./framework/flag-review.ts");
 const { installPiReviewer } = require(`${LIB_DIR}/agents/install.ts`) as typeof import("./agents/install.ts");
 const { existsSync, readFileSync, renameSync } = require("node:fs") as typeof import("node:fs");
 
@@ -432,6 +433,24 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const r = await queueSteer(opsFor(ctx), params as never);
       return { content: [{ type: "text", text: r.text }], details: r.details };
+    },
+  });
+
+  pi.registerTool({
+    name: "flag_for_review",
+    label: "Flag for review",
+    description:
+      "Flag that you believe the current task is complete and ready for the user's judgment. Call this ONLY when you believe the work is done — not after every turn, not when you have a question. Before calling, reason explicitly about the risk (what happens if this is wrong) and blast radius (what breaks). If the work produced a commit and the pre-commit reviewer passed, set self_reviewed=true and review_method='commit-hook'. If you ran a reviewer subagent, set review_method='reviewer-subagent'. If no automated review ran, set self_reviewed=false.",
+    parameters: Type.Object({
+      summary: Type.String({ description: "What was done (the task and the outcome)" }),
+      risk: Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")], { description: "low = mistake has no real-world impact; medium = contained but visible; high = affects production/data/auth/pipelines" }),
+      blast_radius: Type.String({ description: "What breaks if this is wrong — be specific" }),
+      self_reviewed: Type.Boolean({ description: "true if the pre-commit reviewer or a reviewer subagent passed; false if no automated review ran" }),
+      review_method: Type.Union([Type.Literal("commit-hook"), Type.Literal("reviewer-subagent"), Type.Literal("none")], { description: "How the self-review happened" }),
+    }),
+    async execute(_toolCallId, params: { summary: string; risk: "low" | "medium" | "high"; blast_radius: string; self_reviewed: boolean; review_method: "commit-hook" | "reviewer-subagent" | "none" }) {
+      const { deliveryNote } = flagForReview(params);
+      return { content: [{ type: "text", text: `Flagged for review. Risk: ${params.risk}. ${deliveryNote}` }], details: {} };
     },
   });
 

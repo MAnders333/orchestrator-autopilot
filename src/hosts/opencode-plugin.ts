@@ -13,6 +13,7 @@ import {
 } from "../tools/queue-ops.ts";
 import { installOpenCodeReviewer, installOpenCodeWorker } from "../agents/install.ts";
 import { createFrameworkRunner } from "../framework/runner.ts";
+import { flagForReview } from "../framework/flag-review.ts";
 
 // opencode-plugin.ts — the opencode HOST (one file per host, symmetric with
 // hosts/pi-extension.ts). Two layers in one file:
@@ -330,6 +331,22 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
   const fw = createOpenCodeFramework({
     stateDir: resolveStateDir(),
     delivery,
+  });
+
+  tools.flag_for_review = tool({
+    description:
+      "Flag that you believe the current task is complete and ready for the user's judgment. Call this ONLY when you believe the work is done — not after every turn, not when you have a question. Reason explicitly about risk (what happens if wrong) and blast radius (what breaks) before flagging. self_reviewed=true when an automated review passed (commit-hook / reviewer-subagent), else false.",
+    args: {
+      summary: tool.schema.string().describe("What was done (the task and the outcome)"),
+      risk: tool.schema.string().describe("low | medium | high"),
+      blast_radius: tool.schema.string().describe("What breaks if this is wrong — be specific"),
+      self_reviewed: tool.schema.boolean().describe("true if an automated review passed, else false"),
+      review_method: tool.schema.string().describe("commit-hook | reviewer-subagent | none"),
+    },
+    execute: async (args) => {
+      const { deliveryNote } = flagForReview(args as never);
+      return `Flagged for review. Risk: ${args.risk}. ${deliveryNote}`;
+    },
   });
 
   const tools: Record<string, ReturnType<typeof tool>> = {};
