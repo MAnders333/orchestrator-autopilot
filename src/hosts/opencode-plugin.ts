@@ -127,6 +127,7 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
   // the promptAsync delivery; the pi host supplies the same shape with
   // sendMessage.
   const runner = createFrameworkRunner({
+    stateDir,
     autopilot,
     backend,
     host: {
@@ -157,7 +158,7 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
 
   const tools: Record<string, OpenCodeToolDef> = {
     queue_list: def(
-      "List the orchestrator task queue. Filter by status/since/sort; compact view by default, heavy fields only with includeNotes. Returns per-status counts + fleet occupancy + matching items.",
+      "List the orchestrator task queue (opencode host). Filter by status/since/sort; compact view by default, heavy fields only with includeNotes. Returns per-status counts + fleet occupancy + matching items.",
       [
         { name: "status", type: "string", required: false, description: "status filter (proposal|approved|active|reviewing|failed|done)" },
         { name: "since", type: "string", required: false, description: "ISO timestamp — only items with updatedAt >= since" },
@@ -331,6 +332,44 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
   const fw = createOpenCodeFramework({
     stateDir: resolveStateDir(),
     delivery,
+  });
+
+  tools.autopilot = tool({
+    description:
+      "Toggle or query the orchestrator autopilot for THIS session. on: enable ticks + the intake/dispatch/review nudges; off: disable them (the queue tools stay available); status: show the current state + capacity; capacity <n>: set the worker slot limit. The toggle is per-session (like the pi /autopilot command).",
+    args: {
+      action: tool.schema.string().describe("on | off | status | capacity"),
+      value: tool.schema.string().optional().describe("capacity value (when action=capacity)"),
+    },
+    execute: async (args) => {
+      const sid = delivery.target();
+      const action = String(args.action ?? "").trim();
+      try {
+        switch (action) {
+          case "on":
+            writeSessionAutopilotState(stateDir, sid ?? "", "on");
+            return `Autopilot ON for session ${(sid ?? "?").slice(0, 8)} — ticks + capacity nudges enabled. (Turn it on in the session that should orchestrate.)`;
+          case "off":
+            writeSessionAutopilotState(stateDir, sid ?? "", "off");
+            return `Autopilot OFF for session ${(sid ?? "?").slice(0, 8)} — ticks disabled; queue tools remain available.`;
+          case "status": {
+            const st = isAutopilotOn(stateDir, sid);
+            const cfg = loadAutopilotConfig(stateDir);
+            return `Autopilot ${st ? "ON" : "OFF"} (this session${sid ? " " + sid.slice(0, 8) : ""}) — capacity ${cfg.maxSlots} workers, queue-low < ${cfg.queueLowThreshold} ready.`;
+          }
+          case "capacity": {
+            const n = Number(String(args.value ?? "").trim());
+            if (!Number.isFinite(n) || n < 1) return "Usage: autopilot capacity <n> (n ≥ 1)";
+            saveAutopilotConfig(stateDir, { ...loadAutopilotConfig(stateDir), maxSlots: n });
+            return `Worker capacity set to ${n} (takes effect immediately).`;
+          }
+          default:
+            return "Usage: autopilot on | off | status | capacity <n>";
+        }
+      } catch (err) {
+        return `autopilot failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    },
   });
 
   tools.flag_for_review = tool({

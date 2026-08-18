@@ -11,9 +11,12 @@
 
 import type { SubagentBackend } from "../backends/types.ts";
 import type { Autopilot, CompletionEvent } from "../core.ts";
+import { loadAutopilotConfig } from "../config.ts";
 import { createTickRouter, type TickHostState } from "./tick-router.ts";
+import { autoDispatchEligible, autoRedispatch } from "./auto-dispatch.ts";
 
 export interface RunnerOptions {
+  stateDir: string;
   autopilot: Autopilot;
   backend: SubagentBackend;
   /** The tick delivery gate state (what interactive/loaded/busy/compacting
@@ -29,6 +32,11 @@ export interface RunnerOptions {
   cooldownMs?: number; // min gap between delivered ticks (default 1500)
   /** Periodic sweep interval; 0 disables the timer. */
   sweepIntervalMs: number;
+  /** Auto-dispatch + auto re-dispatch (default true; AUTOPILOT_AUTO_DISPATCH=0
+   *  disables). The framework fills free slots + re-dispatches FAIL items
+   *  itself — the orchestrator keeps the judgment (intake, approval,
+   *  high-risk checkpoints). */
+  autoDispatch?: boolean;
 }
 
 export interface FrameworkRunner {
@@ -54,9 +62,24 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     if (t?.message) router.send(t.message);
   };
 
+  const autoDispatchOn = opts.autoDispatch ?? true;
+  const cfg = () => loadAutopilotConfig(opts.stateDir);
   const sweep = async (source: "settled" | "activate" | "timer" | "worker-done"): Promise<void> => {
     if (!enabled()) return;
+    // The authoritative fleet, fetched ONCE — both the auto-dispatch (A) and
+    // the engine sweep use it (one RPC, and the request is emitted synchronously
+    // so hosts/replies see it immediately).
     const fleet = await opts.backend.fleetStatus();
+    // A — fill free slots with auto-dispatchable items before deciding ticks,
+    // so the dispatch nudge fires only for the MANUAL cases (high-risk or
+    // incomplete scope/cwd).
+    if (source === "worker-done" && autoDispatchOn) {
+      try {
+        await autoDispatchEligible(opts.stateDir, opts.backend, cfg().maxSlots, fleet?.totalActive);
+      } catch {
+        // silent — the tick still nudges the manual cases
+      }
+    }
     const result = autopilot.sweep(source, Date.now(), fleet ? { totalActive: fleet.totalActive } : undefined);
     if (result.tick) sendTick(result.tick);
     // timer/activate safety net: stuck reviewing items get a review nudge
@@ -69,6 +92,23 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     onCompletion(ev) {
       const result = autopilot.handleAsyncComplete(ev);
       if (opts.emit) opts.emit(result.domainEvents);
+      // B — a review FAIL auto-re-dispatches with the findings (up to the cap;
+      // the engine already flipped to active when attempts < cap). Extract the
+      // reviewer's output (the findings) from the event.
+      if (autoDispatchOn && result.domainEvents.some((e) => e.name === "orch:verdict" && e.data?.verdict === "FAIL")) {
+        const findings = (Array.isArray(ev.results) ? ev.results : [])
+          .map((r) => (r as { agent?: string; output?: string })?.output ?? "")
+          .filter(Boolean)
+          .join("\n\n");
+        if (findings) {
+          try {
+            const key = String(result.domainEvents.find((e) => e.name === "orch:verdict")?.data?.key ?? "");
+            if (key) void autoRedispatch(opts.stateDir, opts.backend, key, findings);
+          } catch {
+            // silent — the tick nudges the orchestrator to re-dispatch
+          }
+        }
+      }
       sendTick(result.tick);
       if (result.freedSlot) {
         // ANY run completing frees a slot → dispatch sweep with the

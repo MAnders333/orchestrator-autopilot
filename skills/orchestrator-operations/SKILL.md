@@ -8,12 +8,12 @@ description: Operating rules for the orchestrator framework — the dispatch con
 Generic operating rules for the orchestrator-autopilot framework. The
 authoritative queue model lives in the package (`docs/queue-model.md`).
 
-## Detect your backend (deterministic — from the tool you are running in)
+## Detect your backend (deterministic — from your own tools)
 
-The launched tool determines the backend — no env, no files:
-- You are on **pi** if your session has the `/autopilot` command (the pi
-  extension registers it).
-- You are on **opencode** otherwise (the opencode plugin registers no commands).
+The launched tool determines the backend — no env, no files. Look at the
+`queue_list` tool's description: it carries the host marker.
+- `(pi host)` → you are on **pi** (the extension).
+- `(opencode host)` → you are on **opencode** (the plugin).
 
 Read ONLY `references/pi.md` or `references/opencode.md` for your backend's
 host-specific notes (worktree enforcement, ticks, steering, flagging). Apply
@@ -21,9 +21,15 @@ only your own backend's notes.
 
 ## Dispatch contract
 
-- `queue_dispatch(key, task, { cwd?, timeoutMs? })` — only **approved** items
-  dispatch; `blocked` items are not dispatchable (unblock first). Fresh context
-  + worktree isolation (the enforcement mechanism is in your backend reference).
+- **Auto-dispatch**: an approved item with a complete `scope` + `cwd` +
+  low/medium risk is dispatched AUTOMATICALLY when a slot frees (the task =
+  `KEY: <key>` + the scope). Write good scopes at proposal/approval time —
+  that is where the worker prompt lives now.
+- `queue_dispatch(key, task, { cwd?, timeoutMs? })` stays the MANUAL tool for
+  everything auto-dispatch does NOT take: high-risk items, incomplete scope or
+  missing `cwd` (blocked items are never dispatchable — unblock first).
+- The dispatch TICK now nudges only those manual cases — the auto-dispatchable
+  work never nags.
 - The task prompt is the COMPLETE contract — self-contained: the concrete task,
   the relevant context, the success criteria, and the source/universe/repo the
   worker must use. Ambiguity about the data source is a blocker — never a
@@ -36,11 +42,15 @@ only your own backend's notes.
 
 ## Review-loop judgment (the framework routes verdicts; you supply judgment)
 
-- On a review **FAIL**: the framework flipped the item to active — re-dispatch
-  with the original scope PLUS all accumulated findings (the worker sees only
-  its task prompt).
+- On a review **FAIL**: the framework flipped the item to active AND
+  auto-re-dispatches it with the original scope + the reviewer's findings (up
+  to the cap). `queue_dispatch` remains the manual re-dispatch tool when the
+  auto path is not applicable (missing `cwd`, spawn failure) or you want to
+  adjust the task.
 - On **cap** (5 FAILs): the framework marked it failed — surface the options:
   apply the findings directly / review the work as-is / drop.
+- `queue_review(key, task?)` remains the tool for dispatching the reviewer on
+  a `reviewing` item.
 - **PASS** → the human handover: `flag_for_review` (below). Never hand off
   before agent review passes.
 

@@ -12,5 +12,8 @@
   re-dispatch instead.
 - **Flagging**: `flag_for_review` is registered by the plugin (reviews log;
   notification best-effort).
-- **No command registration** — the absence of `/autopilot` is the opencode
-  detection signal (pi-only command).
+- **Autopilot toggle**: opencode plugins cannot register commands — the toggle
+  is the plugin's `autopilot` TOOL (on | off | status | capacity <n>), and a
+  `/autopilot` command FILE (command/autopilot.md) tells the agent to call it.
+  Per-session, like pi's registered command. The host marker in the tool
+  descriptions (`(opencode host)`) is the opencode detection signal.

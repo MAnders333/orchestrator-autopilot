@@ -172,6 +172,7 @@ export default function (pi: ExtensionAPI) {
   // its gate state + the sendMessage delivery; runSweep/onCompletion etc.
   // wire the triggers.
   const runner = createFrameworkRunner({
+    stateDir,
     autopilot: ensureAutopilot(),
     backend,
     host: {
@@ -318,7 +319,7 @@ export default function (pi: ExtensionAPI) {
     name: "queue_list",
     label: "Queue list",
     description:
-      "List the orchestrator task queue (programmatic store). Filter by status and/or last-change timestamp; compact view by default " +
+      "List the orchestrator task queue (pi host — the programmatic store). Filter by status and/or last-change timestamp; compact view by default " +
       "(heavy free-form fields only with includeNotes). Returns per-status counts + fleet occupancy (event-derived) + matching items.",
     parameters: Type.Object({
       status: Type.Optional(Type.Union([Type.String({ description: "status filter (proposal|approved|active|reviewing|failed|done)" }), Type.Array(Type.String())])),

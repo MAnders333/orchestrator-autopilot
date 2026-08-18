@@ -28,7 +28,10 @@ export interface QueueItem {
   /** approved = dispatchable; blocked = approved-but-waiting (blocker says why). */
   blocker: BlockerReason;
   title: string;
+  /** The worker-prompt scope (auto-dispatch builds the task from this). */
   scope: string;
+  /** The repo the worker runs in (auto-dispatch requires it). */
+  cwd: string | null;
   evidence: string;
   value: string;      // H/M/L — free-form
   urgency: string;    // H/M/L — free-form
@@ -91,6 +94,7 @@ export function loadStore(stateDir: string): QueueStore | null {
         if (it.reviewerRunId === undefined) it.reviewerRunId = null;
         if (it.attempts === undefined) it.attempts = 0;
         if (it.runId === undefined) it.runId = null;
+        if (it.cwd === undefined) it.cwd = null;
         if (it.blocker === undefined) it.blocker = null;
         // The ready boolean was folded into the status: approved = dispatchable,
         // approved+!ready → blocked. Normalize old stores on read.

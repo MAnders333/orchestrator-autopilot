@@ -73,6 +73,7 @@ export async function queueAdd(ctx: QueueOpsCtx, params: Record<string, unknown>
       blocker: null,
       title: params.title as string,
       scope: (params.scope as string) ?? "",
+      cwd: (params.cwd as string | null) ?? null,
       evidence: (params.evidence as string) ?? "",
       value: (params.value as string) ?? "",
       urgency: (params.urgency as string) ?? "",
