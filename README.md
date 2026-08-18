@@ -48,6 +48,10 @@ src/
   (`~/.pi/shared/agents`, `~/.config/opencode/agents`) — idempotent,
   version-stamped, never hand-edited (framework-managed between markers).
 
+## Docs
+
+- `docs/queue-model.md` — the AUTHORITATIVE queue model: statuses (proposal / approved / blocked / active / reviewing / failed / done / rejected), transitions, and the tick behavior (dispatch / intake with proposal-pending suppression / review). The orchestrator skills reference this.
+
 ## Config / portability
 
 Canonical defaults; local setups override via env:
