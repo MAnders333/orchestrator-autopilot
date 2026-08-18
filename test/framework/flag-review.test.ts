@@ -23,7 +23,13 @@ describe("flagForReview", () => {
       },
       { logPath, notify: () => {} },
     );
-    expect(note.deliveryNote).toContain("3 review target(s)");
+    // the result shows the CONTENTS, not a summary of the flag
+    expect(note.deliveryNote).toContain("Summary: Implemented the flag-review targets.");
+    expect(note.deliveryNote).toContain("Review targets (3):");
+    expect(note.deliveryNote).toContain("  - src/framework/flag-review.ts");
+    expect(note.deliveryNote).toContain("Action needed: Review the diff + merge the PR.");
+    expect(note.deliveryNote).toContain("Residual risks: The opencode schema was not exercised live.");
+    expect(note.deliveryNote).toContain("Queue item: FLAG-IMPROVE-1");
     const entry = JSON.parse(readFileSync(logPath, "utf8"));
     expect(entry.event).toBe("flag_for_review");
     expect(entry.review_targets).toHaveLength(3);
@@ -43,6 +49,7 @@ describe("flagForReview", () => {
     const entry = JSON.parse(readFileSync(logPath, "utf8"));
     expect(entry.action_needed).toBeUndefined();
     expect(entry.review_targets).toEqual([]);
-    expect(r.deliveryNote).toContain("Not self-reviewed");
+    expect(r.deliveryNote).toContain("NOT self-reviewed");
+    expect(r.deliveryNote).toContain("(none — name the files!)");
   });
 });

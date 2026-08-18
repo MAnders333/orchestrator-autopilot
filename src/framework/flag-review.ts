@@ -83,8 +83,23 @@ export function flagForReview(params: FlagReviewParams, sinks: FlagReviewSinks =
 ${params.review_targets[0].slice(0, 80)}` : ""}`,
   );
 
-  const deliveryNote = params.self_reviewed
-    ? `The user will review the summary, risk, blast radius, and ${params.review_targets.length || "the"} review target(s).`
-    : "Not self-reviewed — the user should verify the work before relying on it.";
+  // The tool RESULT shows the CONTENTS, not a summary of the flag: the user
+  // sees what was done + where to look right in the result. (The desktop
+  // notification stays short — title + one-liner.)
+  const targetLines = params.review_targets.length
+    ? params.review_targets.map((t) => `  - ${t}`).join("\n")
+    : "  (none — name the files!)";
+  const lines = [
+    `Flagged for review. Risk: ${params.risk}.${params.self_reviewed ? " Self-reviewed (" + params.review_method + ")." : " NOT self-reviewed — verify before relying."}`,
+    "",
+    `Summary: ${params.summary}`,
+    `Blast radius: ${params.blast_radius}`,
+    `Review targets (${params.review_targets.length}):`,
+    targetLines,
+  ];
+  if (params.action_needed) lines.push("", `Action needed: ${params.action_needed}`);
+  if (params.residual_risks) lines.push("", `Residual risks: ${params.residual_risks}`);
+  if (params.queue_key) lines.push("", `Queue item: ${params.queue_key}`);
+  const deliveryNote = lines.join("\n");
   return { deliveryNote };
 }
