@@ -46,7 +46,9 @@ only your own backend's notes.
   auto-re-dispatches it with the original scope + the reviewer's findings (up
   to the cap). `queue_dispatch` remains the manual re-dispatch tool when the
   auto path is not applicable (missing `cwd`, spawn failure) or you want to
-  adjust the task.
+  adjust the task. The worker sees only its task prompt — the findings must
+  be IN it. If the findings are mechanical, applying the fix directly is a
+  judgment call; for code tasks, re-spawn.
 - On **cap** (5 FAILs): the framework marked it failed — surface the options:
   apply the findings directly / review the work as-is / drop.
 - `queue_review(key, task?)` remains the tool for dispatching the reviewer on
@@ -66,7 +68,8 @@ only your own backend's notes.
   SHAs / MR links the human should look at — name the files, never just
   "task done". Reason about risk (what happens if wrong) and blast radius
   (what breaks) before flagging; say what the user should DO next
-  (`action_needed`).
+  (`action_needed`). Move the item reviewing → done (`queue_update`) after
+  flagging.
 
 ## Queue model
 
