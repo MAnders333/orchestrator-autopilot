@@ -393,6 +393,27 @@ describe("intake suppression (proposals pending)", () => {
     expect(t2).toBeNull();
   });
 
+  test("intake re-arms when a proposal goes STALE (older than the suppression window) + names it", () => {
+    const f = make();
+    // a proposal pending longer than the default 24h window must NOT starve
+    // the refill nudge forever — the user's real scenario (B1 since 08-17)
+    writeStore([item({ key: "B1", status: "proposal", title: "b1" })]);
+    // addItem stamps createdAt=now — mutate the STORED item to 30h ago
+    const store = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+    store.items["B1"].createdAt = new Date(Date.now() - 30 * 3600 * 1000).toISOString();
+    store.items["B1"].updatedAt = new Date(Date.now() - 30 * 3600 * 1000).toISOString();
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(store));
+    const t = f.sweep("timer", Date.now()).tick;
+    expect(t?.reason).toBe("intake"); // the suppression lapsed
+    expect(t?.message).toContain("B1 has been pending"); // the stale proposal is named
+  });
+
+  test("a FRESH proposal still suppresses (within the window)", () => {
+    const f = make();
+    writeStore([item({ key: "P1", status: "proposal", title: "p1" })]); // createdAt = now
+    expect(f.sweep("timer", Date.now()).tick).toBeNull();
+  });
+
   test("intake re-arms when the proposals resolve (rejected → pending 0)", () => {
     const f = make();
     writeStore([

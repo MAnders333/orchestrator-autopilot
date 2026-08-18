@@ -76,6 +76,14 @@ only your own backend's notes.
 - Every finished worker gets a **completion card**: outcome-first, key numbers,
   files/commits, risks/limitations, and the user's action. Never a raw output
   dump.
+- **DIRECT in-session deliverables get the same handover** — not just queue
+  items. The queue pipeline nudges you (the PASS tick says "flag_for_review"),
+  but work YOU produce directly has no pipeline: after handing the user any
+  user-facing artifact (a doc, an analysis, a plan), call `flag_for_review`
+  with the file paths as `review_targets` BEFORE moving on. An agent review
+  pass is optional for direct work — honest `self_reviewed: false` +
+  `review_method: "none"` is correct. The user should never discover a
+  finished deliverable in chat without the flag.
 - The handover: `flag_for_review(summary, risk, blast_radius, review_targets,
   self_reviewed, review_method, action_needed?, residual_risks?, queue_key?)`
   — ONLY when the work is done, committed, and any automated review has passed.

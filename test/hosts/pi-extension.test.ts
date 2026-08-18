@@ -313,6 +313,25 @@ describe("pi adapter smoke", () => {
     expect(store.items["B4-AGENTIC-JUDGE-TIMEOUT"].notes).toBe("updated note");
   });
 
+  test("queue_dispatch WARNs when manually dispatching an auto-dispatchable item (double-dispatch guard)", async () => {
+    startSession("tui");
+    await runAutopilotCmd("on");
+    const repo = makeRepo();
+    const s0 = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+    s0.items["AUTO-1"] = { key: "AUTO-1", title: "auto", status: "approved", blocker: null, scope: "do the thing", cwd: repo, evidence: "", value: "M", urgency: "M", risk: "low", runId: null, reviewerRunId: null, attempts: 0, notes: "", createdAt: "a", updatedAt: "b" };
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(s0));
+    const disp = pi._tools()["queue_dispatch"];
+    const p = disp.execute("c3", { key: "AUTO-1", task: "KEY: AUTO-1 — do the thing" }, undefined, undefined, { ui: { notify: () => {} }, cwd: repo });
+    await waitForSpawnRequest();
+    await replyToLastSpawn("auto-1-run");
+    const r = await p;
+    expect(r.content[0].text).toContain("auto-dispatchable");
+    expect(r.content[0].text).toContain("duplicate worker");
+    // it still dispatches (the override path is legitimate)
+    const after = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+    expect(after.items["AUTO-1"].status).toBe("active");
+  });
+
   test("queue_dispatch spawns via RPC + records approved→active atomically", async () => {
     const repo = makeRepo();
     await runAutopilotCmd("on"); // migrate first

@@ -166,6 +166,10 @@ export interface AutopilotConfigFile {
   reviewerAgents?: string[];
   reviewCap?: number; // review-FAIL re-dispatch cap (default 5)
   sweepIntervalMs?: number; // periodic capacity sweep; 0 disables (default 10 min)
+  /** Intake suppression window: pending proposals suppress intake ticks for
+   *  this many hours (the user deliberates), then the suppression lapses so a
+   *  STALE proposal cannot starve the refill nudge forever. Default 24. */
+  intakeSuppressionHours?: number;
 }
 
 /** The ONE mode explanation for the orchestrator — the toggle means the

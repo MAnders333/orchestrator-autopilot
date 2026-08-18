@@ -302,8 +302,39 @@ export class Autopilot {
     };
   }
 
-  /**
-   * Public status snapshot for `/autopilot status`.
+  /** The OLDEST pending proposal's age in ms (null when none / unparseable). */
+  private oldestProposalAgeMs(now: number): number | null {
+    const store = loadStore(this.cfg.stateDir);
+    if (!store) return null;
+    let oldest: number | null = null;
+    for (const it of Object.values(store.items)) {
+      if (it.status !== "proposal") continue;
+      const t = Date.parse(it.createdAt || it.updatedAt || "");
+      if (Number.isNaN(t)) continue;
+      if (oldest === null || t < oldest) oldest = t;
+    }
+    return oldest === null ? null : Math.max(0, now - oldest);
+  }
+
+  /** The key of the OLDEST pending proposal (for the intake tick's note). */
+  private oldestProposalKey(): string | null {
+    const store = loadStore(this.cfg.stateDir);
+    if (!store) return null;
+    let oldestKey: string | null = null;
+    let oldestT = Number.POSITIVE_INFINITY;
+    for (const it of Object.values(store.items)) {
+      if (it.status !== "proposal") continue;
+      const t = Date.parse(it.createdAt || it.updatedAt || "");
+      if (Number.isNaN(t)) continue;
+      if (t < oldestT) {
+        oldestT = t;
+        oldestKey = it.key;
+      }
+    }
+    return oldestKey;
+  }
+
+  /** Public status snapshot for `/autopilot status`.
    */
   status(): { running: number; lastTickAt: number; lastTickHash: string } {
     return { running: this.ledger.size, lastTickAt: this.lastTickAt, lastTickHash: this.lastTickHash };
@@ -369,8 +400,16 @@ export class Autopilot {
       // — ADDING proposals changes the queue hash, which would otherwise re-fire
       // this tick while the approved buffer is still low. The intake re-arms
       // when the proposals resolve (approved/rejected) or the queue changes.
-      if (state.proposalsPending > 0) return null;
+      // AGE-AWARE: a proposal that has been pending for longer than the
+      // suppression window (default 24h) must NOT starve the refill nudge
+      // forever — the intake tick returns and names the stale proposal.
+      if (state.proposalsPending > 0) {
+        const suppressionMs = (this.cfg.intakeSuppressionHours ?? 24) * 3600 * 1000;
+        const oldest = this.oldestProposalAgeMs(now);
+        if (oldest !== null && oldest < suppressionMs) return null;
+      }
       this.rememberTick(state, now);
+      const stale = this.oldestProposalKey();
       return {
         reason: "intake",
         message:
@@ -378,7 +417,8 @@ export class Autopilot {
           `FLEET: not involved — this is about refilling the approved queue, not dispatch. ` +
           `Run a FULL intake scan NOW: scan ALL sources in order, diff against the queue, AND run the beyond-source pass (cross-source gaps, industry standards, project understanding). ` +
           `Propose the next batch for approval per the approval gate (evidence + scope + value/urgency + risk). ` +
-          `This is a real scan, not a quick check — present candidates. Not a user request; the ≤2-line rule does NOT apply to intake ticks.`,
+          `This is a real scan, not a quick check — present candidates. Not a user request; the ≤2-line rule does NOT apply to intake ticks.` +
+          (stale ? ` NOTE: ${stale} has been pending for a while — resolve or reject it so it stops blocking the buffer.` : ""),
         facts: { ready, readyKeys, threshold: this.cfg.queueLowThreshold, source, runId },
       };
     }

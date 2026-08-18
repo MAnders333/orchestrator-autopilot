@@ -11,6 +11,7 @@ import type { SubagentBackend } from "../backends/types.ts";
 import type { Autopilot } from "../core.ts";
 import type { AutopilotConfigFile } from "../config.ts";
 import { loadStore, saveStore, newStore, addItem, updateItem, queryItems, queueLengths, type QueueStore } from "../queue-store.ts";
+import { isAutoDispatchable } from "../framework/auto-dispatch.ts";
 
 export interface ToolResult {
   text: string;
@@ -156,7 +157,14 @@ export async function queueDispatch(ctx: QueueOpsCtx, params: Record<string, unk
     updateItem(store, key, { status: "active", runId });
     saveStore(ctx.stateDir, store);
     ctx.autopilot().handleAsyncStarted(runId, "worker"); // fleet ledger
-    return { text: `dispatched '${key}' — run ${runId}`, details: { runId } };
+    // Double-dispatch guard: an APPROVED item that the harness would
+    // auto-dispatch (scope + cwd + low/med risk) should rarely be dispatched
+    // manually — the harness fills free slots itself. The dispatch proceeds
+    // (the override path is legitimate), but the risk is surfaced.
+    const autoNote = item.status === "approved" && isAutoDispatchable(item)
+      ? " WARNING: auto-dispatchable (approved + scope + cwd + low/med) — the harness will dispatch this itself when a slot frees; manual dispatch risks a duplicate worker. Override ok, but only if you mean it."
+      : "";
+    return { text: `dispatched '${key}' — run ${runId}.${autoNote}`, details: { runId } };
   } catch (e) {
     return err(e, "queue_dispatch");
   }
