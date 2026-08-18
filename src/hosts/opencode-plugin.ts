@@ -184,13 +184,14 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
       (a) => queueAdd(ctx, a),
     ),
     queue_update: def(
-      "Update a queue item: status (validated transitions: proposal→approved/rejected, approved→active/rejected, active→reviewing/failed, reviewing→done/failed/active, failed→active, done→approved (human re-open — you found issues in your review)), blocker, or free-form notes. active→reviewing/failed are event-driven — do NOT set them by hand.",
+      "Update a queue item: status (validated transitions: proposal→approved/rejected, approved→active/rejected, active→reviewing/failed, reviewing→done/failed/active, failed→active, done→approved (human re-open — you found issues in your review)); approved REQUIRES a complete scope + cwd. blocker, or free-form notes. active→reviewing/failed are event-driven — do NOT set them by hand.",
       [
         { name: "key", type: "string", required: true },
         { name: "status", type: "string", required: false },
         { name: "blocker", type: "string", required: false },
         { name: "title", type: "string", required: false },
         { name: "scope", type: "string", required: false },
+        { name: "cwd", type: "string", required: false, description: "the repo the work lands in (required to reach approved)" },
         { name: "evidence", type: "string", required: false },
         { name: "value", type: "string", required: false },
         { name: "urgency", type: "string", required: false },

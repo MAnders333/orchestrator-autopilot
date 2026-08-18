@@ -43,7 +43,10 @@ review loop starts with the human's findings in the re-dispatch task).
 
 ## Tick behavior (what the orchestrator is nudged to do)
 
-- **dispatch** — a slot is free AND ≥1 approved item → "dispatch it".
+- **dispatch** — a slot is free AND ≥1 approved item → "dispatch it". The
+  harness AUTO-dispatches fully-specified approved items (scope + cwd +
+  low/medium risk — the approval gate guarantees them); the tick fires only
+  for the MANUAL cases (high-risk or incomplete).
 - **intake** — approved count < `queueLowThreshold` (2) → "run a full intake
   scan, propose the next batch".
   - **Intake suppression**: while ANY proposal is pending (the user is
@@ -60,5 +63,9 @@ review loop starts with the human's findings in the re-dispatch task).
     user approves → the buffer refills. A framework config file for sources
     would be over-engineering — intake is agent judgment + consumer tooling.
 - **review** — items stuck in `reviewing` (a reviewer completed) → "read the
-  verdict, route each item".
+  verdict, route each item". The harness AUTO-dispatches the reviewer when a
+  worker completes (same fields: KEY + scope + cwd); the verdict routing is
+  automatic (PASS → done, FAIL → re-dispatch, cap → failed). The orchestrator
+  keeps: approval, high-risk checkpoints, `queue_review` overrides, and the
+  `flag_for_review` human handover.
 - **blocked** items never trigger ticks (they are waiting by design).

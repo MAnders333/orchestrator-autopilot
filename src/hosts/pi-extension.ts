@@ -373,10 +373,11 @@ export default function (pi: ExtensionAPI) {
       "active→reviewing/failed are event-driven — do NOT set them by hand.",
     parameters: Type.Object({
       key: Type.String(),
-      status: Type.Optional(Type.String({ description: "target status (see description for valid transitions)" })),
+      status: Type.Optional(Type.String({ description: "target status (see description for valid transitions); approved REQUIRES a complete scope + cwd" })),
       blocker: Type.Optional(Type.String()),
       title: Type.Optional(Type.String()),
       scope: Type.Optional(Type.String()),
+      cwd: Type.Optional(Type.String()),
       evidence: Type.Optional(Type.String()),
       value: Type.Optional(Type.String()),
       urgency: Type.Optional(Type.String()),

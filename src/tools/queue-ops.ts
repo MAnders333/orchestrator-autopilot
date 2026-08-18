@@ -60,6 +60,15 @@ export async function queueList(ctx: QueueOpsCtx, params: Record<string, unknown
   }
 }
 
+/** The approval contract: an item is APPROVED only when it is fully
+ *  specified — a non-empty scope (the worker/reviewer prompt lives there) and
+ *  a cwd (the repo the work lands in). Enforced here so the approval-time
+ *  requirement is real, not skill guidance. Blocked items are exempt (they are
+ *  waiting by design, not dispatchable). */
+function approvalReady(scope: string | null | undefined, cwd: string | null | undefined): boolean {
+  return Boolean((scope ?? "").trim() && cwd);
+}
+
 /** queue_add — new proposal (default) or approved item; free-form notes. */
 export async function queueAdd(ctx: QueueOpsCtx, params: Record<string, unknown>): Promise<ToolResult> {
   try {
@@ -67,13 +76,18 @@ export async function queueAdd(ctx: QueueOpsCtx, params: Record<string, unknown>
     const key = params.key as string;
     if (store.items[key]) return { text: `queue_add: key '${key}' already exists — use queue_update`, details: {} };
     const status: "approved" | "proposal" = params.status === "approved" ? "approved" : "proposal";
+    const scope = (params.scope as string) ?? "";
+    const cwd = (params.cwd as string | null) ?? null;
+    if (status === "approved" && !approvalReady(scope, cwd)) {
+      return { text: "queue_add: approval requires a complete scope + cwd (the scope is the worker prompt; cwd is the repo it runs in) — add as proposal or supply both", details: {} };
+    }
     addItem(store, {
       key,
       status,
       blocker: null,
       title: params.title as string,
-      scope: (params.scope as string) ?? "",
-      cwd: (params.cwd as string | null) ?? null,
+      scope,
+      cwd,
       evidence: (params.evidence as string) ?? "",
       value: (params.value as string) ?? "",
       urgency: (params.urgency as string) ?? "",
@@ -92,11 +106,20 @@ export async function queueAdd(ctx: QueueOpsCtx, params: Record<string, unknown>
 export async function queueUpdate(ctx: QueueOpsCtx, params: Record<string, unknown>): Promise<ToolResult> {
   try {
     const store = ctx.storeOrNew();
+    const cur = store.items[params.key as string];
+    if (!cur) return { text: `queue_update: no item '${params.key}'`, details: {} };
+    const nextStatus = (params.status as string | undefined) ?? cur.status;
+    const nextScope = (params.scope as string | undefined) ?? cur.scope;
+    const nextCwd = (params.cwd as string | null | undefined) ?? cur.cwd;
+    if (nextStatus === "approved" && !approvalReady(nextScope, nextCwd)) {
+      return { text: "queue_update: approval requires a complete scope + cwd (the scope is the worker prompt; cwd is the repo it runs in) — blocked items are for waiting, not dispatchable work", details: {} };
+    }
     updateItem(store, params.key as string, {
       status: params.status as never,
       blocker: params.blocker as never,
       title: params.title as string | undefined,
       scope: params.scope as string | undefined,
+      cwd: params.cwd as string | null | undefined,
       evidence: params.evidence as string | undefined,
       value: params.value as string | undefined,
       urgency: params.urgency as string | undefined,
@@ -158,7 +181,12 @@ export async function queueReview(ctx: QueueOpsCtx, params: Record<string, unkno
       : "Review the completed work for correctness, approach quality, and completeness. Read the work product yourself (the diff/files), do NOT trust the worker's summary.\n\n" +
         "The FIRST line of your response MUST be exactly `Verdict: PASS` or `Verdict: FAIL`. If FAIL, list each finding as an actionable item.";
     const agentName = ctx.cfg().reviewerAgents[0] ?? "orchestrator-reviewer";
-    const runId = await ctx.backend.spawn(task, { agent: agentName, worktree: false, timeoutMs: params.timeoutMs as number | undefined });
+    const runId = await ctx.backend.spawn(task, {
+      agent: agentName,
+      worktree: false, // reviewers are read-only — no worktree
+      cwd: item.cwd ?? undefined, // the work repo — the reviewer locates the product there
+      timeoutMs: params.timeoutMs as number | undefined,
+    });
     if (!runId) return { text: "queue_review: spawned but no run id returned", details: {} };
     updateItem(store, key, { reviewerRunId: runId });
     saveStore(ctx.stateDir, store);

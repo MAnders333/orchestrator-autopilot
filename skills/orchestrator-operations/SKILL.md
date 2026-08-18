@@ -25,6 +25,9 @@ only your own backend's notes.
   low/medium risk is dispatched AUTOMATICALLY when a slot frees (the task =
   `KEY: <key>` + the scope). Write good scopes at proposal/approval time —
   that is where the worker prompt lives now.
+- **The approval gate makes this possible**: reaching `approved` REQUIRES a
+  non-empty `scope` + `cwd` (enforced by `queue_add`/`queue_update` — not skill
+  guidance). Approved = fully specified = the harness can act without you.`
 - `queue_dispatch(key, task, { cwd?, timeoutMs? })` stays the MANUAL tool for
   everything auto-dispatch does NOT take: high-risk items, incomplete scope or
   missing `cwd` (blocked items are never dispatchable — unblock first).
@@ -46,11 +49,14 @@ only your own backend's notes.
 
 ## Review-loop judgment (the framework routes verdicts; you supply judgment)
 
+- **Auto-review**: when a worker completes, the framework dispatches the
+  reviewer AUTOMATICALLY with the same fields the dispatch used (`KEY` + scope
+  + `cwd` to locate the work) — you do not call `queue_review` for those.
+  `queue_review` stays the OVERRIDE: high-risk items, a custom review focus,
+  or replacing/steering an auto review (a tick announces each auto-review).
 - On a review **FAIL**: the framework flipped the item to active AND
   auto-re-dispatches it with the original scope + the reviewer's findings (up
-  to the cap). `queue_dispatch` remains the manual re-dispatch tool when the
-  auto path is not applicable (missing `cwd`, spawn failure) or you want to
-  adjust the task. The worker sees only its task prompt — the findings must
+  to the cap). The worker sees only its task prompt — the findings must
   be IN it. If the findings are mechanical, applying the fix directly is a
   judgment call; for code tasks, re-spawn.
 - On **cap** (5 FAILs): the framework marked it failed — surface the options:

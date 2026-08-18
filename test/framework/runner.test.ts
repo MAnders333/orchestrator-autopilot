@@ -180,3 +180,44 @@ describe("framework runner (shared tick machinery)", () => {
     expect(f.delivered.some((m) => m.includes("[orch-tick: review]"))).toBe(true);
   });
 });
+
+describe("auto-review (C) through the runner", () => {
+  test("a worker completion flips to reviewing and auto-dispatches the reviewer + announces it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "orch-runner-ar-"));
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(newStore()));
+    const spawns: Array<{ task: string; agent?: string; cwd?: string }> = [];
+    const recBackend: SubagentBackend = {
+      spawn: async (task, o) => { spawns.push({ task, agent: o?.agent, cwd: o?.cwd }); return "rev-1"; },
+      fleetStatus: async () => ({ totalActive: 0 }),
+      steer: async () => "req",
+      asyncDirFor: () => null,
+    };
+    const delivered: string[] = [];
+    const autopilot = new Autopilot({ stateDir: dir });
+    const runner = createFrameworkRunner({
+      stateDir: dir,
+      autopilot,
+      backend: recBackend,
+      host: { interactive: () => true, loaded: () => true, busy: () => false, compacting: () => false },
+      deliver: (m) => delivered.push(m),
+      enabled: () => true,
+      sweepIntervalMs: 0,
+    });
+    const s0 = load({ dir } as Fixture);
+    addItem(s0, { key: "C1", title: "c1", status: "active", blocker: null, scope: "do the thing", cwd: "/tmp/repo", evidence: "", value: "", urgency: "", risk: "low", runId: "worker-1", reviewerRunId: null, attempts: 0, notes: "", createdAt: "a", updatedAt: "b" });
+    save({ dir } as Fixture, s0);
+
+    runner.onCompletion({ runId: "worker-1", agent: "worker", success: true, results: [{ agent: "worker" }] });
+    await new Promise((r) => setTimeout(r, 150));
+
+    expect(spawns.length).toBe(1);
+    expect(spawns[0].agent).toBe("orchestrator-reviewer");
+    expect(spawns[0].cwd).toBe("/tmp/repo");
+    expect(spawns[0].task).toContain("KEY: C1");
+    expect(spawns[0].task).toContain("Verdict: PASS");
+    const after = load({ dir } as Fixture);
+    expect(after.items["C1"].status).toBe("reviewing");
+    expect(after.items["C1"].reviewerRunId).toBe("rev-1");
+    expect(delivered.some((m) => m.includes("reviewer auto-dispatched"))).toBe(true);
+  });
+});

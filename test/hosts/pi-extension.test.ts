@@ -271,10 +271,14 @@ describe("pi adapter smoke", () => {
     const add = pi._tools()["queue_add"];
     await add.execute("c1", { key: "B4-AGENTIC-JUDGE-TIMEOUT", title: "judge timeout", scope: "add timeout", notes: "free-form notes" }, undefined, undefined, ctx);
     const up = pi._tools()["queue_update"];
-    const r = await up.execute("c2", { key: "B4-AGENTIC-JUDGE-TIMEOUT", status: "approved", ready: true, notes: "updated note" }, undefined, undefined, ctx);
+    // the approval contract: reaching approved REQUIRES scope + cwd
+    const rejected = await up.execute("c2", { key: "B4-AGENTIC-JUDGE-TIMEOUT", status: "approved", notes: "updated note" }, undefined, undefined, ctx);
+    expect(rejected.content[0].text).toContain("requires a complete scope + cwd");
+    const r = await up.execute("c2b", { key: "B4-AGENTIC-JUDGE-TIMEOUT", status: "approved", cwd: "/tmp/repo", notes: "updated note" }, undefined, undefined, ctx);
     expect(r.content[0].text).toContain("updated");
     const store = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
     expect(store.items["B4-AGENTIC-JUDGE-TIMEOUT"].status).toBe("approved");
+    expect(store.items["B4-AGENTIC-JUDGE-TIMEOUT"].cwd).toBe("/tmp/repo");
     expect(store.items["B4-AGENTIC-JUDGE-TIMEOUT"].notes).toBe("updated note");
   });
 

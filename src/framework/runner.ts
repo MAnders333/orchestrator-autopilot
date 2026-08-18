@@ -13,7 +13,7 @@ import type { SubagentBackend } from "../backends/types.ts";
 import type { Autopilot, CompletionEvent } from "../core.ts";
 import { loadAutopilotConfig } from "../config.ts";
 import { createTickRouter, type TickHostState } from "./tick-router.ts";
-import { autoDispatchEligible, autoRedispatch } from "./auto-dispatch.ts";
+import { autoDispatchEligible, autoRedispatch, autoReview } from "./auto-dispatch.ts";
 
 export interface RunnerOptions {
   stateDir: string;
@@ -106,6 +106,35 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
             if (key) void autoRedispatch(opts.stateDir, opts.backend, key, findings);
           } catch {
             // silent — the tick nudges the orchestrator to re-dispatch
+          }
+        }
+      }
+      // C — a worker completion (active → reviewing) auto-dispatches its
+      // review: the same fields the dispatch used (KEY + scope + cwd). The
+      // orchestrator is informed via the tick; it can still queue_review to
+      // override/steer. PASS → done and FAIL → auto-re-dispatch are the
+      // engine's; flag_for_review stays the orchestrator's.
+      if (autoDispatchOn) {
+        const completed = result.domainEvents.find(
+          (e) => e.name === "orch:item-completed" && e.data?.outcome === "reviewing",
+        );
+
+        if (completed) {
+          const key = String(completed.data?.key ?? "");
+          if (key) {
+            void autoReview(opts.stateDir, opts.backend, cfg().reviewerAgents[0] ?? "orchestrator-reviewer", key)
+              .then((ok) => {
+                if (ok) {
+                  sendTick({
+                    reason: "review",
+                    message: `[orch-tick: review] ${key} completed — reviewer auto-dispatched (steer it or let it run; queue_review overrides). Not a user request; respond ≤2 lines.`,
+                    facts: { key },
+                  });
+                }
+              })
+              .catch(() => {
+                // silent — the review tick nudges the orchestrator
+              });
           }
         }
       }

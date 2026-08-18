@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { newStore, addItem, updateItem, type QueueItem } from "../../src/queue-store.ts";
-import { isAutoDispatchable, workerTask, autoDispatchEligible, autoRedispatch } from "../../src/framework/auto-dispatch.ts";
+import { isAutoDispatchable, workerTask, autoDispatchEligible, autoRedispatch, autoReview, reviewTask } from "../../src/framework/auto-dispatch.ts";
 import type { SubagentBackend } from "../../src/backends/types.ts";
 
 interface Fixture {
@@ -136,5 +136,42 @@ describe("autoRedispatch (B)", () => {
     expect(await autoRedispatch(f.dir, f.backend, "A1", "findings")).toBe(false); // approved, not active
     expect(await autoRedispatch(f.dir, f.backend, "C1", "findings")).toBe(false); // no cwd
     expect(f.spawns.length).toBe(0);
+  });
+});
+
+describe("autoReview (C)", () => {
+  test("a completed item (reviewing) gets a reviewer with the SAME fields the dispatch used", async () => {
+    const f = setup();
+    seed(f, [item("R1", { status: "reviewing", runId: "worker-run", reviewerRunId: null })]);
+    const ok = await autoReview(f.dir, f.backend, "orchestrator-reviewer", "R1");
+    expect(ok).toBe(true);
+    const s = store(f);
+    expect(s.items["R1"].reviewerRunId).toBeTruthy();
+    const spawned = f.spawns[0];
+    expect(spawned.task).toContain("KEY: R1");
+    expect(spawned.task).toContain("do the thing"); // the scope
+    expect(spawned.task).toContain("/tmp/repo");     // cwd → where the work is
+    expect(spawned.task).toContain("Verdict: PASS"); // the contract
+  });
+
+  test("refuses when not reviewing / reviewer already running / missing scope or cwd", async () => {
+    const f = setup();
+    seed(f, [
+      item("A1", { status: "approved" }),                     // not reviewing
+      item("R2", { status: "reviewing", reviewerRunId: "x" }), // reviewer already running
+      item("R3", { status: "reviewing", scope: "  " }),        // no scope
+      item("R4", { status: "reviewing", cwd: null }),          // no cwd
+    ]);
+    expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "A1")).toBe(false);
+    expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "R2")).toBe(false);
+    expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "R3")).toBe(false);
+    expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "R4")).toBe(false);
+    expect(f.spawns.length).toBe(0);
+  });
+
+  test("reviewTask carries the locate-the-work rule (never trust the worker's summary)", () => {
+    const t = reviewTask(item("R1"));
+    expect(t).toContain("git log/reflog");
+    expect(t).toContain("do NOT trust the worker's summary");
   });
 });

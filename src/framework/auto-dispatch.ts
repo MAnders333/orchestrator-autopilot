@@ -11,6 +11,13 @@
 //  B. autoRedispatch — on a review FAIL, re-dispatch with the original scope
 //     PLUS the reviewer's findings (up to the cap). The cap still surfaces.
 //
+//  C. autoReview — when a worker completes (active → reviewing), dispatch the
+//     reviewer automatically with the SAME fields the dispatch used: KEY +
+//     scope + cwd (to locate the work). The approval gate guarantees scope +
+//     cwd on every approved item, so both automations just take them off the
+//     item. The verdict routing (PASS → done, FAIL → B, cap → failed) is the
+//     engine's; the human handover (flag_for_review) stays the orchestrator's.
+//
 // The orchestrator keeps all JUDGMENT (intake scanning, approval, high-risk
 // checkpoints); these automations remove the mechanical round-trips.
 
@@ -102,5 +109,53 @@ export async function autoRedispatch(
     return true;
   } catch {
     return false; // the orchestrator re-dispatches manually
+  }
+}
+
+/**
+ * C — the review task for an item: the SAME fields the dispatch used (KEY +
+ * scope), plus where the work landed (cwd) and the locate-it-yourself rule.
+ * The reviewer must read the actual work product, not the worker's summary.
+ */
+export function reviewTask(item: QueueItem): string {
+  return [
+    `KEY: ${item.key}`,
+    item.scope.trim(),
+    "",
+    "## Review the completed work",
+    `Verify the work product in the repo at: ${item.cwd}`,
+    "Locate the work yourself: git log/reflog + the worker's branch/commits in that repo (worktree isolation means the worker's commits live in the shared object DB). Read the actual diff/files — do NOT trust the worker's summary.",
+    "",
+    "The FIRST line of your response MUST be exactly `Verdict: PASS` or `Verdict: FAIL`. If FAIL, list each finding as an actionable item.",
+  ].join("\n");
+}
+
+/**
+ * C — auto-dispatch the reviewer for a completed item (active → reviewing).
+ * Mirrors queueReview but builds the task from the item (no orchestrator
+ * round-trip). Returns true when a reviewer was spawned.
+ */
+export async function autoReview(
+  stateDir: string,
+  backend: SubagentBackend,
+  reviewerAgent: string,
+  key: string,
+): Promise<boolean> {
+  try {
+    const store = loadStore(stateDir);
+    const item = store?.items[key];
+    if (!item || item.status !== "reviewing" || item.reviewerRunId) return false;
+    if (!(item.scope ?? "").trim() || !item.cwd) return false; // safety net — the approval gate guarantees these
+    const runId = await backend.spawn(reviewTask(item), {
+      agent: reviewerAgent,
+      worktree: false, // reviewers are read-only — no worktree
+      cwd: item.cwd,
+    });
+    if (!runId) return false;
+    updateItem(store!, key, { reviewerRunId: runId });
+    saveStore(stateDir, store!);
+    return true;
+  } catch {
+    return false; // the review tick nudges the orchestrator
   }
 }
