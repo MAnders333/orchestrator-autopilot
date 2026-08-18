@@ -34,7 +34,6 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { existsSync as fsExistsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
 // The framework lib is THIS project — the extension lives at src/hosts/ and
@@ -59,9 +58,9 @@ const { existsSync, readFileSync, renameSync } = require("node:fs") as typeof im
 // Install the framework-owned reviewer agent (idempotent, version-stamped).
 // The framework DEPENDS on the reviewer (queue_review spawns it, the lifecycle
 // parses its verdict) — shipping it with the extension is what makes the
-// review step work on any machine, not just this dotfiles stack. Never throw:
-// a broken install must not affect pi (the queue_review fail-closed check
-// surfaces a missing reviewer if install ever fails).
+// review step work on any machine. Never throw: a broken install must not
+// affect pi (a missing reviewer surfaces as a generic spawn error at review
+// time — re-install happens on the next activation).
 try {
   installPiReviewer();
 } catch {

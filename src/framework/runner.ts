@@ -10,7 +10,8 @@
 //   - their delivery mechanism (pi: sendMessage; opencode: promptAsync)
 
 import type { SubagentBackend } from "../backends/types.ts";
-import type { Autopilot, CompletionEvent } from "../core.ts";
+import type { Autopilot } from "../core.ts";
+import type { CompletionEvent } from "../types.ts";
 import { loadAutopilotConfig } from "../config.ts";
 import { createTickRouter, type TickHostState } from "./tick-router.ts";
 import { autoDispatchEligible, autoRedispatch, autoReview } from "./auto-dispatch.ts";
@@ -33,7 +34,7 @@ export interface RunnerOptions {
   /** Periodic sweep interval; 0 disables the timer. */
   sweepIntervalMs: number;
   /** Auto-dispatch + auto re-dispatch (default true; AUTOPILOT_AUTO_DISPATCH=0
-   *  disables). The framework fills free slots + re-dispatches FAIL items
+   *  disables — a real, working opt-out). The framework fills free slots + re-dispatches FAIL items
    *  itself — the orchestrator keeps the judgment (intake, approval,
    *  high-risk checkpoints). */
   autoDispatch?: boolean;
@@ -62,7 +63,8 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     if (t?.message) router.send(t.message);
   };
 
-  const autoDispatchOn = opts.autoDispatch ?? true;
+  // The auto-actions opt-out: env (AUTOPILOT_AUTO_DISPATCH=0) or the option.
+  const autoDispatchOn = opts.autoDispatch ?? process.env.AUTOPILOT_AUTO_DISPATCH !== "0";
   const cfg = () => loadAutopilotConfig(opts.stateDir);
   // ONE consolidated informational tick per pass — the orchestrator learns
   // what the harness DID (dispatched / reviewed / re-dispatched), not one

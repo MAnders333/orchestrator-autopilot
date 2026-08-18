@@ -8,7 +8,7 @@
 // Projections: opencode gets BOTH agents (no builtin worker/reviewer of ours —
 // 'worker' is free, the reviewer is orchestrator-reviewer to avoid clobbering
 // pi-subagents' builtin reviewer). pi gets ONLY the reviewer (the framework
-// uses pi-subagents' builtin worker). claude builders are ready for the port.
+// uses pi-subagents' builtin worker).
 //
 // Idempotent + version-stamped: activation re-installs on framework upgrades,
 // skips when current. Consumers may edit per-backend frontmatter freely; the
@@ -174,13 +174,6 @@ ${marker(def).close}
 `;
 }
 
-/** Where each backend's agent files live (documented for the portability
- *  story; pi resolves relative to the pi config dir at install time). */
-export const reviewerPaths = {
-  opencode: join(homedir(), ".config/opencode/agents", `${AGENTS.reviewer.name}.md`),
-  claude: join(homedir(), ".claude/agents", `${AGENTS.reviewer.name}.md`),
-};
-
 export interface InstallOptions {
   /** Caller-chosen real-file location (+ symlinks from modeAgentsDirs) for a
    *  shared+mode-symlink layout. When absent, the pi-standard user-agent scope
@@ -300,9 +293,8 @@ export function installOpenCodeWorker(opts: { agentsDir?: string; force?: boolea
 }
 
 /** True when the installed pi reviewer already carries the current body —
- *  used by tests and by the queue_review fail-closed check. The optional
- *  modeAgentsDirs overrides the real ~/.pi mode dirs (tests inject temp
- *  dirs so a live install on this machine doesn't mask results). */
+ *  used by tests (the optional modeAgentsDirs injects temp dirs so a live
+ *  install on this machine doesn't mask results). */
 export function piReviewerCurrent(sharedAgentsDir?: string, modeAgentsDirs?: string[]): boolean {
   const name = AGENTS.reviewer.name;
   const shared = sharedAgentsDir ?? ""; // absent → check only the mode scopes

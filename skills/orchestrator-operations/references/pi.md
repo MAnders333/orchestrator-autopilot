@@ -13,5 +13,6 @@
   the reviews log + sends a desktop notification.
 - **Per-session toggle**: `/autopilot on|off|status|capacity` gates ticks per
   session; the queue tools are always available.
-- **The `/autopilot` command is the pi detection signal** (the opencode plugin
-  registers no commands).
+- **Detection**: the host marker in the queue-tool descriptions
+  (`(pi host)`) is the signal — the `/autopilot` command is just the
+  per-session toggle (the opencode plugin registers no commands).
