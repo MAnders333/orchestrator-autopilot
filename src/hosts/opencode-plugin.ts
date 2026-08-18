@@ -376,11 +376,15 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
     description:
       "Flag that you believe the current task is complete and ready for the user's judgment. Call this ONLY when you believe the work is done — not after every turn, not when you have a question. Reason explicitly about risk (what happens if wrong) and blast radius (what breaks) before flagging. self_reviewed=true when an automated review passed (commit-hook / reviewer-subagent), else false.",
     args: {
-      summary: tool.schema.string().describe("What was done (the task and the outcome)"),
+      summary: tool.schema.string().describe("What was done (one line)"),
       risk: tool.schema.string().describe("low | medium | high"),
       blast_radius: tool.schema.string().describe("What breaks if this is wrong — be specific"),
+      review_targets: tool.schema.array(tool.schema.string()).describe("WHERE to review: file paths, path:line ranges, commit SHAs, MR/PR links"),
       self_reviewed: tool.schema.boolean().describe("true if an automated review passed, else false"),
       review_method: tool.schema.string().describe("commit-hook | reviewer-subagent | none"),
+      action_needed: tool.schema.string().optional().describe("What the user should DO after reviewing"),
+      residual_risks: tool.schema.string().optional().describe("What was NOT verified / could change"),
+      queue_key: tool.schema.string().optional().describe("The queue item this flag came from"),
     },
     execute: async (args) => {
       const { deliveryNote } = flagForReview(args as never);

@@ -443,13 +443,17 @@ export default function (pi: ExtensionAPI) {
     description:
       "Flag that you believe the current task is complete and ready for the user's judgment. Call this ONLY when you believe the work is done — not after every turn, not when you have a question. Before calling, reason explicitly about the risk (what happens if this is wrong) and blast radius (what breaks). If the work produced a commit and the pre-commit reviewer passed, set self_reviewed=true and review_method='commit-hook'. If you ran a reviewer subagent, set review_method='reviewer-subagent'. If no automated review ran, set self_reviewed=false.",
     parameters: Type.Object({
-      summary: Type.String({ description: "What was done (the task and the outcome)" }),
+      summary: Type.String({ description: "What was done (one line)" }),
       risk: Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")], { description: "low = mistake has no real-world impact; medium = contained but visible; high = affects production/data/auth/pipelines" }),
       blast_radius: Type.String({ description: "What breaks if this is wrong — be specific" }),
+      review_targets: Type.Array(Type.String(), { description: "WHERE to review: file paths, path:line ranges, commit SHAs, MR/PR links — the human reviews these" }),
       self_reviewed: Type.Boolean({ description: "true if the pre-commit reviewer or a reviewer subagent passed; false if no automated review ran" }),
       review_method: Type.Union([Type.Literal("commit-hook"), Type.Literal("reviewer-subagent"), Type.Literal("none")], { description: "How the self-review happened" }),
+      action_needed: Type.Optional(Type.String({ description: "What the user should DO after reviewing (merge X, approve Y, decide A/B)" })),
+      residual_risks: Type.Optional(Type.String({ description: "What was NOT verified / could change" })),
+      queue_key: Type.Optional(Type.String({ description: "The queue item this flag came from (when orchestrated)" })),
     }),
-    async execute(_toolCallId, params: { summary: string; risk: "low" | "medium" | "high"; blast_radius: string; self_reviewed: boolean; review_method: "commit-hook" | "reviewer-subagent" | "none" }) {
+    async execute(_toolCallId, params: { summary: string; risk: "low" | "medium" | "high"; blast_radius: string; review_targets: string[]; self_reviewed: boolean; review_method: "commit-hook" | "reviewer-subagent" | "none"; action_needed?: string; residual_risks?: string; queue_key?: string }) {
       const { deliveryNote } = flagForReview(params);
       return { content: [{ type: "text", text: `Flagged for review. Risk: ${params.risk}. ${deliveryNote}` }], details: {} };
     },

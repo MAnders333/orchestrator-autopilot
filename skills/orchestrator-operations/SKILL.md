@@ -59,10 +59,14 @@ only your own backend's notes.
 - Every finished worker gets a **completion card**: outcome-first, key numbers,
   files/commits, risks/limitations, and the user's action. Never a raw output
   dump.
-- The handover: `flag_for_review(summary, risk, blast_radius, self_reviewed,
-  review_method)` — ONLY when the work is done, committed, and any automated
-  review has passed. Reason about risk (what happens if wrong) and blast radius
-  (what breaks) before flagging.
+- The handover: `flag_for_review(summary, risk, blast_radius, review_targets,
+  self_reviewed, review_method, action_needed?, residual_risks?, queue_key?)`
+  — ONLY when the work is done, committed, and any automated review has passed.
+  `review_targets` is MANDATORY: the file paths / `path:line` ranges / commit
+  SHAs / MR links the human should look at — name the files, never just
+  "task done". Reason about risk (what happens if wrong) and blast radius
+  (what breaks) before flagging; say what the user should DO next
+  (`action_needed`).
 
 ## Queue model
 

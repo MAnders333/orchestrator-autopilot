@@ -18,8 +18,17 @@ export interface FlagReviewParams {
   summary: string;
   risk: ReviewRisk;
   blast_radius: string;
+  /** WHERE to review — file paths, `path:line` ranges, diff refs, commit
+   *  SHAs, MR/PR links. The human reviews these. */
+  review_targets: string[];
   self_reviewed: boolean;
   review_method: ReviewMethod;
+  /** What the user should DO after reviewing (merge X, approve Y, decide A/B). */
+  action_needed?: string;
+  /** What was NOT verified / could change. */
+  residual_risks?: string;
+  /** The queue item this flag came from (when orchestrated). */
+  queue_key?: string;
 }
 
 export interface FlagReviewSinks {
@@ -54,8 +63,12 @@ export function flagForReview(params: FlagReviewParams, sinks: FlagReviewSinks =
     summary: params.summary,
     risk: params.risk,
     blast_radius: params.blast_radius,
+    review_targets: params.review_targets,
     self_reviewed: params.self_reviewed,
     review_method: params.review_method,
+    ...(params.action_needed ? { action_needed: params.action_needed } : {}),
+    ...(params.residual_risks ? { residual_risks: params.residual_risks } : {}),
+    ...(params.queue_key ? { queue_key: params.queue_key } : {}),
   };
   try {
     mkdirSync(join(logPath, ".."), { recursive: true });
@@ -65,12 +78,13 @@ export function flagForReview(params: FlagReviewParams, sinks: FlagReviewSinks =
   }
 
   (sinks.notify ?? notifyDesktop)(
-    `review ready (${params.risk})`,
-    `${params.summary.slice(0, 120)}${params.self_reviewed ? " · self-reviewed" : " · not self-reviewed"}`,
+    `review ready (${params.risk})${params.review_targets.length ? ` · ${params.review_targets.length} target${params.review_targets.length > 1 ? "s" : ""}` : ""}`,
+    `${params.summary.slice(0, 120)}${params.review_targets[0] ? `
+${params.review_targets[0].slice(0, 80)}` : ""}`,
   );
 
   const deliveryNote = params.self_reviewed
-    ? "The user will review the summary, risk, and blast radius."
+    ? `The user will review the summary, risk, blast radius, and ${params.review_targets.length || "the"} review target(s).`
     : "Not self-reviewed — the user should verify the work before relying on it.";
   return { deliveryNote };
 }
