@@ -1,6 +1,11 @@
 ---
 name: orchestrator-operations
-description: Operating rules for the orchestrator framework — the dispatch contract, review-loop judgment, completion standards, and the human handover. Load when orchestrating (dispatching workers, routing reviews, flagging completed work). Backend-conditional: read references/<your-backend>.md for the host-specific notes.
+description: >-
+  Operating rules for the orchestrator framework — the dispatch contract,
+  review-loop judgment, completion standards, and the human handover. Load
+  when orchestrating (dispatching workers, routing reviews, flagging completed
+  work). Backend-conditional: read references/<your-backend>.md for the
+  host-specific notes.
 ---
 
 # Orchestrator Operations
