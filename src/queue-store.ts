@@ -59,7 +59,10 @@ export type QueueLengths = Record<QueueStatus, number>;
 // ---------------------------------------------------------------------------
 
 const ALLOWED: Record<QueueStatus, QueueStatus[]> = {
-  proposal: ["approved", "rejected"],
+  // A proposal may be BLOCKED directly (deferred: parked/serialized/decision)
+  // without an approval — blocking resolves it from the pending-proposal set
+  // (intake re-arms) without a false approval record.
+  proposal: ["approved", "rejected", "blocked"],
   approved: ["blocked", "active", "rejected"],
   blocked: ["approved", "rejected"],   // unblock (approved) or drop (rejected)
   active: ["reviewing", "failed"],      // event-driven (extension)
@@ -235,6 +238,11 @@ export function updateItem(store: QueueStore, key: string, patch: UpdatePatch, n
   }
   const from = item.status;
   const to = clean.status;
+  // blocked must say WHY (parked/serialized/merge/decision) — a blocker-less
+  // block would be indistinguishable from a rejected proposal.
+  if (to === "blocked" && !clean.blocker) {
+    throw new Error(`queue: blocked requires a blocker reason (parked/serialized/merge/decision) for '${key}'`);
+  }
   if (to !== undefined && to !== from && !validTransition(from, to)) {
     // allow REPAIR of a corrupt item (status missing/invalid) to any valid status
     if (!isValidStatus(from) && isValidStatus(to)) {

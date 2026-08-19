@@ -224,3 +224,21 @@ describe("done → approved (human re-open)", () => {
     expect(validTransition("done", "active")).toBe(false);
   });
 });
+
+describe("proposal → blocked (defer without approval)", () => {
+  test("a proposal blocks directly (parked) without an approval record", () => {
+    const store = newStore();
+    addItem(store, { key: "P1", status: "proposal", blocker: null, title: "p1", scope: "", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: null, attempts: 0, notes: "", createdAt: "a", updatedAt: "b" });
+    const it = updateItem(store, "P1", { status: "blocked", blocker: "parked" });
+    expect(it.status).toBe("blocked");
+    expect(it.blocker).toBe("parked");
+    // the proposal is resolved from the pending set — intake can re-arm
+    expect(queueLengths(store)).toEqual({ proposal: 0, approved: 0, blocked: 1, active: 0, reviewing: 0, failed: 0, done: 0, rejected: 0 });
+  });
+
+  test("blocked REQUIRES a blocker reason — a blocker-less block is rejected", () => {
+    const store = newStore();
+    addItem(store, { key: "P1", status: "proposal", blocker: null, title: "p1", scope: "", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: null, attempts: 0, notes: "", createdAt: "a", updatedAt: "b" });
+    expect(() => updateItem(store, "P1", { status: "blocked" })).toThrow(/requires a blocker reason/);
+  });
+});

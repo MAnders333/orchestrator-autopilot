@@ -11,9 +11,9 @@ export const CONTRACTS = {
     "Add a new queue item (proposal by default, or approved). Notes/scope are free-form — no schema constraints on content. " +
     "Approval (status=approved) REQUIRES a complete scope + cwd.",
   queue_update:
-    "Update a queue item: status (validated transitions: proposal→approved/rejected, approved→active/rejected, active→reviewing/failed, " +
-    "reviewing→done/failed/active, failed→active, done→approved (human re-open — you found issues in your review)); " +
-    "approved REQUIRES a complete scope + cwd. blocker (parked/serialized/merge/decision), or free-form notes. " +
+    "Update a queue item: status (validated transitions: proposal→approved/rejected/blocked (defer a candidate without approving), approved→active/rejected, " +
+    "active→reviewing/failed, reviewing→done/failed/active, failed→active, done→approved (human re-open — you found issues in your review)); " +
+    "approved REQUIRES a complete scope + cwd; blocked REQUIRES a blocker reason (parked/serialized/merge/decision). " +
     "active→reviewing/failed are event-driven — do NOT set them by hand.",
   queue_dispatch:
     "Dispatch a queue item: spawns the worker (same executor as the subagent tool; fresh context, worktree isolation) AND records " +

@@ -9,7 +9,7 @@ behavior. This is the AUTHORITATIVE model; the orchestrator skills reference it.
 |---|---|
 | `proposal` | candidate, under discussion (intake output) |
 | `approved` | **dispatchable** — a free slot dispatches it |
-| `blocked` | approved but waiting — blocker says why (`parked` \| `serialized` \| `merge` \| `decision`) |
+| `blocked` | waiting — blocker says why (`parked` \| `serialized` \| `merge` \| `decision`); reached from `approved` or directly from `proposal` (defer without approving) |
 | `active` | dispatched — worker running (runId set) |
 | `reviewing` | worker done — reviewer in flight (reviewerRunId set) |
 | `failed` | run failed (re-dispatchable) |
@@ -25,6 +25,7 @@ into the status; old stores normalize on read: `approved+!ready → blocked`.)
 ```
 proposal  ─► approved │ rejected
 approved  ─► blocked │ active │ rejected
+proposal  ─► blocked (defer a candidate — parked/serialized/decision; no approval needed)
 blocked   ─► approved (unblock) │ rejected
 active    ─► reviewing │ failed        (event-driven: worker completion)
 reviewing ─► done │ failed │ active    (active = review-FAIL re-dispatch)
