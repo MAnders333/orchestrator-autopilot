@@ -483,7 +483,7 @@ export default function (pi: ExtensionAPI) {
       queue_key: Type.Optional(Type.String({ description: "The queue item this flag came from (when orchestrated)" })),
     }),
     async execute(_toolCallId, params: { summary: string; risk: "low" | "medium" | "high"; blast_radius: string; review_targets: string[]; self_reviewed: boolean; review_method: "commit-hook" | "reviewer-subagent" | "none"; action_needed?: string; residual_risks?: string; queue_key?: string }) {
-      const { deliveryNote } = flagForReview(params);
+      const { deliveryNote } = flagForReview(params, { logPath: join(stateDir, "reviews.jsonl") });
       return { content: [{ type: "text", text: `Flagged for review. Risk: ${params.risk}. ${deliveryNote}` }], details: {} };
     },
   });

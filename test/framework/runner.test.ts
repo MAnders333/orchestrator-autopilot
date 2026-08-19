@@ -2,7 +2,7 @@
 // trigger routing + gate + cooldown that BOTH hosts use (pi extension +
 // opencode plugin). Host-agnostic — mock backend, real Autopilot + store.
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Autopilot } from "../../src/core.ts";
@@ -44,6 +44,7 @@ function setup(opts: { sweepIntervalMs?: number } = {}): Fixture {
     enabled: true,
   };
   f.runner = createFrameworkRunner({
+    stateDir: dir,
     autopilot: f.autopilot,
     backend,
     host: {
@@ -177,7 +178,7 @@ describe("framework runner (shared tick machinery)", () => {
 
   test("onCompletion: reviewer Verdict: PASS → done + reviewTick", async () => {
     const f = setup();
-    seed(f, "R1", { status: "reviewing" });
+    seed(f, "R1", { status: "reviewing", cwd: "/tmp/repo", risk: "low" });
     const s = load(f);
     s.items["R1"].reviewerRunId = "12345678-dead-beef";
     save(f, s);
@@ -191,6 +192,16 @@ describe("framework runner (shared tick machinery)", () => {
     const st = load(f);
     expect(st.items["R1"].status).toBe("done");
     expect(f.delivered.some((m) => m.includes("[orch-tick: review]"))).toBe(true);
+    // DETERMINISTIC HANDOVER: the framework auto-flagged from the item
+    const reviewLog = join(f.dir, "reviews.jsonl");
+    expect(existsSync(reviewLog)).toBe(true);
+    const flag = JSON.parse(readFileSync(reviewLog, "utf8"));
+    expect(flag.event).toBe("flag_for_review");
+    expect(flag.summary).toContain("agent review PASSED");
+    expect(flag.risk).toBe("low"); // the seed item's risk
+    expect(flag.review_targets[0]).toBe("/tmp/repo"); // hmm — the seed item's cwd
+    expect(flag.queue_key).toBe("R1");
+    expect(flag.self_reviewed).toBe(true);
   });
 
   test("REGRESSION: the stuck reviewTick (timer) does NOT claim 'A reviewer completed'", async () => {

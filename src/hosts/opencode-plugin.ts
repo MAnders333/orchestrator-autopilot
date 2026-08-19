@@ -383,7 +383,7 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
       queue_key: tool.schema.string().optional().describe("The queue item this flag came from"),
     },
     execute: async (args) => {
-      const { deliveryNote } = flagForReview(args as never);
+      const { deliveryNote } = flagForReview(args as never, { logPath: join(stateDir, "reviews.jsonl") });
       return `Flagged for review. Risk: ${args.risk}. ${deliveryNote}`;
     },
   });

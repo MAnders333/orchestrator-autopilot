@@ -158,7 +158,7 @@ export class Autopilot {
           return {
             tick: withinQuiet ? null : {
               reason: "review",
-              message: `[orch-tick: review] ${matched.key} PASSED review — flag_for_review + surface the completion card (orchestrator-review skill). Not a user request; respond ≤2 lines.`,
+              message: `[orch-tick: review] ${matched.key} PASSED review — the harness AUTO-FLAGGED it for your review (built from the item). Add specific review targets (files/commits) via flag_for_review only if you have better ones. Not a user request; respond ≤2 lines.`,
               facts: { key: matched.key, verdict: "PASS" },
             },
                         domainEvents,

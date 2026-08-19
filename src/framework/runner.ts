@@ -10,9 +10,12 @@
 //   - their delivery mechanism (pi: sendMessage; opencode: promptAsync)
 
 import type { SubagentBackend } from "../backends/types.ts";
+import { join } from "node:path";
 import type { Autopilot } from "../core.ts";
 import type { CompletionEvent } from "../types.ts";
 import { loadAutopilotConfig } from "../config.ts";
+import { loadStore } from "../queue-store.ts";
+import { flagForReview } from "./flag-review.ts";
 import { createTickRouter, type TickHostState } from "./tick-router.ts";
 import { autoDispatchEligible, autoRedispatch, autoReview } from "./auto-dispatch.ts";
 
@@ -209,6 +212,38 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
         }
       }
       
+      // DETERMINISTIC HANDOVER: on a review PASS the framework auto-flags for
+      // the user's review, built from the ITEM (title/scope/risk/cwd — the
+      // orchestrator wrote those at approval, so no judgment is needed here).
+      // The user ALWAYS gets the notification; the orchestrator's manual
+      // flag_for_review becomes the refinement (specific files/commits).
+      const pass = result.domainEvents.find((e) => e.name === "orch:verdict" && e.data?.verdict === "PASS");
+      if (process.env.ORCH_DBG) console.error("[dbg-flag] pass:", JSON.stringify(pass), "events:", JSON.stringify(result.domainEvents.map((e) => e.name)));
+      if (pass) {
+        try {
+          const key = String(pass.data?.key ?? "");
+          const store = loadStore(opts.stateDir);
+          const item = store?.items[key];
+          if (item) {
+            const risk = (["low", "medium", "high"] as const).includes(item.risk as never) ? (item.risk as "low" | "medium" | "high") : "medium";
+            const scopeHead = (item.scope ?? "").split(/\n/)[0].trim().slice(0, 80);
+            flagForReview(
+              {
+                summary: `${item.title || key} — agent review PASSED${scopeHead ? ` (${scopeHead}…)` : ""}.`,
+                risk,
+                blast_radius: `The reviewed work lands in the repo at ${item.cwd ?? "?"} — if wrong, ${item.title || key} is affected.`,
+                review_targets: [item.cwd ?? "", `the reviewed work (queue item ${key})`],
+                self_reviewed: true,
+                review_method: "reviewer-subagent",
+                queue_key: key,
+              },
+              { logPath: join(opts.stateDir, "reviews.jsonl") },
+            );
+          }
+        } catch {
+          // the PASS tick below still nudges the orchestrator to flag manually
+        }
+      }
       sendTick(result.tick);
       if (result.freedSlot) {
         // ANY run completing frees a slot → dispatch sweep with the

@@ -90,6 +90,11 @@ only your own backend's notes.
   pass is optional for direct work — honest `self_reviewed: false` +
   `review_method: "none"` is correct. The user should never discover a
   finished deliverable in chat without the flag.
+- **The handover is DETERMINISTIC on a review PASS**: the framework
+  auto-flags for the user's review, built from the item (title/scope/risk/
+  cwd/queue_key — self_reviewed, reviewer-subagent) — the user ALWAYS gets
+  the notification. Your manual `flag_for_review` refines it: add specific
+  review targets (files/commits) when you have them.
 - The handover: `flag_for_review(summary, risk, blast_radius, review_targets,
   self_reviewed, review_method, action_needed?, residual_risks?, queue_key?)`
   — ONLY when the work is done, committed, and any automated review has passed.
