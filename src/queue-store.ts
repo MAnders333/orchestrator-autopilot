@@ -266,6 +266,13 @@ export function updateItem(store: QueueStore, key: string, patch: UpdatePatch, n
   }
   const from = item.status;
   const to = clean.status;
+  // done/failed are terminal-ish: the run that produced them is over — clear
+  // stale run refs (a done item must not keep pointing at a dead worker; the
+  // FAIL flip already nulls them; this covers the manual/orchestrator paths).
+  if (to === "done" || to === "failed") {
+    clean.runId = null;
+    clean.reviewerRunId = null;
+  }
   // blocked must say WHY (parked/serialized/merge/decision) — a blocker-less
   // block would be indistinguishable from a rejected proposal.
   if (to === "blocked" && !clean.blocker) {

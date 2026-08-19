@@ -242,3 +242,22 @@ describe("proposal → blocked (defer without approval)", () => {
     expect(() => updateItem(store, "P1", { status: "blocked" })).toThrow(/requires a blocker reason/);
   });
 });
+
+describe("updateItem clears run refs on done/failed (no stale worker refs on terminal states)", () => {
+  test("done/failed null runId + reviewerRunId; other transitions keep them", () => {
+    const store = newStore();
+    // reviewing→done (the P5 verified-complete path)
+    addItem(store, { key: "A1", title: "a", status: "reviewing", runId: "r1", reviewerRunId: "rv1" });
+    updateItem(store, "A1", { status: "done" });
+    expect(store.items["A1"].runId).toBeNull();
+    expect(store.items["A1"].reviewerRunId).toBeNull();
+    // reviewing→failed (cap) clears too
+    addItem(store, { key: "A1b", title: "c", status: "reviewing", runId: "r1b", reviewerRunId: "rv1b" });
+    updateItem(store, "A1b", { status: "failed" });
+    expect(store.items["A1b"].reviewerRunId).toBeNull();
+    // in-flight states keep their refs
+    addItem(store, { key: "A2", title: "b", status: "active", runId: "r2", reviewerRunId: "rv2" });
+    updateItem(store, "A2", { status: "reviewing" });
+    expect(store.items["A2"].runId).toBe("r2");
+  });
+});

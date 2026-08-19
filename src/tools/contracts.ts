@@ -12,7 +12,7 @@ export const CONTRACTS = {
     "Approval (status=approved) REQUIRES a complete scope + cwd.",
   queue_update:
     "Update a queue item: status (validated transitions: proposal→approved/rejected/blocked (defer a candidate without approving), approved→active/rejected, " +
-    "active→reviewing/failed, reviewing→done/failed/active, failed→active, done→approved (human re-open — you found issues in your review)); " +
+    "active→reviewing/failed, reviewing→done/failed/active, failed→active (recovery re-dispatch) | done (verified-complete despite the failure record), done→approved (human re-open — you found issues in your review)); " +
     "approved REQUIRES a complete scope + cwd; blocked REQUIRES a blocker reason (parked/serialized/merge/decision). " +
     "active→reviewing/failed are event-driven — do NOT set them by hand.",
   queue_dispatch:

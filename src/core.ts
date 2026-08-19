@@ -195,7 +195,7 @@ export class Autopilot {
           return {
             tick: withinQuiet ? null : {
               reason: "review",
-              message: `[orch-tick: review] ${matched.key} FAILED review (attempt ${attempts}) — re-dispatch via queue_dispatch with the accumulated findings (orchestrator-review skill). Not a user request; respond ≤2 lines.`,
+              message: `[orch-tick: review] ${matched.key} FAILED review (attempt ${attempts}) — the item is ACTIVE: the harness auto-re-dispatches it (queue_dispatch only if autopilot's auto-dispatch is off). Before the redo runs: VERIFY GROUND TRUTH — false-negative reviews are the recurring pattern (the reviewer may have missed the work on a parallel branch); if the deliverable is already delivered, stop the redo + reconcile the item. Not a user request; respond ≤2 lines.`,
               facts: { key: matched.key, verdict: "FAIL", attempts },
             },
                         domainEvents,

@@ -69,7 +69,11 @@ only your own backend's notes.
   (`pi-parallel-<runid>-0`), unmerged. Verify `git log --all` + the
   remote-tracking branches before letting the re-dispatch run: if the work is
   there, stop the redo worker, MERGE it to main (a finisher-style merge), and
-  mark the item done — never re-implement recoverable work.
+  mark the item done — never re-implement recoverable work. Marking done from
+  an active/failed item needs NO fake review state: stop the redo worker →
+  `active→failed` (the worker stopped = failed) → `failed→done`
+  ("verified-complete despite the failure record") — both transitions are
+  legal, no `active→reviewing` detour needed.
 - On **cap** (5 FAILs): the framework marked it failed — surface the options:
   apply the findings directly / review the work as-is / drop.
 - `queue_review(key, task?)` remains the tool for dispatching the reviewer on
