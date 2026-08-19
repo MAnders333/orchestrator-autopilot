@@ -86,6 +86,14 @@ export default function (pi: ExtensionAPI) {
   let interactive = false;        // true only in the interactive TUI session
   let sessionId = "";             // current pi session id (per-session autopilot scope)
   let orchestratorLoaded = false; // /orchestrate injected into this session
+  // DEFERRED delivery: the runtime only honors followUp WHILE STREAMING —
+  // in the busy-but-not-streaming window (mid-command, mid-tool-call) any
+  // sendMessage/sendUserMessage calls agent.prompt() directly and THROWS
+  // ("Agent is already processing a prompt..."). Sends in that window are
+  // deferred here + flushed at agent_settled (the agent is idle then).
+  let pendingOrchestrate = false;  // the /orchestrate injection
+  let pendingInform: string | null = null; // the toggle-mode message
+  let pendingTick: string | null = null;   // a tick the runtime rejected
 
   function ensureAutopilot() {
     if (autopilot) return autopilot;
@@ -142,6 +150,12 @@ export default function (pi: ExtensionAPI) {
     if (!isAutopilotOn(stateDir, sessionId)) return;
     if (orchestratorLoaded) return;
     orchestratorLoaded = true; // assume success; reset on failure or session_start
+    // deferAs: when the agent is busy but NOT streaming, the runtime's
+    // followUp is ignored and sendUserMessage THROWS — defer to the settle.
+    if (agentBusy) {
+      pendingOrchestrate = true;
+      return;
+    }
     // deliverAs: "followUp" is REQUIRED — sendUserMessage THROWS "Agent is
     // already processing..." while the agent is streaming (e.g. mid-command),
     // and the rejection is async so a sync try/catch cannot contain it.
@@ -157,10 +171,9 @@ export default function (pi: ExtensionAPI) {
         });
       }
     } catch {
-      // A synchronous throw (busy agent edge cases) must NOT take down the
-      // /autopilot command — the runner + ticks keep working; the injection
-      // retries on the next settled/completion event.
-      orchestratorLoaded = false;
+      // A synchronous throw (busy-not-streaming edge cases) must NOT take
+      // down the /autopilot command — defer + flush at the settle.
+      pendingOrchestrate = true;
     }
   }
 
@@ -183,15 +196,20 @@ export default function (pi: ExtensionAPI) {
     deliver: (message) => {
       // pi.sendMessage is declared `: void` (not a Promise) — the runtime
       // sometimes returns a thenable and sometimes undefined. Never assume:
-      // guard the catch so an undefined return cannot crash pi.
-      const sent = pi.sendMessage(
-        { customType: TICK_TYPE, content: message, display: true },
-        { triggerTurn: true, deliverAs: "followUp" },
-      );
-      if (sent && typeof (sent as Promise<void>).catch === "function") {
-        void (sent as Promise<void>).catch(() => {
-          // silent — next event retries
-        });
+      // guard the catch so an undefined return cannot crash pi. A THROW in
+      // the busy-not-streaming window defers the tick to the settle flush.
+      try {
+        const sent = pi.sendMessage(
+          { customType: TICK_TYPE, content: message, display: true },
+          { triggerTurn: true, deliverAs: "followUp" },
+        );
+        if (sent && typeof (sent as Promise<void>).catch === "function") {
+          void (sent as Promise<void>).catch(() => {
+            pendingTick = message; // async rejection — deliver at the settle
+          });
+        }
+      } catch {
+        pendingTick = message; // sync throw — deliver at the settle
       }
     },
     emit: (e) => emitDomain(e as never),
@@ -206,6 +224,10 @@ export default function (pi: ExtensionAPI) {
     // The message is the framework's (autopilotModeMessage) — this host only
     // DELIVERS it (followUp so a busy agent cannot fail the command).
     const msg = autopilotModeMessage(mode);
+    if (agentBusy) {
+      pendingInform = msg; // the busy-not-streaming window throws — defer
+      return;
+    }
     try {
       const sent = pi.sendUserMessage(msg, { deliverAs: "followUp" });
       if (sent && typeof (sent as Promise<void>).catch === "function") {
@@ -266,12 +288,48 @@ export default function (pi: ExtensionAPI) {
 
   // -- lifecycle -------------------------------------------------------------
 
+  /** Deliver the deferred sends — called at agent_settled (the agent is
+   *  idle: activeRun done, isStreaming false → the runtime accepts prompts).
+   *  Re-defer on another throw (defensive; the settle window is safe). */
+  function flushPending(): void {
+    if (pendingOrchestrate) {
+      pendingOrchestrate = false;
+      try {
+        const sent = pi.sendUserMessage("/orchestrate", { expandPromptTemplates: true, deliverAs: "followUp" });
+        if (sent && typeof (sent as Promise<void>).catch === "function") void (sent as Promise<void>).catch(() => { orchestratorLoaded = false; });
+      } catch {
+        pendingOrchestrate = true;
+      }
+    }
+    if (pendingInform) {
+      const msg = pendingInform;
+      pendingInform = null;
+      try {
+        const sent = pi.sendUserMessage(msg, { deliverAs: "followUp" });
+        if (sent && typeof (sent as Promise<void>).catch === "function") void (sent as Promise<void>).catch(() => {});
+      } catch {
+        pendingInform = msg;
+      }
+    }
+    if (pendingTick) {
+      const msg = pendingTick;
+      pendingTick = null;
+      try {
+        const sent = pi.sendMessage({ customType: TICK_TYPE, content: msg, display: true }, { triggerTurn: true, deliverAs: "followUp" });
+        if (sent && typeof (sent as Promise<void>).catch === "function") void (sent as Promise<void>).catch(() => { pendingTick = msg; });
+      } catch {
+        pendingTick = msg;
+      }
+    }
+  }
+
   pi.on("agent_start", () => {
     agentBusy = true;
     compacting = false; // failsafe: a run beginning means compaction finished or was cancelled
   });
   pi.on("agent_settled", () => {
     agentBusy = false;
+    flushPending(); // deliver the deferred /orchestrate, toggle message, and ticks now (the agent is idle)
     runner.onSettled(); // queue may have changed while the orchestrator worked
   });
   // A tick delivered DURING auto-compaction aborts it ('Turn prefix

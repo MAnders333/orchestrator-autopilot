@@ -277,14 +277,45 @@ describe("pi adapter smoke", () => {
     expect(pi._sent.filter((s) => s.kind === "message")).toHaveLength(1);
   });
 
-  test("REGRESSION: /autopilot on mid-turn queues the /orchestrate injection (deliverAs followUp) instead of throwing", async () => {
-    // the command handler runs INSIDE a turn — the agent is streaming
+  test("REGRESSION: /autopilot on mid-turn DEFERS the /orchestrate injection to the settle (the runtime throws otherwise)", async () => {
+    // the command handler runs INSIDE a turn — the runtime would throw
+    // ("Agent already processing a prompt") for a direct send in this window
     emit("agent_start", {});
     await runAutopilotCmd("on");
+    // deferred — nothing sent while busy
+    expect(pi._sent.some((s) => s.kind === "user" && s.args[0] === "/orchestrate")).toBe(false);
+    // the settle flushes the deferred injection (the agent is idle then)
+    emit("agent_settled", {});
+    await new Promise((r) => setTimeout(r, 20));
     const injected = pi._sent.find((s) => s.kind === "user" && s.args[0] === "/orchestrate");
     expect(injected).toBeDefined();
-    expect(injected!.args[1]?.deliverAs).toBe("followUp"); // queued, not thrown
-    expect(pi._sent.some((s) => s.kind === "user" && s.args[0] === "/orchestrate" && s.args[1]?.deliverAs === undefined)).toBe(false);
+    expect(injected!.args[1]?.deliverAs).toBe("followUp");
+  });
+
+  test("REGRESSION: a tick rejected in the busy-not-streaming window is DEFERRED + delivered at the settle", async () => {
+    startSession("tui");
+    const origSend = pi.sendMessage;
+    let throwWhileBusy = true;
+    pi.sendMessage = ((payload, meta) => {
+      // the runtime's busy-not-streaming behavior: a direct send THROWS
+      if (throwWhileBusy && meta?.triggerTurn) {
+        throw new Error("Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.");
+      }
+      return origSend(payload, meta);
+    }) as typeof pi.sendMessage;
+    try {
+      await runAutopilotCmd("on"); // the activate sweep produces a tick → the deliver throws → deferred
+      await new Promise((r) => setTimeout(r, 30));
+      replyToLastStatus(0, []); // unblock the sweep's fleet query
+      await new Promise((r) => setTimeout(r, 30));
+      expect(pi._sent.filter((s) => s.kind === "message")).toHaveLength(0); // nothing while busy
+      throwWhileBusy = false; // the agent settles — sends are accepted again
+      emit("agent_settled", {});
+      await new Promise((r) => setTimeout(r, 30));
+      expect(pi._sent.filter((s) => s.kind === "message").length).toBeGreaterThan(0); // the deferred tick delivered
+    } finally {
+      pi.sendMessage = origSend;
+    }
   });
 
   test("autopilot on → migrates legacy state.md into queue.json + injects /orchestrate", async () => {
