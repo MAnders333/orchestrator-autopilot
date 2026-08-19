@@ -290,6 +290,41 @@ describe("auto-review (C) through the runner", () => {
   });
 });
 
+describe("the shared deferral (framework-level: busy sends held + flushed at settle)", () => {
+  test("a tick send while busy is DEFERRED by the runner + delivered at onSettled — host-agnostic", async () => {
+    const f = setup();
+    seed(f, "A1");
+    f.busy = true;
+    f.runner.onActivate(); // the sweep's tick → the router "deferred" → the runner holds it
+    await new Promise((r) => setTimeout(r, 60));
+    expect(f.delivered.length).toBe(0); // nothing injected mid-turn
+    f.busy = false; // the agent settles (pi: agent_settled; opencode: session.idle)
+    f.runner.onSettled();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(f.delivered.length).toBeGreaterThan(0); // the deferred tick arrived at the settle
+  });
+
+  test("a deferred USER message (the /orchestrate injection) flushes via deliverUserMessage at the settle", async () => {
+    const f = setup();
+    const deliveredUser: Array<[string, Record<string, unknown> | undefined]> = [];
+    f.runner = createFrameworkRunner({
+      stateDir: f.dir,
+      autopilot: f.autopilot,
+      backend,
+      host: { interactive: () => true, loaded: () => true, busy: () => false, compacting: () => false },
+      deliver: (m) => f.delivered.push(m),
+      deliverUserMessage: (m, o) => deliveredUser.push([m, o]),
+      enabled: () => true,
+      sweepIntervalMs: 0,
+    });
+    f.runner.deferUserMessage("/orchestrate", { expandPromptTemplates: true });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(deliveredUser.length).toBe(1); // the flush delivered it (host idle)
+    expect(deliveredUser[0][0]).toBe("/orchestrate");
+    expect(deliveredUser[0][1]).toEqual({ expandPromptTemplates: true });
+  });
+});
+
 describe("the shared autopilot gate (toggle off → harness idle)", () => {
   test("enabled=false → completions are IGNORED: no flip, no auto-review, no ticks", async () => {
     const dir = mkdtempSync(join(tmpdir(), "orch-runner-gate-"));

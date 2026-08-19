@@ -26,21 +26,29 @@ export function createTickRouter(
   host: TickHostState,
   deliver: (message: string) => void,
   cooldownMs = 1500,
-): { send(message: string, opts?: { bypassCooldown?: boolean }): boolean } {
+): { send(message: string, opts?: { bypassCooldown?: boolean }): "delivered" | "dropped" | "deferred" } {
   let lastSentAt = 0;
   return {
-    /** Apply the shared gate; deliver when it passes. Returns true if delivered.
-     *  The harness tick is QUEUED by the runner (held + flushed on settle) —
-     *  the busy/compacting gates stay intact (never mid-turn). The flush may
-     *  bypassCooldown: at the settle boundary the harness STATE update must
-     *  not be suppressed by a nudge that just fired. */
-    send(message: string, opts?: { bypassCooldown?: boolean }): boolean {
-      if (!host.interactive() || !host.loaded() || host.busy() || host.compacting()) return false;
+    /** Apply the shared gate; deliver when it passes.
+     *  "delivered" — the host accepted the message.
+     *  "dropped"   — PERMANENT (interactive/loaded) or a cooldown nudge: the
+     *                nudges re-fire on the next sweep; do not hold.
+     *  "deferred"  — TRANSIENT (busy/compacting, or the host's deliver threw —
+     *                the runtime rejected the send in the busy-not-streaming
+     *                window). The runner holds it + flushes at the host's
+     *                settle/idle event. */
+    send(message: string, opts?: { bypassCooldown?: boolean }): "delivered" | "dropped" | "deferred" {
+      if (!host.interactive() || !host.loaded()) return "dropped"; // permanent
+      if (host.busy() || host.compacting()) return "deferred"; // transient — hold + flush at settle
       const now = Date.now();
-      if (!opts?.bypassCooldown && now - lastSentAt < cooldownMs) return false;
+      if (!opts?.bypassCooldown && now - lastSentAt < cooldownMs) return "dropped"; // nudge — re-fires
       lastSentAt = now;
-      deliver(message);
-      return true;
+      try {
+        deliver(message);
+        return "delivered";
+      } catch {
+        return "deferred"; // the runtime rejected the send — hold + flush at settle
+      }
     },
   };
 }

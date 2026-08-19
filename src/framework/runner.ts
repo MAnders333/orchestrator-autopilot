@@ -25,6 +25,9 @@ export interface RunnerOptions {
   host: TickHostState;
   /** The host's delivery mechanism (pi sendMessage / opencode promptAsync). */
   deliver: (message: string) => void;
+  /** Optional user-message delivery for deferred DIRECT sends (the pi host's
+   *  /orchestrate injection + toggle messages; opencode has none). */
+  deliverUserMessage?: (message: string, options?: Record<string, unknown>) => void;
   /** Host gate: should triggers run at all right now (pi: autopilot-on for
    *  this session; opencode: always). */
   enabled?: () => boolean;
@@ -59,8 +62,44 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
   const autopilot = opts.autopilot;
   const router = createTickRouter(opts.host, opts.deliver, opts.cooldownMs);
   const enabled = opts.enabled ?? (() => true);
+  // SHARED deferral: messages the runtime rejected (busy-not-streaming —
+  // the host's deliver threw) are held here + flushed at the host's
+  // settle/idle event (the agent is idle then). This is framework logic;
+  // the hosts only wire their idle event to onSettled + supply delivery.
+  const deferred: Array<{ message: string; kind: "tick" | "user"; options?: Record<string, unknown> }> = [];
+  const queueDeferred = (message: string, kind: "tick" | "user", options?: Record<string, unknown>): void => {
+    deferred.push({ message, kind, options });
+    flushDeferred();
+  };
+  const flushDeferred = (): void => {
+    if (!deferred.length) return;
+    const hold: typeof deferred = [];
+    for (const d of deferred) {
+      if (d.kind === "user") {
+        if (!opts.deliverUserMessage) continue; // no user-delivery on this host
+        try {
+          opts.deliverUserMessage(d.message, d.options);
+        } catch {
+          hold.push(d); // still busy — re-flush at the next settle
+        }
+        continue;
+      }
+      const r = router.send(d.message, { bypassCooldown: true });
+      if (r === "deferred") hold.push(d); // the runtime still rejected it
+      // "dropped" (interactive/loaded) — permanent, drop; "delivered" — done
+    }
+    deferred.length = 0;
+    deferred.push(...hold);
+  };
+  /** Host-facing: defer a DIRECT user-message send (the /orchestrate injection,
+   *  the toggle message) — delivered via deliverUserMessage at the settle. */
+  const deferUserMessage = (message: string, options?: Record<string, unknown>): void => {
+    queueDeferred(message, "user", options);
+  };
   const sendTick = (t: { message?: string } | null | undefined): void => {
-    if (t?.message) router.send(t.message);
+    if (!t?.message) return;
+    const r = router.send(t.message);
+    if (r === "deferred") queueDeferred(t.message, "tick");
   };
 
   // The auto-actions opt-out: env (AUTOPILOT_AUTO_DISPATCH=0) or the option.
@@ -83,11 +122,11 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     const parts = pendingHarness;
     pendingHarness = [];
     const fleet = pendingFleet !== undefined ? ` — fleet ${pendingFleet}` : "";
-    const sent = router.send(
+    const r = router.send(
       `[orch-tick: harness] auto: ${parts.join("; ")}.${fleet} Your calls: approvals, high-risk checkpoints, review overrides, flag_for_review. Not a user request; respond ≤2 lines.`,
       { bypassCooldown: true },
     );
-    if (!sent) pendingHarness = [...parts, ...pendingHarness]; // requeue — flush at the next settle/timer
+    if (r === "deferred") pendingHarness = [...parts, ...pendingHarness]; // runtime rejected — re-flush at the next settle
   };
   const sweep = async (source: "settled" | "activate" | "timer" | "worker-done"): Promise<void> => {
     if (!enabled()) return;
@@ -180,14 +219,17 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
         sendTick(autopilot.reviewTick());
       }
     },
+    deferUserMessage,
     onSettled() {
-      // flush the queued harness info FIRST (the agent just settled — the
-      // busy gate is clear), then the sweep's nudges (cooldown may drop those).
+      // flush the shared deferral + the queued harness info FIRST (the agent
+      // just settled — the busy gate is clear), then the sweep's nudges.
+      flushDeferred();
       flushHarness();
       void sweep("settled");
     },
     onTimer() {
-      flushHarness(); // backstop if the agent never settles
+      flushDeferred(); // backstop if the agent never settles
+      flushHarness();
       try {
         void sweep("timer");
       } catch {
@@ -195,6 +237,7 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       }
     },
     onActivate() {
+      flushDeferred();
       flushHarness();
       void sweep("activate");
     },

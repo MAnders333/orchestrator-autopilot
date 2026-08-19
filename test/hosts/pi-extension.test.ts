@@ -281,15 +281,28 @@ describe("pi adapter smoke", () => {
     // the command handler runs INSIDE a turn — the runtime would throw
     // ("Agent already processing a prompt") for a direct send in this window
     emit("agent_start", {});
-    await runAutopilotCmd("on");
-    // deferred — nothing sent while busy
-    expect(pi._sent.some((s) => s.kind === "user" && s.args[0] === "/orchestrate")).toBe(false);
-    // the settle flushes the deferred injection (the agent is idle then)
-    emit("agent_settled", {});
-    await new Promise((r) => setTimeout(r, 20));
-    const injected = pi._sent.find((s) => s.kind === "user" && s.args[0] === "/orchestrate");
-    expect(injected).toBeDefined();
-    expect(injected!.args[1]?.deliverAs).toBe("followUp");
+    const origUser = pi.sendUserMessage;
+    let throwWhileBusy = true;
+    pi.sendUserMessage = ((content, options) => {
+      // the runtime's busy-not-streaming behavior: even WITH deliverAs the
+      // direct send throws (followUp is only honored while streaming)
+      if (throwWhileBusy) throw new Error("Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.");
+      return origUser(content, options);
+    }) as typeof pi.sendUserMessage;
+    try {
+      await runAutopilotCmd("on");
+      await new Promise((r) => setTimeout(r, 20));
+      // deferred — nothing sent while busy
+      expect(pi._sent.some((s) => s.kind === "user" && s.args[0] === "/orchestrate")).toBe(false);
+      throwWhileBusy = false; // the agent settles — sends are accepted again
+      emit("agent_settled", {});
+      await new Promise((r) => setTimeout(r, 20));
+      const injected = pi._sent.find((s) => s.kind === "user" && s.args[0] === "/orchestrate");
+      expect(injected).toBeDefined();
+      expect(injected!.args[1]?.deliverAs).toBe("followUp");
+    } finally {
+      pi.sendUserMessage = origUser;
+    }
   });
 
   test("REGRESSION: a tick rejected in the busy-not-streaming window is DEFERRED + delivered at the settle", async () => {
