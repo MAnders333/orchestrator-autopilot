@@ -124,7 +124,7 @@ export function reviewTask(item: QueueItem): string {
     "",
     "## Review the completed work",
     `Verify the work product in the repo at: ${item.cwd}`,
-    "Locate the work yourself: git log/reflog + the worker's branch/commits in that repo (worktree isolation means the worker's commits live in the shared object DB). Read the actual diff/files — do NOT trust the worker's summary.",
+    "Locate the work yourself: the worker ran in an isolated worktree and pushed to ITS OWN parallel branch (pi-parallel-<runid>-0) — the commits may be there, unmerged. Check `git log --all -- <path>` + `git branch -a -r` + `git show` on those branches BEFORE concluding anything is missing; a FAIL must be based on the work being absent everywhere, never just on main. Read the actual diff/files — do NOT trust the worker's summary.",
     "",
     "The FIRST line of your response MUST be exactly `Verdict: PASS` or `Verdict: FAIL`. If FAIL, list each finding as an actionable item.",
   ].join("\n");

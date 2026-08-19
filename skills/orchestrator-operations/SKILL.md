@@ -64,6 +64,12 @@ only your own backend's notes.
   to the cap). The worker sees only its task prompt — the findings must
   be IN it. If the findings are mechanical, applying the fix directly is a
   judgment call; for code tasks, re-spawn.
+- **Check recoverability BEFORE a full redo** (P5): a FAIL can be a FALSE
+  NEGATIVE — the worker's work may exist on its parallel worktree branch
+  (`pi-parallel-<runid>-0`), unmerged. Verify `git log --all` + the
+  remote-tracking branches before letting the re-dispatch run: if the work is
+  there, stop the redo worker, MERGE it to main (a finisher-style merge), and
+  mark the item done — never re-implement recoverable work.
 - On **cap** (5 FAILs): the framework marked it failed — surface the options:
   apply the findings directly / review the work as-is / drop.
 - `queue_review(key, task?)` remains the tool for dispatching the reviewer on

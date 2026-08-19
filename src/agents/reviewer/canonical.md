@@ -43,6 +43,14 @@ not evidence. Form an independent judgment.
   is not in the working tree, use `git show <ref>:<path>` or `git cat-file -p`
   on the branch's commits (loose objects decompress via git itself) — never ask
   the orchestrator to paste the artifact, never mark it unverifiable.
+- **Locate the work on ANY branch, not just the checked-out one**: workers run
+  in isolated worktrees and push to their OWN parallel branches
+  (`pi-parallel-<runid>-0` etc.) — the work may live there, unmerged. Before
+  concluding a deliverable is "not implemented", run `git log --all --oneline
+  -- <path>` and `git branch -a -r` + inspect those branches with `git show`.
+  A FAIL must be based on the work being absent EVERYWHERE (all branches,
+  all refs, the object DB), never just on `main` or the working tree missing
+  it — otherwise you fabricate false-negative FAILs that waste a re-dispatch.
 - **Cite**: code findings cite `file:line`; plan findings cite the section and
   the assumption they challenge.
 - **Bounded**: on FAIL, limit findings to actionable blockers (≤ 8). On PASS,

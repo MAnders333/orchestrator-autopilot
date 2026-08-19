@@ -171,7 +171,9 @@ describe("autoReview (C)", () => {
 
   test("reviewTask carries the locate-the-work rule (never trust the worker's summary)", () => {
     const t = reviewTask(item("R1"));
-    expect(t).toContain("git log/reflog");
+    expect(t).toContain("git log --all -- <path>"); // locate the work on ANY branch
+    expect(t).toContain("pi-parallel-<runid>-0");   // the worker's parallel branch
+    expect(t).toContain("absent everywhere, never just on main"); // no false-negative FAILs
     expect(t).toContain("do NOT trust the worker's summary");
   });
 });
