@@ -24,9 +24,50 @@ import type { SubagentBackend, OpenCodeBackendOptions, OpenCodeRunRecord } from 
 
 const SESSION_ID_RE = /"sessionID"\s*:\s*"([^"]+)"/;
 
-/** Default state root: ~/.local/state/orchestrator-opencode/runs */
+/** Default state root: ~/.local/state/orchestrator-opencode/runs (overridable
+ *  via AUTOPILOT_OPENCODE_RUNS_DIR — the audit caught it documented but never
+ *  read; now wired here in the framework, not per-host). */
 export function defaultRunsDir(): string {
-  return join(homedir(), ".local/state/orchestrator-opencode/runs");
+  return process.env.AUTOPILOT_OPENCODE_RUNS_DIR ?? join(homedir(), ".local/state/orchestrator-opencode/runs");
+}
+
+/** Extract the reviewer's reply (last text event) from a run's output.jsonl —
+ *  the verdict contract anchors on the first non-empty line of that reply.
+ *  BACKEND logic (the run record belongs to the backend); the pi backend
+ *  reads the same shape from the child session file. */
+export function readLatestText(logPath: string): string {
+  try {
+    const text = readFileSync(logPath, "utf8");
+    let last = "";
+    for (const line of text.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      try {
+        const e = JSON.parse(t) as { type?: string; part?: { text?: string } };
+        if (e.type === "text" && typeof e.part?.text === "string" && e.part.text.trim()) last = e.part.text.trim();
+      } catch {
+        // non-JSON line — skip
+      }
+    }
+    return last;
+  } catch {
+    return "";
+  }
+}
+
+/** Build the CompletionEvent for a finished opencode run — the same shape the
+ *  pi backend's buildCompletionEvent produces (runId/agent/success/status/
+ *  results[].output = the last assistant text). The backend owns this; the
+ *  host only wires onComplete → runner.onCompletion. */
+export function buildOpenCodeCompletionEvent(runId: string, rec: OpenCodeRunRecord): Record<string, unknown> {
+  const output = readLatestText(rec.logPath);
+  return {
+    runId,
+    agent: rec.agent,
+    success: rec.status === "completed",
+    status: rec.status === "completed" ? "completed" : "failed",
+    results: output ? [{ agent: rec.agent, output }] : [],
+  };
 }
 
 export function createOpenCodeBackend(opts: OpenCodeBackendOptions): SubagentBackend {

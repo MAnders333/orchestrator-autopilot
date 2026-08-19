@@ -124,6 +124,34 @@ export function newStore(): QueueStore {
   return { version: 1, items: {} };
 }
 
+/** The store-ownership helper both hosts used to inline (loadStore ?? newStore).
+ *  One place, in the store layer. */
+export function loadStoreOrNew(stateDir: string): QueueStore {
+  return loadStore(stateDir) ?? newStore();
+}
+
+/** One-time migration: import a legacy state.md into the programmatic store.
+ *  Host-agnostic — this is STORE logic (pi used to inline it; opencode never
+ *  got it). Best-effort: a broken migration must not break activation, and an
+ *  absent store is a no-op. */
+export function ensureMigrated(stateDir: string): void {
+  try {
+    if (loadStore(stateDir)) return;
+    const mdPath = join(stateDir, "state.md");
+    if (!existsSync(mdPath)) return;
+    const store = migrateFromMd(readFileSync(mdPath, "utf8"));
+    saveStore(stateDir, store);
+    const archived = `${mdPath}.migrated-${Date.now()}`;
+    try {
+      renameSync(mdPath, archived);
+    } catch {
+      // keep the original if rename fails — the store is authoritative now
+    }
+  } catch {
+    // migration is best-effort; autopilot still works on an empty store
+  }
+}
+
 export function queueLengths(store: QueueStore): QueueLengths {
   const out: QueueLengths = { proposal: 0, approved: 0, blocked: 0, active: 0, reviewing: 0, failed: 0, done: 0, rejected: 0 };
   for (const it of Object.values(store.items)) {

@@ -33,8 +33,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { join } from "node:path";
-import { homedir } from "node:os";
-import { randomUUID } from "node:crypto";
 
 // The framework lib is THIS project — the extension lives at src/hosts/ and
 // requires the lib relative to itself (no dotfiles-layout assumption). A
@@ -45,15 +43,16 @@ const LIB_DIR = (() => {
 })();
 // jiti resolves .ts imports at runtime; createRequire keeps this ESM-safe.
 const { Autopilot } = require(`${LIB_DIR}/core.ts`) as typeof import("./core.ts");
-const { loadAutopilotConfig, saveAutopilotConfig, readSessionAutopilotState, writeSessionAutopilotState, isAutopilotOn, appendTelemetry, parseStateDirFromCommand, autopilotModeMessage, resolveStateDir } = require(`${LIB_DIR}/config.ts`) as typeof import("./config.ts");
-const { loadStore, saveStore, newStore, queryItems, addItem, updateItem, queueLengths, migrateFromMd } = require(`${LIB_DIR}/queue-store.ts`) as typeof import("./queue-store.ts");
+const { loadAutopilotConfig, isAutopilotOn, appendTelemetry, autopilotCommand, autopilotModeMessage, resolveStateDir } = require(`${LIB_DIR}/config.ts`) as typeof import("./config.ts");
+const { loadStoreOrNew, ensureMigrated, queueLengths } = require(`${LIB_DIR}/queue-store.ts`) as typeof import("./queue-store.ts");
 const { createSubagentBackend, defaultRunsDir } = require(`${LIB_DIR}/backends/index.ts`) as typeof import("./backends/index.ts");
 const { queueList, queueAdd, queueUpdate, queueDispatch, queueReview, queueSteer, repoCheck } = require(`${LIB_DIR}/tools/queue-ops.ts`) as typeof import("./tools/queue-ops.ts");
 const { CONTRACTS } = require(`${LIB_DIR}/tools/contracts.ts`) as typeof import("./tools/contracts.ts");
 const { createFrameworkRunner } = require(`${LIB_DIR}/framework/runner.ts`) as typeof import("./framework/runner.ts");
+const { isUnisolatedWorkerSpawn } = require(`${LIB_DIR}/framework/auto-dispatch.ts`) as typeof import("./framework/auto-dispatch.ts");
 const { flagForReview } = require(`${LIB_DIR}/framework/flag-review.ts`) as typeof import("./framework/flag-review.ts");
 const { installPiReviewer } = require(`${LIB_DIR}/agents/install.ts`) as typeof import("./agents/install.ts");
-const { existsSync, readFileSync, renameSync } = require("node:fs") as typeof import("node:fs");
+
 
 // Install the framework-owned reviewer agent (idempotent, version-stamped).
 // The framework DEPENDS on the reviewer (queue_review spawns it, the lifecycle
@@ -106,7 +105,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function storeOrNew() {
-    return loadStore(stateDir) ?? newStore();
+    return loadStoreOrNew(stateDir);
   }
 
   /** Subagent-runtime seam — see src/backends/. The backend is DEDUCED from
@@ -114,25 +113,6 @@ export default function (pi: ExtensionAPI) {
    *  pi-subagents backend (the opencode plugin wires its own opencode
    *  backend + completion signal to the same queue tools). */
   const backend = createSubagentBackend({ kind: "pi", pi: pi as never });
-
-  /** One-time migration: import a legacy state.md into the programmatic store. */
-  function ensureMigrated() {
-    try {
-      if (loadStore(stateDir)) return;
-      const mdPath = join(stateDir, "state.md");
-      if (!existsSync(mdPath)) return;
-      const store = migrateFromMd(readFileSync(mdPath, "utf8"));
-      saveStore(stateDir, store);
-      const archived = `${mdPath}.migrated-${Date.now()}`;
-      try {
-        renameSync(mdPath, archived);
-      } catch {
-        // keep the original if rename fails — the store is authoritative now
-      }
-    } catch {
-      // migration is best-effort; autopilot still works on an empty store
-    }
-  }
 
   function maybeInjectOrchestrate() {
     // Never inject into child/headless processes (async runners are
@@ -170,8 +150,6 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  let lastTickSentAt = 0;
-  const TICK_COOLDOWN_MS = 1500;
   // The shared tick machinery (gate + cooldown + delivery) lives in
   // src/framework/runner.ts — identical in both hosts. The pi host supplies
   // its gate state + the sendMessage delivery; runSweep/onCompletion etc.
@@ -250,14 +228,14 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  /** B26: block direct worker subagent spawns without worktree isolation. */
+  /** B26: block direct worker subagent spawns without worktree isolation.
+   *  The RULE is the framework's (isUnisolatedWorkerSpawn — testable, shared);
+   *  this host only wires its tool_call interception event to it. */
   pi.on("tool_call", (event) => {
     if (!interactive || !isAutopilotOn(stateDir, sessionId)) return;
     if (event.toolName !== "subagent") return;
     const args = (event.input ?? {}) as { agent?: string; worktree?: boolean; action?: string };
-    if (args.action !== undefined) return; // status/steer/stop/inspector — not spawns
-    if (!args.agent || !loadAutopilotConfig(stateDir).workerAgents.includes(args.agent)) return;
-    if (args.worktree === true) return; // explicitly isolated
+    if (!isUnisolatedWorkerSpawn(args, loadAutopilotConfig(stateDir).workerAgents)) return;
     return {
       block: true,
       reason:
@@ -266,26 +244,6 @@ export default function (pi: ExtensionAPI) {
         "worktree isolation for all parallel workers (B26: B20's strays blocked B22/B23 at launch).",
     };
   });
-
-  /** git helper (best-effort; resolves stdout + ok flag). */
-  function runGit(cwd: string, args: string[]): Promise<{ ok: boolean; stdout: string; err?: string }> {
-    return new Promise((resolve) => {
-      const { execFile } = require("node:child_process") as typeof import("node:child_process");
-      execFile("git", ["-C", cwd, ...args], { timeout: 5000 }, (err, stdout) => {
-        if (err) return resolve({ ok: false, stdout: "", err: String(err) });
-        resolve({ ok: true, stdout: String(stdout) });
-      });
-    });
-  }
-
-  /** Pre-flight for worktree isolation. FAIL-CLOSED: the worker's worktree is
-   *  created in the TARGET repo, which must be a clean git checkout. Mirrors
-   *  pi-subagents' own check (status --porcelain, untracked included,
-   *  .pi/subagents excluded) so we never pass a dispatch the launcher would
-   *  then reject. A session cwd that is NOT a repo (e.g. a parent dir with workers
-   *  targeting a repo the session is not inside) is a clear error, not a silent skip — that
-   *  skip class caused every dispatch to fail at spawn with the cryptic
-   *  'worktree isolation requires a git repository'. */
 
   // -- lifecycle -------------------------------------------------------------
 
@@ -495,46 +453,31 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const [cmd, val] = (args ?? "").trim().split(/\s+/);
       try {
-        switch (cmd) {
-          case "on":
-            ensureMigrated(); // import legacy state.md into queue.json once
-            writeSessionAutopilotState(stateDir, sessionId, "on");
-            maybeInjectOrchestrate();
-            runner.onActivate(); // nudge a pre-existing capacity gap immediately
-            informOrchestrator("on");
-            ctx.ui.notify(`Autopilot ON (session ${sessionId.slice(0, 8)}) — orchestrator mode loaded, capacity ticks enabled`, "info");
-            break;
-          case "off":
-            writeSessionAutopilotState(stateDir, sessionId, "off");
-            informOrchestrator("off");
-            ctx.ui.notify(`Autopilot OFF (session ${sessionId.slice(0, 8)}) — ticks and queue tools remain available, ticks disabled`, "info");
-            break;
-          case "status": {
-            const cfg = loadAutopilotConfig(stateDir);
-            const st = ensureAutopilot().status();
-            const mine = readSessionAutopilotState(stateDir, sessionId);
-            const store = storeOrNew();
-            const counts = queueLengths(store);
-            ctx.ui.notify(
-              `Autopilot ${mine} (this session) — capacity ${cfg.maxSlots} workers, queue-low < ${cfg.queueLowThreshold} ready, running: ${st.running}, queue: ${JSON.stringify(counts)}`,
-              "info",
-            );
-            break;
-          }
-          case "capacity": {
-            const n = Number(val);
-            if (!Number.isFinite(n) || n < 1) {
-              ctx.ui.notify("Usage: /autopilot capacity <n> (n ≥ 1)", "error");
-              return;
-            }
-            const cfg = loadAutopilotConfig(stateDir);
-            saveAutopilotConfig(stateDir, { ...cfg, maxSlots: n });
-            autopilot = null; // recreate with the new capacity
-            ctx.ui.notify(`Worker capacity set to ${n} (takes effect immediately)`, "info");
-            break;
-          }
-          default:
-            ctx.ui.notify("Usage: /autopilot on | off | status | capacity <n>", "info");
+        // ONE shared toggle implementation (config.autopilotCommand) — this
+        // host keeps only its SIDE EFFECTS: the /orchestrate injection, the
+        // activation nudge, the orchestrator mode notice, and the notify.
+        const r = autopilotCommand(cmd, val, { stateDir, sessionId });
+        if (!r.ok) {
+          ctx.ui.notify(r.message, "error");
+          return;
+        }
+        if (r.mode === "on") {
+          ensureMigrated(stateDir); // import legacy state.md into queue.json once
+          maybeInjectOrchestrate();
+          runner.onActivate(); // nudge a pre-existing capacity gap immediately
+          informOrchestrator("on");
+          ctx.ui.notify(`Autopilot ON (session ${sessionId.slice(0, 8)}) — orchestrator mode loaded, capacity ticks enabled`, "info");
+        } else if (r.mode === "off") {
+          informOrchestrator("off");
+          ctx.ui.notify(`Autopilot OFF (session ${sessionId.slice(0, 8)}) — ticks and queue tools remain available, ticks disabled`, "info");
+        } else if (cmd === "status") {
+          const st = ensureAutopilot().status();
+          const counts = queueLengths(storeOrNew());
+          // the helper's mode+capacity line + this host's runtime detail
+          ctx.ui.notify(`${r.message} running: ${st.running}, queue: ${JSON.stringify(counts)}`, "info");
+        } else if (cmd === "capacity") {
+          autopilot = null; // recreate with the new capacity
+          ctx.ui.notify(r.message, "info");
         }
       } catch (e) {
         const err = e instanceof Error ? e : new Error(String(e));

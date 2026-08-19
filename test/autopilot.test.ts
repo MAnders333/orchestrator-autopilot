@@ -16,7 +16,9 @@ import {
   parseStateDirFromCommand,
   readSessionAutopilotState,
   writeSessionAutopilotState,
+  autopilotCommand,
 } from "../src/config.ts";
+import { isUnisolatedWorkerSpawn } from "../src/framework/auto-dispatch.ts";
 import {
   newStore,
   addItem,
@@ -437,5 +439,44 @@ describe("intake suppression (proposals pending)", () => {
     ]);
     const t = f.sweep("timer", 1_000_000).tick;
     expect(t?.reason).toBe("dispatch"); // ready 1 + slot free → dispatch, not intake
+  });
+});
+
+describe("autopilotCommand — ONE shared toggle implementation (both hosts)", () => {
+  test("on/off write the per-session state + return the framework's mode message", () => {
+    const dir = mkdtempSync(join(tmpdir(), "orch-cmd-"));
+    const on = autopilotCommand("on", undefined, { stateDir: dir, sessionId: "s1" });
+    expect(on.ok).toBe(true);
+    expect(on.mode).toBe("on");
+    expect(on.message).toContain("Autopilot is now ON");
+    expect(isAutopilotOn(dir, "s1")).toBe(true);
+    const off = autopilotCommand("off", undefined, { stateDir: dir, sessionId: "s1" });
+    expect(off.mode).toBe("off");
+    expect(off.message).toContain("Autopilot is now OFF");
+    expect(isAutopilotOn(dir, "s1")).toBe(false);
+  });
+  test("status reports mode + capacity; capacity validates + saves", () => {
+    const dir = mkdtempSync(join(tmpdir(), "orch-cmd-"));
+    const st = autopilotCommand("status", undefined, { stateDir: dir, sessionId: "s1" });
+    expect(st.message).toContain("Autopilot OFF");
+    expect(st.message).toContain("capacity 3 workers");
+    const cap = autopilotCommand("capacity", "5", { stateDir: dir, sessionId: "s1" });
+    expect(cap.ok).toBe(true);
+    expect(cap.message).toContain("5");
+    expect(loadAutopilotConfig(dir).maxSlots).toBe(5);
+    expect(autopilotCommand("capacity", "0", { stateDir: dir, sessionId: "s1" }).ok).toBe(false);
+    expect(autopilotCommand("bogus", undefined, { stateDir: dir, sessionId: "s1" }).ok).toBe(false);
+  });
+});
+
+describe("isUnisolatedWorkerSpawn — the B26 rule as a shared predicate", () => {
+  test("a worker spawn without worktree:true is blocked; isolated + management actions pass", () => {
+    const agents = ["worker"];
+    expect(isUnisolatedWorkerSpawn({ agent: "worker" }, agents)).toBe(true);
+    expect(isUnisolatedWorkerSpawn({ agent: "worker", worktree: false }, agents)).toBe(true);
+    expect(isUnisolatedWorkerSpawn({ agent: "worker", worktree: true }, agents)).toBe(false);
+    expect(isUnisolatedWorkerSpawn({ agent: "other", worktree: false }, agents)).toBe(false);
+    expect(isUnisolatedWorkerSpawn({ action: "status", agent: "worker" }, agents)).toBe(false);
+    expect(isUnisolatedWorkerSpawn({}, agents)).toBe(false);
   });
 });

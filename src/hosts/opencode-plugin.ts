@@ -1,14 +1,10 @@
 import { tool, type Plugin } from "@opencode-ai/plugin";
 import { join } from "node:path";
-import { homedir } from "node:os";
-import { readFileSync } from "node:fs";
-import { createOpenCodeBackend, defaultRunsDir } from "../backends/opencode.ts";
-import { isAutopilotOn, autopilotModeMessage, resolveStateDir } from "../config.ts";
+import { createOpenCodeBackend, defaultRunsDir, buildOpenCodeCompletionEvent } from "../backends/opencode.ts";
+import { isAutopilotOn, resolveStateDir, autopilotCommand, loadAutopilotConfig, type AutopilotConfig } from "../config.ts";
 import { CONTRACTS } from "../tools/contracts.ts";
-import type { OpenCodeRunRecord } from "../backends/types.ts";
 import { Autopilot } from "../core.ts";
-import { loadAutopilotConfig, type AutopilotConfig } from "../config.ts";
-import { loadStore, newStore } from "../queue-store.ts";
+import { loadStoreOrNew, ensureMigrated } from "../queue-store.ts";
 import {
   queueList, queueAdd, queueUpdate, queueDispatch, queueReview, queueSteer, repoCheck,
   type QueueOpsCtx, type ToolResult,
@@ -76,53 +72,22 @@ export interface OpenCodeFramework {
   dispose(): void;
 }
 
-/** Extract the reviewer's reply (last text event) from a run's output.jsonl —
- *  the verdict contract anchors on the first non-empty line of that reply. */
-export function readLatestText(logPath: string): string {
-  try {
-    const text = readFileSync(logPath, "utf8");
-    let last = "";
-    for (const line of text.split("\n")) {
-      const t = line.trim();
-      if (!t) continue;
-      try {
-        const e = JSON.parse(t) as { type?: string; part?: { text?: string } };
-        if (e.type === "text" && typeof e.part?.text === "string" && e.part.text.trim()) last = e.part.text.trim();
-      } catch {
-        // non-JSON line — skip
-      }
-    }
-    return last;
-  } catch {
-    return "";
-  }
-}
-
 export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCodeFramework {
   const stateDir = opts.stateDir;
   const runsDir = opts.runsDir ?? defaultRunsDir();
   const cfg = loadAutopilotConfig(stateDir);
+  ensureMigrated(stateDir); // legacy state.md → queue.json (host-agnostic; a no-op without one)
   const autopilot = new Autopilot({ stateDir, ...opts.config });
 
-  const storeOrNew = () => loadStore(stateDir) ?? newStore();
-  const reviewerAgent = cfg.reviewerAgents[0] ?? "orchestrator-reviewer";
+  const storeOrNew = () => loadStoreOrNew(stateDir);
 
   const isHeadlessRun = process.argv.includes("run"); // oc run = one-shot (no live ticks)
   let busy = false; // session.status busy/idle tracking
 
-  // The completion event build (reviewer verdict from the run output).
-  const buildEvent = (runId: string, rec: OpenCodeRunRecord): Record<string, unknown> => {
-    const output = rec.agent === reviewerAgent ? readLatestText(rec.logPath) : undefined;
-    return {
-      runId,
-      agent: rec.agent,
-      success: rec.status === "completed",
-      status: rec.status === "completed" ? "completed" : "failed",
-      results: output ? [{ agent: rec.agent, output }] : [],
-    };
-  };
-
-  const backend = createOpenCodeBackend({ runsDir, ocBin: opts.ocBin, onComplete: (runId, rec) => runner.onCompletion(buildEvent(runId, rec) as never) });
+  // The completion event is built by the BACKEND (the run record + the last
+  // text live there; the pi backend owns the same seam via buildCompletionEvent).
+  // This host only wires the backend's onComplete to the shared runner.
+  const backend = createOpenCodeBackend({ runsDir, ocBin: opts.ocBin, onComplete: (runId, rec) => runner.onCompletion(buildOpenCodeCompletionEvent(runId, rec) as never) });
 
   // The shared runner: identical trigger machinery in both hosts (see
   // src/framework/runner.ts). The opencode host supplies its gate state +
@@ -341,28 +306,11 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
     execute: async (args) => {
       const sid = delivery.target();
       const action = String(args.action ?? "").trim();
+      // ONE shared toggle implementation (config.autopilotCommand) — this host
+      // only returns its message (pi's /autopilot notifies + injects instead).
       try {
-        switch (action) {
-          case "on":
-            writeSessionAutopilotState(stateDir, sid ?? "", "on");
-            return autopilotModeMessage("on");
-          case "off":
-            writeSessionAutopilotState(stateDir, sid ?? "", "off");
-            return autopilotModeMessage("off");
-          case "status": {
-            const st = isAutopilotOn(stateDir, sid);
-            const cfg = loadAutopilotConfig(stateDir);
-            return `Autopilot ${st ? "ON" : "OFF"} (this session${sid ? " " + sid.slice(0, 8) : ""}) — capacity ${cfg.maxSlots} workers, queue-low < ${cfg.queueLowThreshold} ready.`;
-          }
-          case "capacity": {
-            const n = Number(String(args.value ?? "").trim());
-            if (!Number.isFinite(n) || n < 1) return "Usage: autopilot capacity <n> (n ≥ 1)";
-            saveAutopilotConfig(stateDir, { ...loadAutopilotConfig(stateDir), maxSlots: n });
-            return `Worker capacity set to ${n} (takes effect immediately).`;
-          }
-          default:
-            return "Usage: autopilot on | off | status | capacity <n>";
-        }
+        const r = autopilotCommand(action, String(args.value ?? "").trim() || undefined, { stateDir, sessionId: sid ?? "" });
+        return r.message;
       } catch (err) {
         return `autopilot failed: ${err instanceof Error ? err.message : String(err)}`;
       }

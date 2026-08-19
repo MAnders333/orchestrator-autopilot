@@ -218,7 +218,6 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       // The user ALWAYS gets the notification; the orchestrator's manual
       // flag_for_review becomes the refinement (specific files/commits).
       const pass = result.domainEvents.find((e) => e.name === "orch:verdict" && e.data?.verdict === "PASS");
-      if (process.env.ORCH_DBG) console.error("[dbg-flag] pass:", JSON.stringify(pass), "events:", JSON.stringify(result.domainEvents.map((e) => e.name)));
       if (pass) {
         try {
           const key = String(pass.data?.key ?? "");

@@ -24,6 +24,22 @@
 import { loadStore, saveStore, updateItem, type QueueItem } from "../queue-store.ts";
 import type { SubagentBackend } from "../backends/types.ts";
 
+/** B26 rule as a testable PREDICATE: a subagent tool call is a worker spawn
+ *  WITHOUT worktree isolation — the class that breaks parallel workers (B20's
+ *  strays blocked B22/B23 at launch, dirtying the main checkout). The pi host
+ *  wires its tool_call interception to this; any host with a tool-call hook
+ *  can adopt the same rule. Management actions (status/steer/stop) are not
+ *  spawns — never blocked. */
+export function isUnisolatedWorkerSpawn(
+  args: { agent?: string; worktree?: boolean; action?: string },
+  workerAgents: string[],
+): boolean {
+  if (args.action !== undefined) return false; // management — not spawns
+  if (!args.agent || !workerAgents.includes(args.agent)) return false;
+  if (args.worktree === true) return false; // explicitly isolated
+  return true;
+}
+
 /** A low/medium-risk item with a complete scope + cwd is auto-dispatchable. */
 export function isAutoDispatchable(item: QueueItem): boolean {
   return (

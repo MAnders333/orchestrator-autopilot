@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodS
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
-import { createOpenCodeFramework, readLatestText } from "../../src/hosts/opencode-plugin.ts";
+import { createOpenCodeFramework } from "../../src/hosts/opencode-plugin.ts";
 import { newStore, addItem, updateItem, saveStore as _save } from "../../src/queue-store.ts";
 import { loadStore } from "../../src/queue-store.ts";
 import { writeSessionAutopilotState } from "../../src/config.ts";
@@ -141,21 +141,6 @@ describe("opencode host framework (hermetic, fake oc)", () => {
     expect(await waitFor(() => store(f).items["R1"].status === "done", 6000)).toBe(true);
     expect(f.events.some((e) => e.name === "orch:reviewer-dispatched")).toBe(true);
     fw.dispose();
-    rmSync(f.root, { recursive: true, force: true });
-  });
-
-  test("readLatestText extracts the last text event", () => {
-    const f = setup();
-    const log = join(f.runsDir, "x", "output.jsonl");
-    mkdirSync(join(f.runsDir, "x"), { recursive: true });
-    writeFileSync(log, [
-      '{"type":"text","part":{"id":"a","text":"first"}}',
-      '{"type":"reasoning","part":{"id":"b"}}',
-      '{"type":"text","part":{"id":"c","text":"Verdict: PASS\\nClean."}}',
-      "not json",
-    ].join("\n"));
-    expect(readLatestText(log)).toContain("Verdict: PASS");
-    expect(existsSync(log)).toBe(true);
     rmSync(f.root, { recursive: true, force: true });
   });
 });

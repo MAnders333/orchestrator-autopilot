@@ -65,9 +65,23 @@ src/
 - **opencode**: `opencode.jsonc` `plugin` → `src/hosts/opencode-plugin.ts`
   (registers the six queue tools; completion = backend process-exit →
   `handleAsyncComplete` → queue flips + verdict routing).
-- **Agents** install into the host's agent dirs at activation
-  (`~/.pi/shared/agents`, `~/.config/opencode/agents`) — idempotent,
+- **Agents** install into the host's own agent dirs at activation — the pi
+  reviewer resolves from the runtime (`PI_CODING_AGENT_DIR` / `~/.pi/agent/
+  agents`), opencode's from its own agents dir. The framework never invents a
+  shared path; each host owns where its agents live. Idempotent,
   version-stamped, never hand-edited (framework-managed between markers).
+
+The **abstraction seam**: the hosts are WIRING ONLY — event sources, gate
+semantics, and delivery. All logic is host-agnostic in `src/`:
+`framework/runner.ts` (trigger routing + the shared deferral + the harness
+queue), `framework/core.ts` (the engine: flips, verdicts, ticks), `framework/
+auto-dispatch.ts` (A/B/C automations + the B26 worktree rule),
+`framework/flag-review.ts` (the handover + the deterministic PASS auto-flag),
+`tools/queue-ops.ts` (the six queue tools), `config.ts` (state-dir resolution,
+the per-session toggle, ONE `autopilotCommand` implementation). The backends
+own run identity + completion-event building (`buildCompletionEvent` / the
+opencode equivalent); neither host re-implements the review lifecycle, the
+toggle, or the event shape.
 
 ## Docs
 

@@ -172,6 +172,44 @@ export interface AutopilotConfigFile {
   intakeSuppressionHours?: number;
 }
 
+/** The autopilot TOGGLE — ONE implementation, both hosts (pi /autopilot + the
+ *  opencode autopilot tool used to carry the same switch twice). on/off write
+ *  the per-session state + return the framework's mode message; status reports
+ *  the mode + capacity; capacity validates + saves. The hosts keep ONLY
+ *  delivery + host side effects (pi: notify + the /orchestrate injection on
+ *  "on"; opencode: the tool return). */
+export function autopilotCommand(
+  action: string,
+  value: string | undefined,
+  opts: { stateDir: string; sessionId?: string },
+): { ok: boolean; message: string; mode?: "on" | "off" } {
+  const { stateDir, sessionId } = opts;
+  switch (action) {
+    case "on":
+      if (sessionId) writeSessionAutopilotState(stateDir, sessionId, "on");
+      return { ok: true, message: autopilotModeMessage("on"), mode: "on" };
+    case "off":
+      if (sessionId) writeSessionAutopilotState(stateDir, sessionId, "off");
+      return { ok: true, message: autopilotModeMessage("off"), mode: "off" };
+    case "status": {
+      const on = isAutopilotOn(stateDir, sessionId);
+      const cfg = loadAutopilotConfig(stateDir);
+      return {
+        ok: true,
+        message: `Autopilot ${on ? "ON" : "OFF"} (this session${sessionId ? ` ${sessionId.slice(0, 8)}` : ""}) — capacity ${cfg.maxSlots} workers, queue-low < ${cfg.queueLowThreshold} ready.`,
+      };
+    }
+    case "capacity": {
+      const n = Number((value ?? "").trim());
+      if (!Number.isFinite(n) || n < 1) return { ok: false, message: "Usage: autopilot capacity <n> (n ≥ 1)" };
+      saveAutopilotConfig(stateDir, { ...loadAutopilotConfig(stateDir), maxSlots: n });
+      return { ok: true, message: `Worker capacity set to ${n} (takes effect immediately)` };
+    }
+    default:
+      return { ok: false, message: "Usage: autopilot on | off | status | capacity <n>" };
+  }
+}
+
 /** The ONE mode explanation for the orchestrator — the toggle means the
  *  SAME thing on every host. Hosts only DELIVER it (pi: sendUserMessage
  *  followUp; opencode: the autopilot tool return); they never re-word it.

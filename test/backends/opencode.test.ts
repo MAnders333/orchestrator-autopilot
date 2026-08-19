@@ -6,7 +6,7 @@ import { describe, test, expect } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createOpenCodeBackend } from "../../src/backends/opencode.ts";
+import { createOpenCodeBackend, readLatestText, buildOpenCodeCompletionEvent } from "../../src/backends/opencode.ts";
 
 const ENABLED = process.env.OPENCODE_E2E === "1";
 
@@ -79,6 +79,29 @@ describe("opencode backend (hermetic, fake oc)", () => {
     // cleanup: the child exits quickly on its own; wait + kill if needed
     await waitFor(() => readStatus(f, runId)?.status !== "running");
     rmSync(f.runsDir, { recursive: true, force: true });
+  });
+
+  test("readLatestText extracts the last text event (the verdict contract)", () => {
+    const f = setup();
+    const log = join(f.runsDir, "out.jsonl");
+    writeFileSync(log, [
+      '{"type":"text","part":{"id":"a","text":"first"}}',
+      '{"type":"reasoning","part":{"id":"b"}}',
+      '{"type":"text","part":{"id":"c","text":"Verdict: PASS\\nClean."}}',
+      "not json",
+    ].join("\n"));
+    expect(readLatestText(log)).toContain("Verdict: PASS");
+  });
+
+  test("buildOpenCodeCompletionEvent: run record → CompletionEvent (the seam the host wires)", () => {
+    const f = setup();
+    const ev = buildOpenCodeCompletionEvent("run-1", {
+      runId: "run-1", agent: "orchestrator-reviewer", status: "completed",
+      startedAt: 1, finishedAt: 2, exitCode: 0, pid: 1, logPath: join(f.runsDir, "out2.jsonl"),
+    } as never);
+    expect(ev.agent).toBe("orchestrator-reviewer");
+    expect(ev.success).toBe(true);
+    expect(ev.status).toBe("completed");
   });
 
   test("exit flips status to completed; onComplete fires with the record", async () => {
