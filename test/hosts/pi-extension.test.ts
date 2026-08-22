@@ -5,7 +5,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolveStateDir } from "../../src/config.ts";
+import { resolveStateDir, isAutopilotOn } from "../../src/config.ts";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -212,6 +212,51 @@ describe("pi adapter smoke", () => {
     expect(offMsg).toBeTruthy();
     expect(String(offMsg.args[0])).toContain("do everything manually");
     expect(String(offMsg.args[0])).toContain("queue_review");
+  });
+
+  test("scheduled off ('off in <dur>') keeps ON + confirms; explicit on cancels; bad duration errors", async () => {
+    startSession("tui");
+    const notes: Array<[string, string]> = [];
+    ctx = { ui: { notify: (m: string, k: string) => notes.push([m, k]) }, cwd: dir };
+    await runAutopilotCmd("on");
+    notes.length = 0;
+    await runAutopilotCmd("off in 1h30m");
+    // still ON — scheduling is NOT an immediate off
+    expect(isAutopilotOn(dir, lastSid)).toBe(true);
+    const stored = JSON.parse(readFileSync(join(dir, "autopilot.sessions.json"), "utf8"));
+    const at = stored[lastSid].scheduledOffAt as number;
+    expect(at).toBeGreaterThan(Date.now());
+    // confirmation notify carries the absolute time (the framework message)
+    const confirm = notes.find(([m]) => m.includes(new Date(at).toISOString()));
+    expect(confirm).toBeTruthy();
+    expect(confirm![1]).toBe("info");
+    // explicit on CANCELS the schedule (persisted deadline dropped)
+    notes.length = 0;
+    await runAutopilotCmd("on");
+    const cleared = JSON.parse(readFileSync(join(dir, "autopilot.sessions.json"), "utf8"));
+    expect(cleared[lastSid].scheduledOffAt).toBeUndefined();
+    // invalid duration → error notify, state untouched
+    notes.length = 0;
+    await runAutopilotCmd("off in banana");
+    expect(notes.some(([, k]) => k === "error")).toBe(true);
+    ctx = { ui: { notify: () => {} }, cwd: dir };
+  });
+
+  test("scheduled-off BACKSTOP: a persisted past deadline flips OFF at the enable gate (process-restart case)", async () => {
+    startSession("tui");
+    await runAutopilotCmd("on");
+    pi._sent.length = 0;
+    // simulate the deadline surviving a restart: seed a PAST deadline into the
+    // per-session store (the armed timer died with the old process)
+    const storePath = join(dir, "autopilot.sessions.json");
+    const store = JSON.parse(readFileSync(storePath, "utf8"));
+    store[lastSid] = { status: "on", updatedAt: new Date().toISOString(), scheduledOffAt: Date.now() - 1_000 };
+    writeFileSync(storePath, JSON.stringify(store));
+    emit("agent_settled", {}); // any trigger runs enabled() → due-check fires
+    await new Promise((r) => setTimeout(r, 30));
+    // flipped OFF + both immediate-off side effects replayed
+    expect(isAutopilotOn(dir, lastSid)).toBe(false);
+    expect(pi._sent.some((s) => s.kind === "user" && String(s.args?.[0] ?? "").includes("Autopilot is now OFF"))).toBe(true);
   });
 
   test("REGRESSION: a FLAT reviewer completion (raw payload, no results) still routes the verdict — the wedge", async () => {

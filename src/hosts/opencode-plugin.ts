@@ -1,7 +1,8 @@
 import { tool, type Plugin } from "@opencode-ai/plugin";
 import { join } from "node:path";
 import { createOpenCodeBackend, defaultRunsDir, buildOpenCodeCompletionEvent } from "../backends/opencode.ts";
-import { isAutopilotOn, resolveStateDir, autopilotCommand, loadAutopilotConfig, type AutopilotConfig } from "../config.ts";
+import { isAutopilotOn, resolveStateDir, autopilotCommand, autopilotModeMessage, loadAutopilotConfig, type AutopilotConfig } from "../config.ts";
+import { createScheduleManager, scheduledOffDue } from "../framework/scheduled-off.ts";
 import { CONTRACTS } from "../tools/contracts.ts";
 import { Autopilot } from "../core.ts";
 import { loadStoreOrNew, ensureMigrated } from "../queue-store.ts";
@@ -65,6 +66,9 @@ export interface OpenCodeFramework {
   backend: ReturnType<typeof createOpenCodeBackend>;
   autopilot: Autopilot;
   tools: Record<string, OpenCodeToolDef>;
+  /** The scheduled-shutdown timer owner (framework module) — the autopilot
+   *  tool arms/cancels it from the shared command result. */
+  schedules: ReturnType<typeof createScheduleManager>;
   /** The orchestrator's session settled (session.idle) → settled sweep. */
   onSettled(): void;
   /** Feed a session event (busy tracking + settled + tick target). */
@@ -93,6 +97,24 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
   // src/framework/runner.ts). The opencode host supplies its gate state +
   // the promptAsync delivery; the pi host supplies the same shape with
   // sendMessage.
+  // Scheduled shutdown ("off in <dur>") — parsing, persistence and the due
+  // check are the framework's (config.autopilotCommand + scheduledOffDue);
+  // this manager only owns the in-process timer whose firing replays today's
+  // immediate-"off" delivery. The plugin process persists, so its armed timer
+  // fires exactly; the enabled() backstop covers a restart.
+  /** The ONE fire path (timer AND enable-gate backstop): the framework's
+   *  due-check flips OFF + clears the persisted deadline first, so the
+   *  delivery below happens EXACTLY ONCE per schedule. */
+  const fireScheduledOffIfDue = (sid: string): void => {
+    try {
+      if (!sid || !scheduledOffDue(stateDir, sid)) return;
+      opts.delivery?.deliver(autopilotModeMessage("off"));
+    } catch {
+      // silent — a delivery failure must not break the framework's OFF flip
+    }
+  };
+  const schedules = createScheduleManager({ onFire: fireScheduledOffIfDue });
+
   const runner = createFrameworkRunner({
     stateDir,
     autopilot,
@@ -108,7 +130,14 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
     // The toggle means the same as on pi: OFF = the harness is idle (the
     // runner gates completions/sweeps/ticks on this). The session id is the
     // tick-delivery target (the session this plugin serves).
-    enabled: () => isAutopilotOn(stateDir, opts.delivery?.target() ?? ""),
+    enabled: () => {
+      const sid = opts.delivery?.target() ?? "";
+      // Scheduled-off BACKSTOP: a persisted deadline in the past flips OFF
+      // before any sweep runs — covers a process restart losing the armed
+      // timer.
+      fireScheduledOffIfDue(sid);
+      return isAutopilotOn(stateDir, sid);
+    },
     sweepIntervalMs: opts.sweepIntervalMs ?? cfg.sweepIntervalMs,
   });
 
@@ -217,6 +246,7 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
     backend,
     autopilot,
     tools,
+    schedules,
     onSettled: () => runner.onSettled(),
     handleSessionEvent(event: unknown) {
       const e = event as { type?: string; properties?: { sessionID?: string; status?: { type?: string } } };
@@ -230,6 +260,7 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
     },
     dispose() {
       runner.stop();
+      schedules.dispose(); // no leaked timers
     },
   };
 }
@@ -299,10 +330,10 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
 
   tools.autopilot = tool({
     description:
-      "Toggle or query the orchestrator autopilot for THIS session. on: enable ticks + the intake/dispatch/review nudges; off: disable them (the queue tools stay available); status: show the current state + capacity; capacity <n>: set the worker slot limit. The toggle is per-session (like the pi /autopilot command).",
+      "Toggle or query the orchestrator autopilot for THIS session. on: enable ticks + the intake/dispatch/review nudges; off: disable them now, or schedule with 'off in <duration>' (e.g. 'in 90s', 'in 30m', 'in 1h30m', max 24h — autopilot stays ON until then); status: show the current state + capacity; capacity <n>: set the worker slot limit. The toggle is per-session (like the pi /autopilot command).",
     args: {
       action: tool.schema.string().describe("on | off | status | capacity"),
-      value: tool.schema.string().optional().describe("capacity value (when action=capacity)"),
+      value: tool.schema.string().optional().describe("capacity value (when action=capacity); for action=off: an optional duration like 'in 30m' to schedule the shutdown"),
     },
     execute: async (args) => {
       const sid = delivery.target();
@@ -311,6 +342,12 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
       // only returns its message (pi's /autopilot notifies + injects instead).
       try {
         const r = autopilotCommand(action, String(args.value ?? "").trim() || undefined, { stateDir, sessionId: sid ?? "" });
+        if (!r.ok) return r.message;
+        if (r.scheduledOffAt !== undefined && sid) {
+          schedules.schedule(sid, r.scheduledOffAt); // arm/replace the in-process timer
+        } else if ((r.mode === "on" || r.mode === "off") && sid) {
+          schedules.cancel(sid); // explicit toggle cancels a pending schedule
+        }
         return r.message;
       } catch (err) {
         return `autopilot failed: ${err instanceof Error ? err.message : String(err)}`;

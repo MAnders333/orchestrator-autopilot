@@ -11,7 +11,7 @@ import { execFileSync } from "node:child_process";
 import { createOpenCodeFramework } from "../../src/hosts/opencode-plugin.ts";
 import { newStore, addItem, updateItem, saveStore as _save } from "../../src/queue-store.ts";
 import { loadStore } from "../../src/queue-store.ts";
-import { writeSessionAutopilotState } from "../../src/config.ts";
+import { writeSessionAutopilotState, autopilotCommand, isAutopilotOn } from "../../src/config.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -142,5 +142,38 @@ describe("opencode host framework (hermetic, fake oc)", () => {
     expect(f.events.some((e) => e.name === "orch:reviewer-dispatched")).toBe(true);
     fw.dispose();
     rmSync(f.root, { recursive: true, force: true });
+  });
+
+  test("scheduled off: arming fires the OFF delivery at the deadline; backstop covers a past deadline", async () => {
+    const f = setup();
+    const fw = createOpenCodeFramework({ stateDir: f.stateDir, runsDir: f.runsDir, ocBin: f.ocBin, sweepIntervalMs: 0, delivery: delivery(f) });
+    // schedule through the SHARED command (keeps ON + persists the deadline);
+    // the injected clock puts the deadline 100ms out, then arm exactly like
+    // the autopilot tool does
+    const at = Date.now() + 100;
+    const r = autopilotCommand("off", "in 30m", { stateDir: f.stateDir, sessionId: "test-session", now: () => at - 30 * 60_000 });
+    expect(r.ok).toBe(true);
+    expect(r.scheduledOffAt).toBe(at);
+    expect(isAutopilotOn(f.stateDir, "test-session")).toBe(true); // still ON until the deadline
+    fw.schedules.schedule("test-session", r.scheduledOffAt!);
+    expect(await waitFor(() => f.ticks.some((m) => m.includes("Autopilot is now OFF")), 2000)).toBe(true);
+    expect(isAutopilotOn(f.stateDir, "test-session")).toBe(false); // fire path flips the state too
+    expect(f.ticks.filter((m) => m.includes("Autopilot is now OFF")).length).toBe(1); // exactly once
+    fw.dispose();
+    rmSync(f.root, { recursive: true, force: true });
+
+    // BACKSTOP (process-restart case): seed a PAST deadline with no armed
+    // timer — the next enable-gate evaluation must flip OFF + deliver once.
+    const f2 = setup();
+    const fw2 = createOpenCodeFramework({ stateDir: f2.stateDir, runsDir: f2.runsDir, ocBin: f2.ocBin, sweepIntervalMs: 0, delivery: delivery(f2) });
+    const p = join(f2.stateDir, "autopilot.sessions.json");
+    const s = JSON.parse(readFileSync(p, "utf8"));
+    s["test-session"] = { status: "on", updatedAt: new Date().toISOString(), scheduledOffAt: Date.now() - 1_000 };
+    writeFileSync(p, JSON.stringify(s));
+    fw2.onSettled(); // any trigger runs enabled() → due-check fires
+    expect(await waitFor(() => !isAutopilotOn(f2.stateDir, "test-session"), 2000)).toBe(true);
+    expect(f2.ticks.some((m) => m.includes("Autopilot is now OFF"))).toBe(true);
+    fw2.dispose();
+    rmSync(f2.root, { recursive: true, force: true });
   });
 });

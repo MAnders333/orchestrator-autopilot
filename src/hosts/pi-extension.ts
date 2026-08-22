@@ -51,6 +51,7 @@ const { CONTRACTS } = require(`${LIB_DIR}/tools/contracts.ts`) as typeof import(
 const { createFrameworkRunner } = require(`${LIB_DIR}/framework/runner.ts`) as typeof import("./framework/runner.ts");
 const { isUnisolatedWorkerSpawn } = require(`${LIB_DIR}/framework/auto-dispatch.ts`) as typeof import("./framework/auto-dispatch.ts");
 const { flagForReview } = require(`${LIB_DIR}/framework/flag-review.ts`) as typeof import("./framework/flag-review.ts");
+const { createScheduleManager, scheduledOffDue } = require(`${LIB_DIR}/framework/scheduled-off.ts`) as typeof import("./framework/scheduled-off.ts");
 const { installPiReviewer } = require(`${LIB_DIR}/agents/install.ts`) as typeof import("./agents/install.ts");
 
 
@@ -85,6 +86,7 @@ export default function (pi: ExtensionAPI) {
   let interactive = false;        // true only in the interactive TUI session
   let sessionId = "";             // current pi session id (per-session autopilot scope)
   let orchestratorLoaded = false; // /orchestrate injected into this session
+  let hostCtx: { ui?: { notify(message: string, kind?: string): void } } | null = null; // last-seen command/session ctx — the scheduled-off fire needs ui.notify outside a handler
 
 
   function ensureAutopilot() {
@@ -192,9 +194,36 @@ export default function (pi: ExtensionAPI) {
       }
     },
     emit: (e) => emitDomain(e as never),
-    enabled: () => isAutopilotOn(stateDir, sessionId),
+    enabled: () => {
+      // Scheduled-off BACKSTOP: a persisted deadline in the past flips the
+      // session OFF here before any sweep runs. Covers the process-restart
+      // case (the armed timer died with the old process) and any missed fire.
+      fireScheduledOffIfDue(sessionId);
+      return isAutopilotOn(stateDir, sessionId);
+    },
     sweepIntervalMs: loadAutopilotConfig(stateDir).sweepIntervalMs,
   });
+
+  // Scheduled shutdown ("off in <dur>") — parsing, persistence and the due
+  // check are the framework's (config.autopilotCommand + scheduledOffDue);
+  // this manager only owns the in-process timer whose firing replays today's
+  // immediate-"off" side effects. Nothing else is host-specific.
+  const schedules = createScheduleManager({
+    onFire: (sid) => fireScheduledOffIfDue(sid),
+  });
+  /** The ONE fire path (timer AND enable-gate backstop): the framework's
+   *  due-check flips OFF + clears the persisted deadline first, so the side
+   *  effects below replay EXACTLY ONCE per schedule (a second caller — e.g.
+   *  the backstop racing an earlier fire — sees no deadline and returns). */
+  function fireScheduledOffIfDue(sid: string) {
+    if (!sid || !scheduledOffDue(stateDir, sid)) return;
+    informOrchestrator("off"); // best-effort internally (defers while busy)
+    try {
+      hostCtx?.ui?.notify(`Autopilot OFF (session ${sid.slice(0, 8)}) — scheduled shutdown fired; ticks disabled`, "info");
+    } catch {
+      // best-effort — the OFF state itself is already persisted
+    }
+  }
   /** Inform the ORCHESTRATOR (not the user) when the autopilot toggle changes —
    *  the harness's behavior flips entirely between the two modes and the agent
    *  must know which one it is running under. Best-effort: a busy-agent sync
@@ -267,6 +296,7 @@ export default function (pi: ExtensionAPI) {
     interactive = ctx?.mode === "tui";
     sessionId = (ctx?.sessionManager?.getSessionId?.() as string | undefined) ?? "";
     orchestratorLoaded = false;
+    hostCtx = ctx ?? null;
     maybeInjectOrchestrate(); // persisted per-session state → auto-load orchestrator mode
   });
 
@@ -276,6 +306,7 @@ export default function (pi: ExtensionAPI) {
   runner.start();
   pi.on("session_shutdown", () => {
     runner.stop();
+    schedules.dispose(); // no leaked timers across sessions
   });
 
   // -- subagent lifecycle (in-process bus, emitted by pi-subagents) ----------
@@ -450,9 +481,11 @@ export default function (pi: ExtensionAPI) {
   // -- /autopilot command ----------------------------------------------------
 
   pi.registerCommand("autopilot", {
-    description: "Orchestrator autopilot: on | off | status | capacity <n>",
+    description: "Orchestrator autopilot: on | off [in <duration>] | status | capacity <n>",
     handler: async (args, ctx) => {
-      const [cmd, val] = (args ?? "").trim().split(/\s+/);
+      const [cmd, ...rest] = (args ?? "").trim().split(/\s+/);
+      const val = rest.length ? rest.join(" ") : undefined; // full remainder — "off in 30m" must reach the shared parser intact
+      hostCtx = ctx ?? null;
       try {
         // ONE shared toggle implementation (config.autopilotCommand) — this
         // host keeps only its SIDE EFFECTS: the /orchestrate injection, the
@@ -462,13 +495,20 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify(r.message, "error");
           return;
         }
-        if (r.mode === "on") {
+        if (r.scheduledOffAt !== undefined && sessionId) {
+          // SCHEDULED off: still ON until the deadline — arm the timer (the
+          // manager replaces any previous one) + confirm with the absolute time.
+          schedules.schedule(sessionId, r.scheduledOffAt);
+          ctx.ui.notify(r.message, "info");
+        } else if (r.mode === "on") {
+          schedules.cancel(sessionId); // explicit toggle cancels a pending schedule
           ensureMigrated(stateDir); // import legacy state.md into queue.json once
           maybeInjectOrchestrate();
           runner.onActivate(); // nudge a pre-existing capacity gap immediately
           informOrchestrator("on");
           ctx.ui.notify(`Autopilot ON (session ${sessionId.slice(0, 8)}) — orchestrator mode loaded, capacity ticks enabled`, "info");
         } else if (r.mode === "off") {
+          schedules.cancel(sessionId); // explicit toggle cancels a pending schedule
           informOrchestrator("off");
           ctx.ui.notify(`Autopilot OFF (session ${sessionId.slice(0, 8)}) — ticks and queue tools remain available, ticks disabled`, "info");
         } else if (cmd === "status") {

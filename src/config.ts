@@ -6,6 +6,10 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+// Scheduled-off parsing lives in the framework module (ONE place with the
+// due-check + timer manager); this import is the only coupling back — the
+// cycle-free direction (scheduled-off → config) carries the state helpers.
+import { parseDurationMs } from "./framework/scheduled-off.ts";
 
 export interface AutopilotConfig {
   stateDir: string;
@@ -96,7 +100,7 @@ export function sessionAutopilotPath(stateDir: string): string {
 }
 
 interface SessionAutopilotStore {
-  [sessionId: string]: { status: "on" | "off"; updatedAt: string };
+  [sessionId: string]: { status: "on" | "off"; updatedAt: string; scheduledOffAt?: number };
 }
 
 function readSessionStore(stateDir: string): SessionAutopilotStore {
@@ -118,6 +122,10 @@ function writeSessionStore(stateDir: string, store: SessionAutopilotStore): void
   }
   writeAtomic(sessionAutopilotPath(stateDir), JSON.stringify(store, null, 2) + "\n");
 }
+
+// Scheduled-off persistence rides THIS entry (no second state file): an
+// explicit status write drops `scheduledOffAt` — explicit on/off cancels any
+// pending schedule by construction, so callers cannot forget it.
 
 /**
  * Per-session autopilot state: "on" | "off". Unknown sessions default OFF.
@@ -145,7 +153,28 @@ export function readSessionAutopilotState(stateDir: string, sessionId: string): 
 export function writeSessionAutopilotState(stateDir: string, sessionId: string, status: "on" | "off"): void {
   if (!sessionId) return;
   const store = readSessionStore(stateDir);
+  // No scheduledOffAt here: an explicit toggle CANCELS a pending schedule.
   store[sessionId] = { status, updatedAt: new Date().toISOString() };
+  writeSessionStore(stateDir, store);
+}
+
+/** The persisted scheduled-off deadline for a session (epoch ms), or null.
+ *  Never throws — fail-safe to "nothing scheduled". */
+export function readScheduledOffAt(stateDir: string, sessionId: string): number | null {
+  try {
+    if (!sessionId) return null;
+    const mine = readSessionStore(stateDir)[sessionId];
+    return typeof mine?.scheduledOffAt === "number" && Number.isFinite(mine.scheduledOffAt) ? mine.scheduledOffAt : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist a scheduled-off deadline (epoch ms) and keep the session ON —
+ *  scheduling must not flip the mode; only the deadline firing does. */
+function scheduleScheduledOff(stateDir: string, sessionId: string, deadlineMs: number): void {
+  const store = readSessionStore(stateDir);
+  store[sessionId] = { status: "on", updatedAt: new Date().toISOString(), scheduledOffAt: Math.round(deadlineMs) };
   writeSessionStore(stateDir, store);
 }
 
@@ -178,25 +207,57 @@ export interface AutopilotConfigFile {
  *  the mode + capacity; capacity validates + saves. The hosts keep ONLY
  *  delivery + host side effects (pi: notify + the /orchestrate injection on
  *  "on"; opencode: the tool return). */
+/** The ONE toggle result. `mode` is set for explicit on/off; `scheduledOffAt`
+ *  is the DISTINCT scheduling signal (epoch ms) — scheduling must never be
+ *  reported as mode "off" (autopilot stays ON until the deadline). Hosts arm
+ *  their ScheduleManager from it and deliver the message verbatim. */
+export interface AutopilotCommandResult {
+  ok: boolean;
+  message: string;
+  mode?: "on" | "off";
+  scheduledOffAt?: number;
+}
+
 export function autopilotCommand(
   action: string,
   value: string | undefined,
-  opts: { stateDir: string; sessionId?: string },
-): { ok: boolean; message: string; mode?: "on" | "off" } {
+  opts: { stateDir: string; sessionId?: string; now?: () => number },
+): AutopilotCommandResult {
   const { stateDir, sessionId } = opts;
   switch (action) {
     case "on":
-      if (sessionId) writeSessionAutopilotState(stateDir, sessionId, "on");
+      if (sessionId) writeSessionAutopilotState(stateDir, sessionId, "on"); // also clears any schedule
       return { ok: true, message: autopilotModeMessage("on"), mode: "on" };
-    case "off":
-      if (sessionId) writeSessionAutopilotState(stateDir, sessionId, "off");
+    case "off": {
+      // "off in <dur>" = SCHEDULED off: keep ON until the deadline, return the
+      // distinct scheduledOffAt signal (never mode:"off"). The leading "in"
+      // is optional so both "off in 30m" and a bare duration value parse.
+      const spec = value?.trim();
+      if (spec) {
+        const parsed = parseDurationMs(spec.replace(/^in\s+/i, ""));
+        if (!parsed) {
+          return { ok: false, message: "Usage: autopilot off in <duration> — e.g. 90s | 30m | 2h | 1h30m (max 24h). Bare 'off' takes effect immediately." };
+        }
+        const nowMs = (opts.now ?? Date.now)();
+        const at = nowMs + parsed;
+        if (sessionId) scheduleScheduledOff(stateDir, sessionId, at);
+        return {
+          ok: true,
+          message: `Autopilot stays ON until ${new Date(at).toISOString()} (${parsed / 1000}s) — then OFF automatically. Any explicit on/off cancels the schedule.`,
+          scheduledOffAt: at,
+        };
+      }
+      if (sessionId) writeSessionAutopilotState(stateDir, sessionId, "off"); // also clears any schedule
       return { ok: true, message: autopilotModeMessage("off"), mode: "off" };
+    }
     case "status": {
       const on = isAutopilotOn(stateDir, sessionId);
       const cfg = loadAutopilotConfig(stateDir);
+      const pending = sessionId ? readScheduledOffAt(stateDir, sessionId) : null;
+      const suffix = pending !== null ? ` Scheduled OFF at ${new Date(pending).toISOString()}.` : "";
       return {
         ok: true,
-        message: `Autopilot ${on ? "ON" : "OFF"} (this session${sessionId ? ` ${sessionId.slice(0, 8)}` : ""}) — capacity ${cfg.maxSlots} workers, queue-low < ${cfg.queueLowThreshold} ready.`,
+        message: `Autopilot ${on ? "ON" : "OFF"} (this session${sessionId ? ` ${sessionId.slice(0, 8)}` : ""}) — capacity ${cfg.maxSlots} workers, queue-low < ${cfg.queueLowThreshold} ready.${suffix}`,
       };
     }
     case "capacity": {
@@ -206,7 +267,7 @@ export function autopilotCommand(
       return { ok: true, message: `Worker capacity set to ${n} (takes effect immediately)` };
     }
     default:
-      return { ok: false, message: "Usage: autopilot on | off | status | capacity <n>" };
+      return { ok: false, message: "Usage: autopilot on | off [in <duration>] | status | capacity <n>" };
   }
 }
 

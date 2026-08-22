@@ -62,6 +62,11 @@ src/
 - **pi**: `settings.json` `extensions` → `src/hosts/pi-extension.ts`
   (activates: installs the reviewer, registers the queue tools + `/autopilot`,
   subscribes to `subagent:async-complete`, ticks the orchestrator session).
+  `/autopilot off in <duration>` (e.g. `off in 1h30m`, max 24h) schedules a
+  shutdown: autopilot stays ON until the deadline, then flips OFF by itself;
+  explicit on/off cancels, status shows the pending deadline, and a restart
+  cannot lose it (the enable-gate backstop fires it late). Same semantics via
+  the opencode autopilot tool (`action=off`, value `in <duration>`).
 - **opencode**: `opencode.jsonc` `plugin` → `src/hosts/opencode-plugin.ts`
   (registers the six queue tools; completion = backend process-exit →
   `handleAsyncComplete` → queue flips + verdict routing).
@@ -74,7 +79,9 @@ src/
 The **abstraction seam**: the hosts are WIRING ONLY — event sources, gate
 semantics, and delivery. All logic is host-agnostic in `src/`:
 `framework/runner.ts` (trigger routing + the shared deferral + the harness
-queue), `framework/core.ts` (the engine: flips, verdicts, ticks), `framework/
+queue), `framework/scheduled-off.ts` (the scheduled shutdown: duration parser,
+due-check backstop, injected-clock/timer ScheduleManager), `framework/core.ts`
+(the engine: flips, verdicts, ticks), `framework/
 auto-dispatch.ts` (A/B/C automations + the B26 worktree rule),
 `framework/flag-review.ts` (the handover + the deterministic PASS auto-flag),
 `tools/queue-ops.ts` (the six queue tools), `config.ts` (state-dir resolution,
