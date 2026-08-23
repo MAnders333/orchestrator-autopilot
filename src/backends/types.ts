@@ -29,7 +29,7 @@ export interface SubagentBackend {
   fleetStatus(): Promise<{ totalActive: number } | null>;
   /** Steer a running run. Backends that cannot deliver (headless) throw a
    *  clear error — never claim delivery. */
-  steer(runId: string, message: string, mode?: "steer" | "follow_up", ackTimeoutMs?: number): Promise<string>;
+  steer(runId: string, message: string, mode?: "steer" | "follow_up", ackTimeoutMs?: number): Promise<{ id: string; ack: "delivered" | "queued" }>;
   /** Resolve the run's state dir (or null if the run is gone). */
   asyncDirFor(runId: string): string | null;
 }

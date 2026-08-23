@@ -196,7 +196,7 @@ export function createPiBackend(pi: PiLike): SubagentBackend {
               continue; // unreadable ack — keep polling
             }
             if (ack.requestId !== id) continue; // only our request
-            if (ack.state === "delivered" || ack.state === "queued") return id;
+            if (ack.state === "delivered" || ack.state === "queued") return { id, ack: ack.state };
             if (ack.state === "failed") {
               throw new Error(`steer FAILED delivery: ${ack.message ?? "child rejected it"}`);
             }

@@ -218,8 +218,18 @@ export async function queueSteer(ctx: QueueOpsCtx, params: Record<string, unknow
       return { text: `queue_steer: '${key}' has no running run (status ${item.status}) — only active workers / reviewing reviewers are steerable`, details: {} };
     }
     const mode = params.mode === "follow_up" ? "follow_up" : "steer";
-    const id = await ctx.backend.steer(runId, params.message as string, mode, params.ackTimeoutMs as number | undefined);
-    return { text: `steered '${key}' (run ${runId.slice(0, 8)}…, request ${id}) — ${mode} acknowledged by the child`, details: { requestId: id, runId } };
+    const { id, ack } = await ctx.backend.steer(runId, params.message as string, mode, params.ackTimeoutMs as number | undefined);
+    // HONEST uptake semantics: the ack certifies TRANSPORT acceptance only.
+    // "delivered" = injected into the running turn. "queued" = waiting for
+    // the child's NEXT turn boundary — a run that ends first never consumes
+    // it (observed live: steering a reviewer that was seconds from finishing;
+    // the queued message could not retroactively change its verdict). The
+    // caller must know which one happened so it can verify uptake instead of
+    // trusting the acknowledgment.
+    const text = ack === "delivered"
+      ? `steered '${key}' (run ${runId.slice(0, 8)}…, request ${id}) — ${mode} DELIVERED into the running turn (ack: delivered)`
+      : `steered '${key}' (run ${runId.slice(0, 8)}…, request ${id}) — ${mode} QUEUED at the child's next turn boundary (ack: queued). CAVEAT: if the run completes before consuming it, the steer has no effect — verify uptake in the run's output rather than trusting this acknowledgment.`;
+    return { text, details: { requestId: id, runId, ack } };
   } catch (e) {
     return err(e, "queue_steer");
   }

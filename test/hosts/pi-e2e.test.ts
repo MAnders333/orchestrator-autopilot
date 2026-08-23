@@ -122,7 +122,7 @@ describe.skipIf(!ENABLED)("orchestrator-autopilot E2E (real pi)", () => {
   test("queue_steer reported the honest outcome for a headless child", () => {
     // headless workers can't be steered — the tool must say so instead of
     // claiming delivery. Any of these is honest:
-    expect(stdout).toMatch(/does not support steering|no steering acknowledgment|FAILED delivery|acknowledged by the child/);
+    expect(stdout).toMatch(/does not support steering|no steering acknowledgment|FAILED delivery|DELIVERED into the running turn|QUEUED at the child's next turn boundary/);
   });
 
   test("E2E-1 survives the session (list still sees it with its run id)", () => {
