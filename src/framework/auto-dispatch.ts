@@ -56,7 +56,13 @@ export function isAutoDispatchable(item: QueueItem): boolean {
 export function workerTask(item: QueueItem, findings?: string): string {
   const task = `KEY: ${item.key}\n${item.scope.trim()}`;
   if (findings && findings.trim()) {
-    return `${task}\n\n## Review findings (address them)\n${findings.trim()}`;
+    // Staleness guard: findings describe the repo AS THE REVIEWER SAW IT —
+    // between the failed attempt and this re-dispatch, the orchestrator (or a
+    // recovery pass) may have already fixed some/all of them (observed live:
+    // ATL-DOC-REVIEW-APPLY's FAIL auto-re-dispatch landed AFTER the work was
+    // recovered onto main). Blindly applying stale findings duplicates or
+    // corrupts; verify-first makes the redo safe by construction.
+    return `${task}\n\n## Review findings (address them — VERIFY FIRST)\n${findings.trim()}\n\nSTALENESS WARNING: these findings may be OUT OF DATE — the repo may have changed since the failed attempt (recovery commits, merges, manual fixes). BEFORE applying anything: check current state (git log/status, read the files). Apply ONLY what is genuinely still missing; skip anything already addressed and say so in your report.`;
   }
   return task;
 }
@@ -141,6 +147,7 @@ export function reviewTask(item: QueueItem): string {
     "## Review the completed work",
     `Verify the work product in the repo at: ${item.cwd}`,
     "Locate the work yourself: the worker ran in an isolated worktree and pushed to ITS OWN parallel branch (pi-parallel-<runid>-0) — the commits may be there, unmerged. Check `git log --all -- <path>` + `git branch -a -r` + `git show` on those branches BEFORE concluding anything is missing; a FAIL must be based on the work being absent everywhere, never just on main. Read the actual diff/files — do NOT trust the worker's summary.",
+    "Judge the CURRENT tree as it exists NOW: between worker completion and this review, the orchestrator may have recovered/merged/patched work (observed failure class: a reviewer read pre-recovery refs and FAILed on work that was already on main). Re-check refs/logs at review time; never conclude from a snapshot you formed earlier in your run.",
     "",
     "The FIRST line of your response MUST be exactly `Verdict: PASS` or `Verdict: FAIL`. If FAIL, list each finding as an actionable item.",
   ].join("\n");

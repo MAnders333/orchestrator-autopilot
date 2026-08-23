@@ -231,6 +231,19 @@ export class Autopilot {
       };
     }
 
+    // UNMATCHED COMPLETION telemetry: a worker/reviewer run ended but no
+    // store item carries its id. This is the signature of a pipeline bypass
+    // (an ad-hoc `subagent` spawn that never went through queue_dispatch, so
+    // no run linkage was ever written) — the work lands on some branch while
+    // the item stays put, and WITHOUT this line the only diagnosis is
+    // archaeology across session logs (observed live: EVAL-WATCHDOG-ACTIVITY).
+    // Non-harness agents (scouts, ad-hoc Q&A) are expected to be unmatched —
+    // don't log those.
+    if (!flipped && !isReviewerRun &&
+        (this.cfg.workerAgents.includes(ev.agent ?? "") || this.cfg.reviewerAgents.includes(ev.agent ?? ""))) {
+      this.logEvent("unmatched-completion", { runId: topRunId, agent: ev.agent, candidates });
+    }
+
     return { tick: null, domainEvents, flipped, freedSlot, reviewerCompleted: isReviewerRun };
   }
 

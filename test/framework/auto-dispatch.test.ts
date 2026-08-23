@@ -77,10 +77,12 @@ describe("isAutoDispatchable", () => {
 });
 
 describe("workerTask", () => {
-  test("KEY line + scope; findings appended on re-dispatch", () => {
+  test("KEY line + scope; findings appended on re-dispatch with staleness guard", () => {
     expect(workerTask(item("A1"))).toBe("KEY: A1\ndo the thing");
-    expect(workerTask(item("A1"), "Fix the schema.")).toContain("## Review findings (address them)");
+    expect(workerTask(item("A1"), "Fix the schema.")).toContain("## Review findings (address them — VERIFY FIRST)");
     expect(workerTask(item("A1"), "Fix the schema.")).toContain("Fix the schema.");
+    expect(workerTask(item("A1"), "Fix the schema.")).toContain("STALENESS WARNING"); // findings may be out of date — verify before applying
+    expect(workerTask(item("A1"))).not.toContain("STALENESS WARNING"); // fresh dispatch has no findings to guard
   });
 });
 
@@ -126,8 +128,9 @@ describe("autoRedispatch (B)", () => {
     expect(ok).toBe(true);
     const s = store(f);
     expect(s.items["R1"].runId).not.toBe("old-run");
-    expect(f.spawns[0].task).toContain("## Review findings (address them)");
+    expect(f.spawns[0].task).toContain("## Review findings (address them — VERIFY FIRST)");
     expect(f.spawns[0].task).toContain("The schema is wrong.");
+    expect(f.spawns[0].task).toContain("STALENESS WARNING"); // redo must verify current state before applying stale findings
   });
 
   test("non-active / no-cwd items are not re-dispatched", async () => {
@@ -175,5 +178,6 @@ describe("autoReview (C)", () => {
     expect(t).toContain("pi-parallel-<runid>-0");   // the worker's parallel branch
     expect(t).toContain("absent everywhere, never just on main"); // no false-negative FAILs
     expect(t).toContain("do NOT trust the worker's summary");
+    expect(t).toContain("Judge the CURRENT tree as it exists NOW"); // no stale-snapshot FAILs (recovery race class)
   });
 });

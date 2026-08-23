@@ -132,6 +132,17 @@ describe("core.Autopilot (store-first)", () => {
     expect(r.freedSlot).toBe(true); // a reviewer completion frees its slot — capacity counts all subagents
   });
 
+  test("unmatched WORKER completion logs telemetry (pipeline-bypass signature) — scouts don't, matched workers don't", () => {
+    writeStore(dir, [item({ key: "K1", status: "active", runId: "match1234", title: "k1" })]);
+    const a = make();
+    a.handleAsyncComplete({ runId: "ecc034e3-1234", agent: "worker", success: true }); // bypass: no item carries this id
+    a.handleAsyncComplete({ runId: "scout9999", agent: "scout", success: true }); // non-harness agent: expected unmatched
+    a.handleAsyncComplete({ runId: "match1234-aaaa", agent: "worker", success: true }); // properly linked
+    const unmatched = telemetry.filter((l) => l.includes('"unmatched-completion"'));
+    expect(unmatched.length).toBe(1); // ONLY the bypassed worker run
+    expect(unmatched[0]).toContain("ecc034e3");
+  });
+
   test("ledger-tracked completion without store match still ticks (fail-safe)", () => {
     writeStore(dir, [item({ key: "B1", status: "approved", title: "b1" })]);
     const a = make();
