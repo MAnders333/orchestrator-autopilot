@@ -368,4 +368,62 @@ describe("the shared autopilot gate (toggle off → harness idle)", () => {
     expect(spawns.length).toBe(0);                                       // NO auto-review
     expect(delivered.length).toBe(0);                                    // NO ticks
   });
+
+  test("ASYNC delivery rejection → re-deferred, retried after backoff, delivered exactly once", async () => {
+    // The pi settled-vs-teardown race: sendMessage resolves, then the runtime
+    // rejects the triggered turn. The tick must NOT be lost (the old behavior
+    // dropped it) and must not double-deliver.
+    const dir = mkdtempSync(join(tmpdir(), "orch-runner-async-"));
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(newStore()));
+    const delivered: string[] = [];
+    let calls = 0;
+    const runner = createFrameworkRunner({
+      stateDir: dir,
+      autopilot: new Autopilot({ stateDir: dir }),
+      backend,
+      host: { interactive: () => true, loaded: () => true, busy: () => false, compacting: () => false },
+      deliver: (m) => {
+        calls += 1;
+        if (calls === 1) return Promise.reject(new Error("Agent is already processing a prompt."));
+        delivered.push(m);
+        return undefined;
+      },
+      enabled: () => true,
+      sweepIntervalMs: 0,
+      deliveryRetryDelayMs: 10,
+    });
+    runner.onActivate(); // activation sweep → tick fires through the gate
+    await new Promise((r) => setTimeout(r, 5));
+    expect(delivered.length).toBe(0); // first attempt failed async — NOT counted as delivered
+    await new Promise((r) => setTimeout(r, 40)); // backoff elapses → retry
+    expect(delivered.length).toBe(1); // recovered at the retry
+    expect(delivered[0]).toContain("[orch-tick:");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(delivered.length).toBe(1); // exactly once — no duplicate flushes
+    expect(calls).toBe(2);
+  });
+
+  test("ASYNC delivery rejection is bounded — a permanently rejecting runtime drops after max attempts", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "orch-runner-cap-"));
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(newStore()));
+    let calls = 0;
+    const runner = createFrameworkRunner({
+      stateDir: dir,
+      autopilot: new Autopilot({ stateDir: dir }),
+      backend,
+      host: { interactive: () => true, loaded: () => true, busy: () => false, compacting: () => false },
+      deliver: () => {
+        calls += 1;
+        return Promise.reject(new Error("still broken"));
+      },
+      enabled: () => true,
+      sweepIntervalMs: 0,
+      deliveryRetryDelayMs: 5,
+    });
+    runner.onActivate();
+    // max 5 attempts + scheduling slack
+    await new Promise((r) => setTimeout(r, 150));
+    expect(calls).toBeLessThanOrEqual(6); // bounded — no infinite hot loop
+    runner.stop();
+  });
 });

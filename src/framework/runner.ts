@@ -26,8 +26,13 @@ export interface RunnerOptions {
   /** The tick delivery gate state (what interactive/loaded/busy/compacting
    *  mean in this host). */
   host: TickHostState;
-  /** The host's delivery mechanism (pi sendMessage / opencode promptAsync). */
-  deliver: (message: string) => void;
+  /** The host's delivery mechanism (pi sendMessage / opencode promptAsync).
+   *  May return a promise: a REJECTION means the runtime accepted the call but
+   *  the send ultimately failed (pi: the settled-vs-teardown race where the
+   *  triggered prompt() throws "already processing" AFTER sendMessage resolved).
+   *  Nothing was persisted on that failure path, so the framework re-holds the
+   *  message + retries — duplicate-safe by construction. */
+  deliver: (message: string) => void | Promise<void>;
   /** Optional user-message delivery for deferred DIRECT sends (the pi host's
    *  /orchestrate injection + toggle messages; opencode has none). */
   deliverUserMessage?: (message: string, options?: Record<string, unknown>) => void;
@@ -39,6 +44,9 @@ export interface RunnerOptions {
   cooldownMs?: number; // min gap between delivered ticks (default 1500)
   /** Periodic sweep interval; 0 disables the timer. */
   sweepIntervalMs: number;
+  /** Backoff before re-delivering a tick whose send rejected asynchronously
+   *  (default 1000ms; tests inject a tiny value). */
+  deliveryRetryDelayMs?: number;
   /** Auto-dispatch + auto re-dispatch (default true; AUTOPILOT_AUTO_DISPATCH=0
    *  disables — a real, working opt-out). The framework fills free slots + re-dispatches FAIL items
    *  itself — the orchestrator keeps the judgment (intake, approval,
@@ -63,7 +71,54 @@ export interface FrameworkRunner {
 
 export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
   const autopilot = opts.autopilot;
-  const router = createTickRouter(opts.host, opts.deliver, opts.cooldownMs);
+  // ASYNC delivery failures are indistinguishable from success at the call
+  // site (the sync verdict says "handed off"), so the wrapper watches the
+  // returned thenable: a rejection re-defers the message for a bounded retry.
+  // The immediate re-flush is deliberately SKIPPED here — the same race would
+  // reject again mid-settle; a short backoff (plus the natural settle/timer
+  // flushes) gives the runtime's teardown time to finish.
+  const RETRY_DELAY_MS = opts.deliveryRetryDelayMs ?? 1000;
+  const RETRY_MAX_ATTEMPTS = 5;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  // Attempt counts live HERE, not on the deferred entries: the flush paths
+  // remove an entry the moment the host ACCEPTS the send (sync verdict), so a
+  // count stored on the entry would reset every cycle and never hit the cap.
+  const retryAttempts = new Map<string, number>();
+  const deliverWatchingAsync = (message: string): void => {
+    try {
+      const r = opts.deliver(message) as unknown;
+      if (r && typeof (r as Promise<unknown>).then === "function") {
+        void (r as Promise<void>).then(
+          () => retryAttempts.delete(message), // delivered (or safely queued) — reset
+          () => {
+            // ASYNC rejection — the runtime accepted the call but the turn
+            // trigger failed afterwards (pi: prompt() threw "already
+            // processing" post-resolve). Nothing was persisted on that path,
+            // so re-hold + retry after a short backoff; bounded attempts.
+            const n = (retryAttempts.get(message) ?? 0) + 1;
+            if (n > RETRY_MAX_ATTEMPTS) {
+              retryAttempts.delete(message);
+              return; // permanently rejecting runtime — nudges re-fire anyway
+            }
+            retryAttempts.set(message, n);
+            if (!deferred.some((d) => d.kind === "tick" && d.message === message)) {
+              deferred.push({ message, kind: "tick" });
+            }
+            // NO immediate flush — the same race would reject again mid-settle.
+            if (!retryTimer) {
+              retryTimer = setTimeout(() => {
+                retryTimer = null;
+                flushDeferred();
+              }, RETRY_DELAY_MS);
+            }
+          },
+        );
+      }
+    } catch (e) {
+      throw e; // sync throw still propagates — the router maps it to "deferred"
+    }
+  };
+  const router = createTickRouter(opts.host, deliverWatchingAsync, opts.cooldownMs);
   const enabled = opts.enabled ?? (() => true);
   // SHARED deferral: messages the runtime rejected (busy-not-streaming —
   // the host's deliver threw) are held here + flushed at the host's
@@ -283,6 +338,8 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     stop() {
       if (timer) clearInterval(timer);
       timer = null;
+      if (retryTimer) clearTimeout(retryTimer);
+      retryTimer = null;
     },
   };
 }

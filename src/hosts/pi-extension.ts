@@ -168,20 +168,17 @@ export default function (pi: ExtensionAPI) {
     },
     deliver: (message) => {
       // pi.sendMessage is declared `: void` (not a Promise) — the runtime
-      // sometimes returns a thenable and sometimes undefined. Never assume:
-      // guard the catch so an undefined return cannot crash pi. A SYNC throw
-      // in the busy-not-streaming window propagates to the router, which
-      // reports "deferred" — the runner holds + flushes at the settle.
+      // sometimes returns a thenable and sometimes undefined. Never assume.
+      // RETURN the thenable: the runner watches it — an ASYNC rejection (the
+      // settled-vs-teardown race where the triggered prompt() throws "already
+      // processing" after sendMessage resolved) re-defers the tick instead of
+      // silently dropping it. A SYNC throw propagates → the router maps it to
+      // "deferred" + the runner holds + flushes at the settle (existing path).
       const sent = pi.sendMessage(
         { customType: TICK_TYPE, content: message, display: true },
         { triggerTurn: true, deliverAs: "followUp" },
       );
-      if (sent && typeof (sent as Promise<void>).catch === "function") {
-        void (sent as Promise<void>).catch(() => {
-          // async rejection — the runtime already accepted (followUp queued);
-          // drop rather than risk a double-delivery.
-        });
-      }
+      return sent && typeof (sent as Promise<void>).catch === "function" ? (sent as Promise<void>) : undefined;
     },
     deliverUserMessage: (message, options) => {
       try {
