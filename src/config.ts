@@ -3,13 +3,28 @@
 // about HOW it is configured, WHERE state lives, and WHICH sessions are
 // autopilot-on lives here.
 
-import { existsSync, readFileSync, writeFileSync, renameSync, appendFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 // Scheduled-off parsing lives in the framework module (ONE place with the
-// due-check + timer manager); this import is the only coupling back — the
-// cycle-free direction (scheduled-off → config) carries the state helpers.
+// due-check + timer manager). The per-session state file lives in the LEAF
+// session-store.ts so both this module and scheduled-off.ts can depend on it
+// WITHOUT an import cycle (the earlier config ↔ scheduled-off shape only
+// worked because every cross-reference resolved at call time).
+import {
+  writeAtomic,
+  sessionAutopilotPath,
+  readSessionStore,
+  writeSessionStore,
+  readScheduledOffAt,
+  writeSessionAutopilotState,
+  scheduleScheduledOff,
+} from "./session-store.ts";
 import { parseDurationMs } from "./framework/scheduled-off.ts";
+
+// Re-exports: the state helpers' public home stays config.ts for callers
+// (hosts, tests) that predate the leaf extraction.
+export { writeAtomic, sessionAutopilotPath, readScheduledOffAt, writeSessionAutopilotState };
 
 export interface AutopilotConfig {
   stateDir: string;
@@ -24,14 +39,6 @@ export interface AutopilotConfig {
 }
 
 // ---------------------------------------------------------------------------
-
-export function writeAtomic(path: string, content: string): void {
-  const dir = path.slice(0, path.lastIndexOf("/"));
-  mkdirSync(dir, { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, content, "utf8");
-  renameSync(tmp, path);
-}
 
 /** Append a JSONL telemetry line (never throws). */
 export function appendTelemetry(stateDir: string, line: string): void {
@@ -95,37 +102,11 @@ export function writeSentinel(stateDir: string, status: "on" | "off"): void {
   writeAtomic(autopilotSentinelPath(stateDir), `${status} — ${new Date().toISOString()}\n`);
 }
 
-export function sessionAutopilotPath(stateDir: string): string {
-  return join(stateDir, "autopilot.sessions.json");
-}
-
-interface SessionAutopilotStore {
-  [sessionId: string]: { status: "on" | "off"; updatedAt: string; scheduledOffAt?: number };
-}
-
-function readSessionStore(stateDir: string): SessionAutopilotStore {
-  try {
-    const p = sessionAutopilotPath(stateDir);
-    if (!existsSync(p)) return {};
-    const raw = JSON.parse(readFileSync(p, "utf8")) as SessionAutopilotStore;
-    return raw && typeof raw === "object" ? raw : {};
-  } catch {
-    return {};
-  }
-}
-
-function writeSessionStore(stateDir: string, store: SessionAutopilotStore): void {
-  const cutoff = Date.now() - 30 * 24 * 3600_000;
-  for (const [k, v] of Object.entries(store)) {
-    const t = new Date(v.updatedAt).getTime();
-    if (!Number.isFinite(t) || t < cutoff) delete store[k];
-  }
-  writeAtomic(sessionAutopilotPath(stateDir), JSON.stringify(store, null, 2) + "\n");
-}
-
-// Scheduled-off persistence rides THIS entry (no second state file): an
-// explicit status write drops `scheduledOffAt` — explicit on/off cancels any
-// pending schedule by construction, so callers cannot forget it.
+// The per-session state file + its accessors (readSessionStore,
+// writeSessionStore, writeSessionAutopilotState, readScheduledOffAt,
+// scheduleScheduledOff) live in the LEAF src/session-store.ts — see the
+// cycle note in the imports above. This module keeps the POLICY on top of it:
+// the sentinel migration and the command semantics.
 
 /**
  * Per-session autopilot state: "on" | "off". Unknown sessions default OFF.
@@ -148,34 +129,6 @@ export function readSessionAutopilotState(stateDir: string, sessionId: string): 
     return "on";
   }
   return "off";
-}
-
-export function writeSessionAutopilotState(stateDir: string, sessionId: string, status: "on" | "off"): void {
-  if (!sessionId) return;
-  const store = readSessionStore(stateDir);
-  // No scheduledOffAt here: an explicit toggle CANCELS a pending schedule.
-  store[sessionId] = { status, updatedAt: new Date().toISOString() };
-  writeSessionStore(stateDir, store);
-}
-
-/** The persisted scheduled-off deadline for a session (epoch ms), or null.
- *  Never throws — fail-safe to "nothing scheduled". */
-export function readScheduledOffAt(stateDir: string, sessionId: string): number | null {
-  try {
-    if (!sessionId) return null;
-    const mine = readSessionStore(stateDir)[sessionId];
-    return typeof mine?.scheduledOffAt === "number" && Number.isFinite(mine.scheduledOffAt) ? mine.scheduledOffAt : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Persist a scheduled-off deadline (epoch ms) and keep the session ON —
- *  scheduling must not flip the mode; only the deadline firing does. */
-function scheduleScheduledOff(stateDir: string, sessionId: string, deadlineMs: number): void {
-  const store = readSessionStore(stateDir);
-  store[sessionId] = { status: "on", updatedAt: new Date().toISOString(), scheduledOffAt: Math.round(deadlineMs) };
-  writeSessionStore(stateDir, store);
 }
 
 /** Per-session gate: the extension's behavior is scoped to one session. */
@@ -240,7 +193,14 @@ export function autopilotCommand(
         }
         const nowMs = (opts.now ?? Date.now)();
         const at = nowMs + parsed;
-        if (sessionId) scheduleScheduledOff(stateDir, sessionId, at);
+        if (!sessionId) {
+          // A schedule that persists nothing but reports success is a lie —
+          // the caller would believe an OFF is armed when no deadline exists.
+          // (Immediate on/off tolerate a missing session — pre-existing
+          // per-session guards — but this is a NEW success-looking response.)
+          return { ok: false, message: "No session target yet — 'off in <duration>' needs an active session. Run status first, then retry once the session registers." };
+        }
+        scheduleScheduledOff(stateDir, sessionId, at);
         return {
           ok: true,
           message: `Autopilot stays ON until ${new Date(at).toISOString()} (${parsed / 1000}s) — then OFF automatically. Any explicit on/off cancels the schedule.`,

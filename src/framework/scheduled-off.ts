@@ -17,12 +17,12 @@
 //                         effects (pi: informOrchestrator + ui.notify;
 //                         opencode: promptAsync delivery). The framework never
 //                         delivers itself.
+
+import { readScheduledOffAt, writeSessionAutopilotState } from "../session-store.ts";
 //
 // Persistence is NOT here: the deadline rides the EXISTING per-session entry
-// in autopilot.sessions.json (config.ts read/write helpers were extended with
-// `scheduledOffAt`) — no second state file.
-
-import { readScheduledOffAt, writeSessionAutopilotState } from "../config.ts";
+// in autopilot.sessions.json (leaf module session-store.ts — imported below;
+// a leaf, so config.ts ↔ scheduled-off.ts never form an import cycle).
 
 /** Hard cap: a scheduled shutdown further than 24h out is rejected (a typo
  *  guard — "off in 240m" vs "24h" class of mistakes must fail loudly). */
