@@ -203,6 +203,21 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
         // silent — the tick still nudges the manual cases
       }
     }
+    if (source === "timer") {
+      // Zombie reconciliation FIRST (deterministic safety net): flip active
+      // items whose run is provably gone (fleet idle past grace) so a lost
+      // completion event cannot wedge an item in active forever. Any flips
+      // ride the consolidated harness tick — the orchestrator learns WHAT was
+      // flipped and checks pi-parallel-* branches before re-dispatching.
+      try {
+        const zombies = autopilot.zombieReconcile(fleet?.totalActive ?? 0);
+        if (zombies.flippedKeys.length) {
+          harnessTick([`zombie reconciliation flipped ${zombies.flippedKeys.join(", ")} to failed (no live run — verify partial work on pi-parallel-* branches before re-dispatch)`], fleet?.totalActive);
+        }
+      } catch {
+        // never let the safety net break the sweep
+      }
+    }
     const result = autopilot.sweep(source, Date.now(), fleet ? { totalActive: fleet.totalActive } : undefined);
     if (result.tick) sendTick(result.tick);
     // timer/activate safety net: stuck reviewing items get a review nudge —

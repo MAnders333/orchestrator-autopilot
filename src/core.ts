@@ -65,7 +65,7 @@ interface LedgerEntry {
 // ---------------------------------------------------------------------------
 
 export class Autopilot {
-  private cfg: Required<Pick<AutopilotConfig, "maxSlots" | "queueLowThreshold" | "workerAgents" | "quietPeriodMs">> & AutopilotConfig;
+  private cfg: Required<Pick<AutopilotConfig, "maxSlots" | "queueLowThreshold" | "workerAgents" | "quietPeriodMs" | "zombieGraceMinutes">> & AutopilotConfig;
   private ledger = new Map<string, LedgerEntry>();
   private lastTickAt = 0;
   private lastTickHash = "";
@@ -80,6 +80,7 @@ export class Autopilot {
       reviewerAgents: ["orchestrator-reviewer"],
       reviewCap: 5,
       quietPeriodMs: 60_000,
+      zombieGraceMinutes: 30,
       ...config,
     };
   }
@@ -271,6 +272,46 @@ export class Autopilot {
     if (!tick) return empty();
     this.logEvent("tick", { reason: tick.reason, source });
     return { tick, domainEvents: [], flipped: false, freedSlot: false, reviewerCompleted: false };
+  }
+
+  /**
+   * Zombie reconciliation — the deterministic safety net for LOST completion
+   * events. The active→reviewing/failed flip is event-driven
+   * (subagent:async-complete on the spawning session's in-process bus), so a
+   * run that ends while no session is listening (timeout overnight, crash,
+   * restart) leaves its item active FOREVER — observed live (EVAL-EXPT-M3:
+   * 8h timeout, still active the next day). The AUTHORITATIVE counter-evidence
+   * is fleetStatus: when it reports zero active runs, NOTHING is running
+   * anywhere this backend spawned — any `active` item idle past the grace
+   * window is a zombie by definition. Flip it to failed with the evidence in
+   * notes; the orchestrator then re-dispatches deliberately (verifying
+   * pi-parallel-* branches for partial work first) instead of a dead run
+   * occupying a phantom slot indefinitely.
+   */
+  zombieReconcile(fleetTotalActive: number | undefined, now = this.now()): { flippedKeys: string[] } {
+    if ((fleetTotalActive ?? 0) > 0) return { flippedKeys: [] }; // something IS running — fleet not authoritative-idle
+    const graceMs = this.cfg.zombieGraceMinutes * 60_000;
+    if (graceMs <= 0) return { flippedKeys: [] }; // 0 disables the sweep
+    const store = loadStore(this.cfg.stateDir);
+    if (!store) return { flippedKeys: [] };
+    const flippedKeys: string[] = [];
+    for (const it of Object.values(store.items)) {
+      if (it.status !== "active") continue;
+      const updatedAt = Date.parse(it.updatedAt);
+      const idleMs = now - updatedAt;
+      if (!Number.isFinite(updatedAt) || idleMs < graceMs) continue;
+      const evidence =
+        `zombie reconciliation ${new Date(now).toISOString()} — fleet reported 0 active runs while this item sat active ~${Math.round(idleMs / 60_000)}m past update ` +
+        `(run ${it.runId ?? "?"}): timeout/crash/lost completion event. Partial work may exist on pi-parallel-* branches — verify before re-dispatch.`;
+      updateItem(store, it.key, {
+        status: "failed",
+        notes: it.notes ? `${it.notes}\n\n${evidence}` : evidence,
+      });
+      flippedKeys.push(it.key);
+      this.logEvent("flip", { key: it.key, runId: it.runId ?? null, outcome: "failed", source: "zombie" });
+    }
+    if (flippedKeys.length) saveStore(this.cfg.stateDir, store);
+    return { flippedKeys };
   }
 
   /**

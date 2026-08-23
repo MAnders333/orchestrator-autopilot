@@ -147,6 +147,11 @@ export interface AutopilotConfigFile {
   workerAgents?: string[];
   reviewerAgents?: string[];
   reviewCap?: number; // review-FAIL re-dispatch cap (default 5)
+  /** Zombie reconciliation grace (default 30 min): an `active` item idle this
+   *  long while the fleet reports ZERO active runs is flipped to failed — its
+   *  completion event was lost (timeout overnight / crash / restart). 0
+   *  disables the sweep. */
+  zombieGraceMinutes?: number;
   sweepIntervalMs?: number; // periodic capacity sweep; 0 disables (default 10 min)
   /** Intake suppression window: pending proposals suppress intake ticks for
    *  this many hours (the user deliberates), then the suppression lapses so a
@@ -293,6 +298,9 @@ export function loadAutopilotConfig(stateDir: string, env: NodeJS.ProcessEnv = p
   const sweepIntervalMs = env.AUTOPILOT_SWEEP_INTERVAL_MS
     ? Number(env.AUTOPILOT_SWEEP_INTERVAL_MS)
     : file.sweepIntervalMs ?? 600_000;
+  const zombieGraceMinutes = env.AUTOPILOT_ZOMBIE_GRACE_MINUTES
+    ? Number(env.AUTOPILOT_ZOMBIE_GRACE_MINUTES)
+    : file.zombieGraceMinutes ?? 30;
   return {
     maxSlots: Number.isFinite(maxSlots) && maxSlots >= 1 ? maxSlots : 3,
     queueLowThreshold: Number.isFinite(queueLowThreshold) && queueLowThreshold >= 1 ? queueLowThreshold : 2,
@@ -300,6 +308,7 @@ export function loadAutopilotConfig(stateDir: string, env: NodeJS.ProcessEnv = p
     reviewerAgents: reviewerAgents.length ? reviewerAgents : ["orchestrator-reviewer"],
     reviewCap: Number.isFinite(reviewCap) && reviewCap >= 1 ? reviewCap : 5,
     sweepIntervalMs: Number.isFinite(sweepIntervalMs) && sweepIntervalMs >= 0 ? sweepIntervalMs : 600_000,
+    zombieGraceMinutes: Number.isFinite(zombieGraceMinutes) && zombieGraceMinutes >= 0 ? zombieGraceMinutes : 30,
   };
 }
 

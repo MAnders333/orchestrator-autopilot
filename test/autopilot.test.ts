@@ -285,7 +285,52 @@ describe("core.Autopilot (store-first)", () => {
     expect(tick?.message).toContain("QUEUE:");
     expect(tick?.facts.readyKeys).toEqual(["B1"]);
   });
-});
+
+  test("zombieReconcile: fleet idle + active item past grace → flipped to failed with evidence in notes", () => {
+    const s = newStore();
+    addItem(s, item({ key: "Z1", status: "active", runId: "deadfeed", title: "zombie" }));
+    addItem(s, item({ key: "F1", status: "active", runId: "fresh1234", title: "fresh" }));
+    // addItem stamps updatedAt = insert time; set the idle window explicitly
+    s.items["Z1"].updatedAt = new Date(Date.now() - 45 * 60_000).toISOString(); // 45m idle > 30m grace
+    s.items["F1"].updatedAt = new Date().toISOString(); // fresh
+    saveStore(dir, s);
+    const ap = make();
+    const r = ap.zombieReconcile(0); // fleet reports ZERO active runs
+    expect(r.flippedKeys).toEqual(["Z1"]); // only the stale one
+    const after = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+    expect(after.items["Z1"].status).toBe("failed");
+    expect(after.items["Z1"].runId).toBeNull(); // failed clears stale run refs
+    expect(after.items["Z1"].notes).toContain("zombie reconciliation");
+    expect(after.items["Z1"].notes).toContain("deadfeed");
+    expect(after.items["Z1"].notes).toContain("pi-parallel-*"); // points at partial-work recovery
+    expect(after.items["F1"].status).toBe("active"); // within grace — untouched
+    expect(telemetry.some((l) => l.includes('"source":"zombie"'))).toBe(true);
+  });
+
+  test("zombieReconcile: fleet busy → nothing flips even past grace (something IS running)", () => {
+    const dir2 = mkdtempSync(join(tmpdir(), "autopilot-zombie-"));
+    try {
+      const s = newStore();
+      addItem(s, item({ key: "Z1", status: "active", runId: "alive0000", title: "long worker" }));
+      s.items["Z1"].updatedAt = new Date(Date.now() - 45 * 60_000).toISOString();
+      saveStore(dir2, s);
+      const r = new Autopilot({ stateDir: dir2 }).zombieReconcile(2); // 2 runs live elsewhere/legit long workers
+      expect(r.flippedKeys).toEqual([]);
+      expect(JSON.parse(readFileSync(join(dir2, "queue.json"), "utf8")).items["Z1"].status).toBe("active");
+    } finally {
+      rmSync(dir2, { recursive: true, force: true });
+    }
+  });
+
+  test("zombieReconcile: zombieGraceMinutes 0 disables the sweep", () => {
+    const s = newStore();
+    addItem(s, item({ key: "Z1", status: "active", runId: "deadfeed", title: "zombie" }));
+    s.items["Z1"].updatedAt = new Date(Date.now() - 48 * 3600_000).toISOString(); // 48h idle
+    saveStore(dir, s);
+    const r = make({ zombieGraceMinutes: 0 }).zombieReconcile(0);
+    expect(r.flippedKeys).toEqual([]);
+    expect(JSON.parse(readFileSync(join(dir, "queue.json"), "utf8")).items["Z1"].status).toBe("active");
+  });
 
 describe("core.parseStateDirFromCommand", () => {
   let dir: string;
@@ -467,6 +512,8 @@ describe("autopilotCommand — ONE shared toggle implementation (both hosts)", (
     expect(autopilotCommand("capacity", "0", { stateDir: dir, sessionId: "s1" }).ok).toBe(false);
     expect(autopilotCommand("bogus", undefined, { stateDir: dir, sessionId: "s1" }).ok).toBe(false);
   });
+
+});
 });
 
 describe("isUnisolatedWorkerSpawn — the B26 rule as a shared predicate", () => {
