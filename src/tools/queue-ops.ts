@@ -12,6 +12,7 @@ import type { Autopilot } from "../core.ts";
 import type { AutopilotConfigFile } from "../config.ts";
 import { loadStore, saveStore, newStore, addItem, updateItem, queryItems, queueLengths, type QueueStore } from "../queue-store.ts";
 import { isAutoDispatchable } from "../framework/auto-dispatch.ts";
+import { preserveRunWorktree } from "../framework/worktree-preservation.ts";
 
 export interface ToolResult {
   text: string;
@@ -35,6 +36,12 @@ export interface QueueOpsCtx {
 
 function err(e: unknown, op: string): ToolResult {
   return { text: `${op} failed: ${e instanceof Error ? e.message : String(e)}`, details: {} };
+}
+
+/** Validate a requested wall-clock budget: a positive finite number, else null.
+ *  null = "not requested" — the runtime default budget stays authoritative. */
+export function normalizeTimeoutMs(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v >= 1 ? v : null;
 }
 
 /** queue_list — read path (filter by status / since / sort, compact or notes). */
@@ -94,6 +101,9 @@ export async function queueAdd(ctx: QueueOpsCtx, params: Record<string, unknown>
       urgency: (params.urgency as string) ?? "",
       risk: (params.risk as string) ?? "",
       runId: null,
+      reviewerRunId: null,
+      timeoutMs: normalizeTimeoutMs(params.timeoutMs),
+      attempts: 0,
       notes: (params.notes as string) ?? "",
     });
     saveStore(ctx.stateDir, store);
@@ -125,6 +135,8 @@ export async function queueUpdate(ctx: QueueOpsCtx, params: Record<string, unkno
       value: params.value as string | undefined,
       urgency: params.urgency as string | undefined,
       risk: params.risk as string | undefined,
+      // Explicit param wins; absent param leaves the recorded budget alone.
+      ...(params.timeoutMs !== undefined ? { timeoutMs: normalizeTimeoutMs(params.timeoutMs) } : {}),
       notes: params.notes as string | undefined,
     });
     saveStore(ctx.stateDir, store);
@@ -152,10 +164,24 @@ export async function queueDispatch(ctx: QueueOpsCtx, params: Record<string, unk
     if (!check.ok) {
       return { text: `queue_dispatch: ${check.reason}`, details: { cwd, ...(check.files ? { dirty: check.files } : {}) } };
     }
-    const runId = await ctx.backend.spawn(params.task as string, { cwd, timeoutMs: params.timeoutMs as number | undefined });
+    // TIMEOUT PLUMBING: an explicit param wins; otherwise the item's recorded
+    // budget is delivered to EVERY lane's spawn (the historical gap: harness
+    // dispatch/re-dispatch/review dropped the request and children ran at the
+    // runtime default). A manually supplied budget is persisted so re-dispatch
+    // and review inherit it too. Unset → undefined passthrough (runtime default).
+    const requestedTimeout = normalizeTimeoutMs(params.timeoutMs);
+    const timeoutMs = requestedTimeout ?? item.timeoutMs ?? undefined;
+    const runId = await ctx.backend.spawn(params.task as string, { cwd, timeoutMs });
     if (!runId) return { text: "queue_dispatch: spawned but no run id returned", details: {} };
-    updateItem(store, key, { status: "active", runId });
+    updateItem(store, key, { status: "active", runId, ...(requestedTimeout ? { timeoutMs: requestedTimeout } : {}) });
     saveStore(ctx.stateDir, store);
+    try {
+      // Worktree handoff preservation starts AT DISPATCH: journal + keep-ref
+      // the parallel branch from its first commit onward (sweeps continue it).
+      preserveRunWorktree({ stateDir: ctx.stateDir, repo: cwd, runId, key });
+    } catch {
+      // preservation never breaks dispatch
+    }
     ctx.autopilot().handleAsyncStarted(runId, "worker"); // fleet ledger
     // Double-dispatch guard: an APPROVED item that the harness would
     // auto-dispatch (scope + cwd + low/med risk) should rarely be dispatched
@@ -193,7 +219,7 @@ export async function queueReview(ctx: QueueOpsCtx, params: Record<string, unkno
       agent: agentName,
       worktree: false, // reviewers are read-only — no worktree
       cwd: item.cwd ?? undefined, // the work repo — the reviewer locates the product there
-      timeoutMs: params.timeoutMs as number | undefined,
+      timeoutMs: normalizeTimeoutMs(params.timeoutMs) ?? item.timeoutMs ?? undefined,
     });
     if (!runId) return { text: "queue_review: spawned but no run id returned", details: {} };
     updateItem(store, key, { reviewerRunId: runId });

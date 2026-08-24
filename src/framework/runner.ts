@@ -14,10 +14,11 @@ import { join } from "node:path";
 import type { Autopilot } from "../core.ts";
 import type { CompletionEvent } from "../types.ts";
 import { loadAutopilotConfig } from "../config.ts";
-import { loadStore } from "../queue-store.ts";
+import { loadStore, itemByRunId } from "../queue-store.ts";
 import { flagForReview } from "./flag-review.ts";
 import { createTickRouter, type TickHostState } from "./tick-router.ts";
 import { autoDispatchEligible, autoRedispatch, autoReview } from "./auto-dispatch.ts";
+import { preserveActiveItems, prunePreservedRefs, preserveRunWorktree } from "./worktree-preservation.ts";
 
 export interface RunnerOptions {
   stateDir: string;
@@ -188,10 +189,44 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
   };
   const sweep = async (source: "settled" | "activate" | "timer" | "worker-done"): Promise<void> => {
     if (!enabled()) return;
+    // WORKTREE HANDOFF PRESERVATION — capture the active runs' pi-parallel-*
+    // tips into the durable journal + keep refs BEFORE anything else looks at
+    // the queue. Rides the existing sweep (no new timers); running it on every
+    // source means a dispatch is journalled within one sweep and a worker that
+    // commits late still gets captured at the next state change. Best-effort.
+    try {
+      preserveActiveItems(opts.stateDir);
+    } catch {
+      // preservation must never break the sweep
+    }
     // The authoritative fleet, fetched ONCE — both the auto-dispatch (A) and
     // the engine sweep use it (one RPC, and the request is emitted synchronously
     // so hosts/replies see it immediately).
     const fleet = await opts.backend.fleetStatus();
+    if (source === "timer") {
+      // RETENTION: drop keep refs whose job is done (item terminal, or tip
+      // reachable from main) so preserved refs don't accumulate forever.
+      try {
+        prunePreservedRefs(opts.stateDir);
+      } catch {
+        // never let retention break the sweep
+      }
+      // Zombie reconciliation FIRST (deterministic safety net): flip active
+      // items whose run is provably gone (fleet idle past grace) so a lost
+      // completion event cannot wedge an item in active forever. Any flips
+      // ride the consolidated harness tick — the orchestrator learns WHAT was
+      // flipped and checks pi-parallel-* branches before re-dispatching. The
+      // preservation capture above already ran, so even a timed-out worker's
+      // last commits were journalled while its branch still existed.
+      try {
+        const zombies = autopilot.zombieReconcile(fleet?.totalActive ?? 0);
+        if (zombies.flippedKeys.length) {
+          harnessTick([`zombie reconciliation flipped ${zombies.flippedKeys.join(", ")} to failed (no live run — verify partial work on pi-parallel-* branches before re-dispatch)`], fleet?.totalActive);
+        }
+      } catch {
+        // never let the safety net break the sweep
+      }
+    }
     // A — fill free slots with auto-dispatchable items before deciding ticks,
     // so the dispatch nudge fires only for the MANUAL cases (high-risk or
     // incomplete scope/cwd).
@@ -201,21 +236,6 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
         if (dispatched.length) harnessTick([`dispatched ${dispatched.map((d) => d.key).join(", ")}`], fleet?.totalActive);
       } catch {
         // silent — the tick still nudges the manual cases
-      }
-    }
-    if (source === "timer") {
-      // Zombie reconciliation FIRST (deterministic safety net): flip active
-      // items whose run is provably gone (fleet idle past grace) so a lost
-      // completion event cannot wedge an item in active forever. Any flips
-      // ride the consolidated harness tick — the orchestrator learns WHAT was
-      // flipped and checks pi-parallel-* branches before re-dispatching.
-      try {
-        const zombies = autopilot.zombieReconcile(fleet?.totalActive ?? 0);
-        if (zombies.flippedKeys.length) {
-          harnessTick([`zombie reconciliation flipped ${zombies.flippedKeys.join(", ")} to failed (no live run — verify partial work on pi-parallel-* branches before re-dispatch)`], fleet?.totalActive);
-        }
-      } catch {
-        // never let the safety net break the sweep
       }
     }
     const result = autopilot.sweep(source, Date.now(), fleet ? { totalActive: fleet.totalActive } : undefined);
@@ -236,6 +256,19 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       if (!enabled()) return;
       const result = autopilot.handleAsyncComplete(ev);
       if (opts.emit) opts.emit(result.domainEvents);
+      // TRANSITION-TIMED preservation capture: the active→reviewing/failed
+      // flip is the last queue-state change this run gets — journal its
+      // parallel-branch tip NOW so commits that landed after the previous
+      // sweep are still recorded (best-effort: if the runtime's own cleanup
+      // already removed the branch, this no-ops and the sweep captures hold).
+      try {
+        const doneRunId = String((ev as { runId?: string }).runId ?? "");
+        const store = doneRunId ? loadStore(opts.stateDir) : null;
+        const item = store ? itemByRunId(store, doneRunId) : null;
+        if (item?.cwd) preserveRunWorktree({ stateDir: opts.stateDir, repo: item.cwd, runId: doneRunId, key: item.key });
+      } catch {
+        // preservation never breaks completion routing
+      }
       // B + C, ONE consolidated harness tick. B — a review FAIL
       // auto-re-dispatches with the findings (up to the cap; the engine
       // already flipped to active when attempts < cap). C — a worker

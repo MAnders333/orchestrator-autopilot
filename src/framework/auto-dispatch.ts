@@ -23,6 +23,7 @@
 
 import { loadStore, saveStore, updateItem, type QueueItem } from "../queue-store.ts";
 import type { SubagentBackend } from "../backends/types.ts";
+import { preserveRunWorktree } from "./worktree-preservation.ts";
 
 /** B26 rule as a testable PREDICATE: a subagent tool call is a worker spawn
  *  WITHOUT worktree isolation — the class that breaks parallel workers (B20's
@@ -96,10 +97,17 @@ export async function autoDispatchEligible(
   const dispatched: Array<{ key: string; runId: string }> = [];
   for (const item of eligible.slice(0, slots)) {
     try {
-      const runId = await backend.spawn(workerTask(item), { cwd: item.cwd! });
+      // The item's recorded budget rides along — harness dispatches must not
+      // silently fall back to the runtime default (the timeout-plumbing fix).
+      const runId = await backend.spawn(workerTask(item), { cwd: item.cwd!, timeoutMs: item.timeoutMs ?? undefined });
       if (!runId) continue;
       updateItem(store, item.key, { status: "active", runId });
       dispatched.push({ key: item.key, runId });
+      try {
+        preserveRunWorktree({ stateDir, repo: item.cwd!, runId, key: item.key });
+      } catch {
+        // preservation never breaks dispatch
+      }
     } catch {
       break; // a spawn failure stops the batch — the orchestrator handles it
     }
@@ -124,10 +132,15 @@ export async function autoRedispatch(
   if (!item || item.status !== "active") return false; // only the FAIL→active flip is re-dispatchable
   if (typeof item.cwd !== "string" || !item.cwd.trim()) return false; // no repo → orchestrator
   try {
-    const runId = await backend.spawn(workerTask(item, findings), { cwd: item.cwd });
+    const runId = await backend.spawn(workerTask(item, findings), { cwd: item.cwd, timeoutMs: item.timeoutMs ?? undefined });
     if (!runId) return false;
     updateItem(store!, key, { runId });
     saveStore(stateDir, store!);
+    try {
+      preserveRunWorktree({ stateDir, repo: item.cwd, runId, key });
+    } catch {
+      // preservation never breaks re-dispatch
+    }
     return true;
   } catch {
     return false; // the orchestrator re-dispatches manually
@@ -173,6 +186,7 @@ export async function autoReview(
       agent: reviewerAgent,
       worktree: false, // reviewers are read-only — no worktree
       cwd: item.cwd,
+      timeoutMs: item.timeoutMs ?? undefined, // the SAME fields the dispatch used — budget included
     });
     if (!runId) return null;
     updateItem(store!, key, { reviewerRunId: runId });
