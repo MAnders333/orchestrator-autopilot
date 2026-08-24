@@ -39,6 +39,11 @@ export interface QueueItem {
   runId: string | null;
   /** reviewer run id when a queue_review was spawned for this item */
   reviewerRunId: string | null;
+  /** Requested wall-clock budget (ms) recorded on the item — EVERY dispatch
+   *  lane (manual dispatch/review + auto-dispatch/re-dispatch/auto-review)
+   *  passes it to backend.spawn so the child inherits the requested budget
+   *  instead of a runtime default. null = unset → runtime default applies. */
+  timeoutMs: number | null;
   /** re-dispatch attempt counter (review-FAIL cap is 5) */
   attempts: number;
   /** free-form notes/description — no schema constraints on content */
@@ -95,6 +100,7 @@ export function loadStore(stateDir: string): QueueStore | null {
       // downstream code can rely on the fields existing.
       for (const it of Object.values(raw.items)) {
         if (it.reviewerRunId === undefined) it.reviewerRunId = null;
+        if (it.timeoutMs === undefined) it.timeoutMs = null;
         if (it.attempts === undefined) it.attempts = 0;
         if (it.runId === undefined) it.runId = null;
         if (it.cwd === undefined) it.cwd = null;
@@ -243,6 +249,7 @@ export interface UpdatePatch {
   blocker?: BlockerReason;
   runId?: string | null;
   reviewerRunId?: string | null;
+  timeoutMs?: number | null;
   attempts?: number;
   title?: string;
   scope?: string;
@@ -348,6 +355,7 @@ export function migrateFromMd(md: string): QueueStore {
         risk: "",
         runId: runM ? runM[1] : null,
         reviewerRunId: null,
+        timeoutMs: null,
         attempts: 0,
         notes: joined,
       });
