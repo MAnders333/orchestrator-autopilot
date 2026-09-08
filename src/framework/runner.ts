@@ -16,7 +16,7 @@ import type { CompletionEvent } from "../types.ts";
 import { loadAutopilotConfig } from "../config.ts";
 import { loadStore, itemByRunId } from "../queue-store.ts";
 import { flagForReview } from "./flag-review.ts";
-import { reviewPointersFor, webUrlForCommit } from "./worktree-preservation.ts";
+import { reviewPointersFor, webUrlForCommit, deliverablePathsFor } from "./worktree-preservation.ts";
 import { createTickRouter, type TickHostState } from "./tick-router.ts";
 import { autoDispatchEligible, autoRedispatch, autoReview } from "./auto-dispatch.ts";
 import { preserveActiveItems, prunePreservedRefs, preserveRunWorktree } from "./worktree-preservation.ts";
@@ -331,14 +331,19 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
             const risk = (["low", "medium", "high"] as const).includes(item.risk as never) ? (item.risk as "low" | "medium" | "high") : "medium";
             const scopeHead = (item.scope ?? "").split(/\n/)[0].trim().slice(0, 80);
             // POINTER-RICH targets: cwd + the journaled branch@tip for this
-            // item's runs + a best-effort web link. The user asked for a
-            // pointer for everything needing review — prose targets like
-            // "the reviewed work (queue item K)" are not a pointer.
+            // item's runs + the CHANGED-FILE paths (the actual deliverable —
+            // e.g. a findings document the user must read) + a best-effort web
+            // link. Files may exist only on the worker's branch (unmerged), so
+            // each carries its branch-scoped view command, not a bare path.
             const targets: string[] = [];
             if (item.cwd) targets.push(item.cwd);
             try {
               for (const p of reviewPointersFor(opts.stateDir, key)) {
                 targets.push(`branch ${p.branch} @ ${p.tipSha.slice(0, 8)} — diff vs main: git diff main...${p.tipSha.slice(0, 8)}`);
+                const files = item.cwd ? deliverablePathsFor(item.cwd, p.tipSha) : null;
+                if (files?.length) {
+                  targets.push(...files.map((f) => `${f} — on branch (view: git show ${p.tipSha.slice(0, 8)}:${f})`));
+                }
                 const web = item.cwd ? webUrlForCommit(item.cwd, p.tipSha) : null;
                 if (web) targets.push(web);
               }

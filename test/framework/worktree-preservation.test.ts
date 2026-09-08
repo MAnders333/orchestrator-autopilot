@@ -14,7 +14,7 @@
 //     becomes reachable from main — never while failed/blocked.
 import { describe, test, expect } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, appendFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Autopilot } from "../../src/core.ts";
@@ -31,6 +31,7 @@ import {
   handoffsLogPath,
   reviewPointersFor,
   webUrlForCommit,
+  deliverablePathsFor,
 } from "../../src/framework/worktree-preservation.ts";
 import type { SubagentBackend } from "../../src/backends/types.ts";
 
@@ -388,6 +389,40 @@ describe("worktree preservation — runner wiring (failure/timeout + transition 
     } finally {
       rmSync(repo, { recursive: true, force: true });
       rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  test("deliverablePathsFor: changed files vs main, docs first, capped — the document deliverable IS the pointer", () => {
+    const dir = mkdtempSync(join(tmpdir(), "orch-doc-"));
+    try {
+      g(dir, "init", "-q", "-b", "main");
+      g(dir, "config", "user.email", "t@t");
+      g(dir, "config", "user.name", "t");
+      writeFileSync(join(dir, "base.txt"), "base\n");
+      g(dir, "add", ".");
+      g(dir, "commit", "-m", "base");
+      g(dir, "branch", "pi-parallel-docrun-0");
+      g(dir, "checkout", "-q", "pi-parallel-docrun-0");
+      mkdirSync(join(dir, "docs"), { recursive: true });
+      mkdirSync(join(dir, "src"), { recursive: true });
+      writeFileSync(join(dir, "docs", "findings.md"), "# findings\n");
+      writeFileSync(join(dir, "src", "impl.ts"), "export {}\n");
+      g(dir, "add", ".");
+      g(dir, "commit", "-m", "deliverable");
+      const tip = g(dir, "rev-parse", "HEAD");
+      const files = deliverablePathsFor(dir, tip);
+      expect(files).toEqual(["docs/findings.md", "src/impl.ts"]); // doc first — it is the deliverable
+      expect(files![0]).toContain("findings.md");
+      // cap: a flood of files truncates
+      for (let i = 0; i < 10; i++) {
+        writeFileSync(join(dir, `f${i}.txt`), "x\n");
+      }
+      g(dir, "add", ".");
+      g(dir, "commit", "-m", "flood");
+      expect(deliverablePathsFor(dir, g(dir, "rev-parse", "HEAD"))!.length).toBeLessThanOrEqual(6);
+      expect(deliverablePathsFor(dir, "nonexistent-sha")).toBeNull(); // best-effort: git failure → null
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

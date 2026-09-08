@@ -239,6 +239,20 @@ export function webUrlForCommit(repo: string, tipSha: string): string | null {
   return `https://${host}/${clean}/commit/${tipSha}`;
 }
 
+/** Files the worker changed on its parallel branch vs main — the DELIVERABLE
+ *  pointers (a document the user must read is a path, not a diff command).
+ *  Markdown/docs sort first (they are usually the deliverable); capped so a
+ *  100-file code change cannot flood the handover. Best-effort: null on any
+ *  git failure. */
+export function deliverablePathsFor(repo: string, tipSha: string, base = "main", cap = 6): string[] | null {
+  const diff = git(repo, ["diff", "--name-only", `${base}...${tipSha}`]);
+  if (!diff) return null;
+  const files = diff.split("\n").map((f) => f.trim()).filter(Boolean);
+  const docs = files.filter((f) => /\.(md|mdx|txt|rst)$/i.test(f) || /^docs\//.test(f));
+  const rest = files.filter((f) => !docs.includes(f));
+  return [...docs, ...rest].slice(0, cap);
+}
+
 /**
  * RETENTION: delete keep refs whose job is done — the item reached a terminal
  * status (done/rejected) or the journaled tip became reachable from main.
