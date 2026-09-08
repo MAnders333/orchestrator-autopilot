@@ -14,7 +14,7 @@
 //     becomes reachable from main — never while failed/blocked.
 import { describe, test, expect } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Autopilot } from "../../src/core.ts";
@@ -29,6 +29,8 @@ import {
   parallelBranches,
   keepRefFor,
   handoffsLogPath,
+  reviewPointersFor,
+  webUrlForCommit,
 } from "../../src/framework/worktree-preservation.ts";
 import type { SubagentBackend } from "../../src/backends/types.ts";
 
@@ -365,5 +367,52 @@ describe("worktree preservation — runner wiring (failure/timeout + transition 
     expect(journal(stateDir).map((e) => e.tipSha)).toContain(tip);
     rmSync(repo, { recursive: true, force: true });
     rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  test("reviewPointersFor: latest journaled tip per branch for the item's key", () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "orch-ptr-"));
+    const repo = mkdtempSync(join(tmpdir(), "orch-ptr-repo-"));
+    try {
+      g(repo, "init", "-q", "-b", "main");
+      g(repo, "config", "user.email", "t@t");
+      g(repo, "config", "user.name", "t");
+      g(repo, "commit", "--allow-empty", "-m", "base");
+      g(repo, "branch", "pi-parallel-run1-0");
+      const tip1 = g(repo, "rev-parse", "pi-parallel-run1-0");
+      // journal two entries for the same key — the NEWEST tip must win
+      appendFileSync(join(stateDir, "handoffs.jsonl"),
+        `${JSON.stringify({ runId: "run1", key: "K-PTR", branch: "pi-parallel-run1-0", tipSha: tip1, ts: "2026-08-23T10:00:00Z" })}\n` +
+        `${JSON.stringify({ runId: "run2", key: "OTHER-KEY", branch: "pi-parallel-run2-0", tipSha: "cafe123", ts: "2026-08-23T11:00:00Z" })}\n`);
+      const ptrs = reviewPointersFor(stateDir, "K-PTR");
+      expect(ptrs).toEqual([{ branch: "pi-parallel-run1-0", tipSha: tip1 }]); // OTHER-KEY filtered out
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  test("webUrlForCommit: structural parsing — forges transform, layouts that would break bail to local pointers", () => {
+    const dir = mkdtempSync(join(tmpdir(), "orch-web-"));
+    try {
+      g(dir, "init", "-q");
+      const withRemote = (remote: string | null): string | null => {
+        try { g(dir, "remote", "remove", "origin"); } catch { /* none yet */ }
+        if (remote) g(dir, "remote", "add", "origin", remote);
+        return webUrlForCommit(dir, "abc1234");
+      };
+      expect(withRemote("git@github.com:o/r.git")).toBe("https://github.com/o/r/commit/abc1234");
+      expect(withRemote("https://github.com/o/r")).toBe("https://github.com/o/r/commit/abc1234");
+      expect(withRemote("https://gitlab.com/group/sub/repo.git")).toBe("https://gitlab.com/group/sub/repo/commit/abc1234"); // nested subgroups
+      expect(withRemote("https://git.sr.ht/~user/repo")).toBe("https://git.sr.ht/~user/repo/commit/abc1234"); // tilde owner
+      expect(withRemote("git@corp-gitea.local:team/proj.git")).toBe("https://corp-gitea.local/team/proj/commit/abc1234"); // self-hosted, dot-less host
+      expect(withRemote("https://bitbucket.org/team/proj.git")).toBe("https://bitbucket.org/team/proj/commit/abc1234");
+      expect(withRemote("ssh://git@host.org:2222/o/r.git")).toBeNull(); // ssh port — no reliable web mapping
+      expect(withRemote("https://host.org:8443/o/r.git")).toBeNull(); // nonstandard web port
+      expect(withRemote("https://dev.azure.com/org/proj/_git/repo")).toBeNull(); // azure layout — wrong link worse than none
+      expect(withRemote("file:///srv/git/repo")).toBeNull(); // local scheme
+      expect(withRemote(null)).toBeNull(); // no origin — local-only repo (atl pattern)
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

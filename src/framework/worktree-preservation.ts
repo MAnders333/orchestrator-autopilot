@@ -187,6 +187,59 @@ function readJournal(stateDir: string): HandoffEntry[] {
 }
 
 /**
+ * REVIEW POINTERS for the deterministic human handover: the latest journaled
+ * branch@tip per runId for one queue item, as concrete review targets. This is
+ * what makes the auto-flag actually REVIEWABLE — the old auto-flag pointed at
+ * `item.cwd` + the prose "the reviewed work (queue item K)", which is not a
+ * pointer (the user asked for paths/links, and got neither).
+ */
+export function reviewPointersFor(stateDir: string, key: string): Array<{ branch: string; tipSha: string }> {
+  const out: Array<{ branch: string; tipSha: string }> = [];
+  for (const e of readJournal(stateDir)) {
+    if (e.key !== key) continue;
+    const last = out.find((p) => p.branch === e.branch);
+    if (last) last.tipSha = e.tipSha; // tips advance — newest wins
+    else out.push({ branch: e.branch, tipSha: e.tipSha });
+  }
+  return out;
+}
+
+/** Best-effort web URL for a commit. Parsing is STRUCTURAL, not shape-guessing:
+ *  URL-shaped remotes go through the standard URL parser (credentials, ports,
+ *  IPv6, tilde owners, nested GitLab subgroups all handled correctly); the one
+ *  legacy non-URL shape — scp-style `git@host:path` — is the explicit fallback.
+ *  Anything whose web layout would NOT follow the cgit convention
+ *  (`https://<host>/<path>/commit/<sha>`) returns null instead of a silently
+ *  wrong link: non-http(s) schemes (ssh:// carries a transport port the web UI
+ *  doesn't share; file:// is local), explicit ports, Azure-DevOps /_git/ paths.
+ *  Those repos still get the LOCAL pointers (path + branch@sha + diff command),
+ *  which is why the enrichment is additive, never either/or. */
+export function webUrlForCommit(repo: string, tipSha: string): string | null {
+  const url = git(repo, ["remote", "get-url", "origin"]);
+  if (!url) return null;
+  let host = "";
+  let path = "";
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+    if (u.port) return null; // nonstandard web port — can't guess; local pointers cover it
+    if (u.pathname.includes("/_git/")) return null; // Azure-DevOps layout — transform would be silently wrong
+    host = u.hostname;
+    path = u.pathname.replace(/^\/+/, "");
+  } catch {
+    // scp-style (the only common non-URL shape): git@host:owner/repo.git
+    const scp = url.replace(/^[^@]+@/, "");
+    const i = scp.indexOf(":");
+    if (i <= 0) return null;
+    host = scp.slice(0, i);
+    path = scp.slice(i + 1);
+  }
+  const clean = path.replace(/\.git$/, "").replace(/\/+$/, "");
+  if (!host || !clean.includes("/")) return null; // need owner/repo — a bare repo path has no forge convention
+  return `https://${host}/${clean}/commit/${tipSha}`;
+}
+
+/**
  * RETENTION: delete keep refs whose job is done — the item reached a terminal
  * status (done/rejected) or the journaled tip became reachable from main.
  * Returns the refs deleted this call. Idempotent: already-deleted refs no-op.

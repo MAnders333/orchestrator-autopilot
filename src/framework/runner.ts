@@ -16,6 +16,7 @@ import type { CompletionEvent } from "../types.ts";
 import { loadAutopilotConfig } from "../config.ts";
 import { loadStore, itemByRunId } from "../queue-store.ts";
 import { flagForReview } from "./flag-review.ts";
+import { reviewPointersFor, webUrlForCommit } from "./worktree-preservation.ts";
 import { createTickRouter, type TickHostState } from "./tick-router.ts";
 import { autoDispatchEligible, autoRedispatch, autoReview } from "./auto-dispatch.ts";
 import { preserveActiveItems, prunePreservedRefs, preserveRunWorktree } from "./worktree-preservation.ts";
@@ -329,12 +330,27 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
           if (item) {
             const risk = (["low", "medium", "high"] as const).includes(item.risk as never) ? (item.risk as "low" | "medium" | "high") : "medium";
             const scopeHead = (item.scope ?? "").split(/\n/)[0].trim().slice(0, 80);
+            // POINTER-RICH targets: cwd + the journaled branch@tip for this
+            // item's runs + a best-effort web link. The user asked for a
+            // pointer for everything needing review — prose targets like
+            // "the reviewed work (queue item K)" are not a pointer.
+            const targets: string[] = [];
+            if (item.cwd) targets.push(item.cwd);
+            try {
+              for (const p of reviewPointersFor(opts.stateDir, key)) {
+                targets.push(`branch ${p.branch} @ ${p.tipSha.slice(0, 8)} — diff vs main: git diff main...${p.tipSha.slice(0, 8)}`);
+                const web = item.cwd ? webUrlForCommit(item.cwd, p.tipSha) : null;
+                if (web) targets.push(web);
+              }
+            } catch {
+              // pointer enrichment must never break the handover
+            }
             flagForReview(
               {
                 summary: `${item.title || key} — agent review PASSED${scopeHead ? ` (${scopeHead}…)` : ""}.`,
                 risk,
                 blast_radius: `The reviewed work lands in the repo at ${item.cwd ?? "?"} — if wrong, ${item.title || key} is affected.`,
-                review_targets: [item.cwd ?? "", `the reviewed work (queue item ${key})`],
+                review_targets: targets.length ? targets : [item.cwd ?? "", `the reviewed work (queue item ${key})`],
                 self_reviewed: true,
                 review_method: "reviewer-subagent",
                 queue_key: key,
