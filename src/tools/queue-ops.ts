@@ -78,11 +78,42 @@ function approvalReady(scope: string | null | undefined, cwd: string | null | un
 }
 
 /** queue_add — new proposal (default) or approved item; free-form notes. */
+/** Jira-style sequential allocation: the next free `PREFIX-N` for a series.
+ *  N = max existing N + 1. The number is the FIRST number after the prefix
+ *  (and an optional separator), so every real convention counts:
+ *  `B5-NAME` → 5, `B-4` → 4, `EVAL-EXPT-M9` → 9, `B20-REMAINING` → 20 — the
+ *  hand-allocated era produced duplicates ("multiple B-49 items") exactly
+ *  because suffixed keys were invisible to eyeball counting. Guaranteed free:
+ *  bumps until the key is unclaimed. */
+export function nextKeyFor(store: QueueStore, prefix: string): string {
+  const clean = prefix.replace(/[^A-Za-z0-9_-]/g, "");
+  const re = new RegExp(`^${clean}(?:-|_)?(.+)$`);
+  let max = 0;
+  for (const k of Object.keys(store.items)) {
+    const m = re.exec(k);
+    if (!m) continue;
+    const num = /\d+/.exec(m[1]);
+    if (num) max = Math.max(max, Number(num[0]));
+  }
+  let n = max + 1;
+  while (store.items[`${clean}-${n}`]) n += 1;
+  return `${clean}-${n}`;
+}
+
 export async function queueAdd(ctx: QueueOpsCtx, params: Record<string, unknown>): Promise<ToolResult> {
   try {
     const store = ctx.storeOrNew();
-    const key = params.key as string;
-    if (store.items[key]) return { text: `queue_add: key '${key}' already exists — use queue_update`, details: {} };
+    // Key allocation: explicit key (unique, semantic suffixes welcome) OR a
+    // series ("B") → Jira-style auto-allocated B-<n>. Omitting both allocates
+    // under the default series "Q" — keys are load-bearing identifiers
+    // (telemetry, handoffs, steering), so the harness must hand them out
+    // collision-free instead of trusting hand-numbering.
+    let key = (params.key as string | undefined)?.trim();
+    if (!key) {
+      const series = ((params.series as string | undefined) ?? "Q").replace(/[^A-Za-z0-9_-]/g, "").toUpperCase();
+      key = nextKeyFor(store, series || "Q");
+    }
+    if (store.items[key]) return { text: `queue_add: key '${key}' already exists — use queue_update, or omit key to auto-allocate the next number in a series`, details: {} };
     const status: "approved" | "proposal" = params.status === "approved" ? "approved" : "proposal";
     const scope = (params.scope as string) ?? "";
     const cwd = (params.cwd as string | null) ?? null;

@@ -169,7 +169,8 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
     ),
     queue_add: def(CONTRACTS.queue_add,
       [
-        { name: "key", type: "string", required: true, description: "unique key, e.g. B4-AGENTIC-JUDGE-TIMEOUT" },
+        { name: "key", type: "string", required: false, description: "unique key; OMIT to auto-allocate the next sequential id (with `series`, e.g. \"B\" → B-<max+1>; default series Q)" },
+        { name: "series", type: "string", required: false, description: "id series for auto-allocation when key is omitted (e.g. \"B\" → B-<n>)" },
         { name: "title", type: "string", required: true },
         { name: "status", type: "string", required: false, description: "proposal (default) | approved" },
         { name: "scope", type: "string", required: false, description: "draft worker scope (free-form); REQUIRED when status=approved" },

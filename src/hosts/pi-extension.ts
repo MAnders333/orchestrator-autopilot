@@ -367,7 +367,8 @@ export default function (pi: ExtensionAPI) {
     label: "Queue add",
     description: CONTRACTS.queue_add,
     parameters: Type.Object({
-      key: Type.String({ description: "unique key, e.g. B4-AGENTIC-JUDGE-TIMEOUT" }),
+      key: Type.Optional(Type.String({ description: "unique key; OMIT to auto-allocate the next sequential id (with `series`, e.g. \"B\" → B-<max+1>; default series Q)" })),
+      series: Type.Optional(Type.String({ description: "id series for auto-allocation when key is omitted (e.g. \"B\" → B-<n>)" })),
       status: Type.Optional(Type.String({ description: "proposal (default) | approved" })),
       title: Type.String(),
       scope: Type.Optional(Type.String({ description: "draft worker scope (free-form); REQUIRED when status=approved" })),
