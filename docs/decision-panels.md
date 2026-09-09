@@ -22,8 +22,14 @@ Research date: 2026-09. Evidence is per-source and cited inline (`[verified]`).
   tests (`test/framework/panels.test.ts`, 11 tests). Extracted
   `humanReviewTargetsFor` (the runner auto-flag and the panel share one target
   builder); exported `approvalReady` for approval-gate reuse.
-- **Remaining** — pi overlay (`src/hosts/pi-panel.ts`), opencode `./tui` module,
-  nudges (widget/badge + attention). Order per §4.
+- **Done** — pi UI: `src/hosts/pi-panel.ts` — one `/orchestrate-panel` command,
+  TAB-Toggled overlay (proposals / human-review views with live pending
+  counts), keyboard actions a approve · r reject · d defer · e refine
+  (input) · x re-dispatch (input) · esc/q close; decisions applied through
+  `applyPanelDecision` (same store the tools read — no drift). Component
+  logic tested hermetic (6 tests: width safety, keyboard flow, store
+  effects). `@earendil-works/pi-tui@^0.85.1` added as a runtime dep.
+- **Remaining** — opencode `./tui` module, nudges (widget/badge + attention).
 
 ---
 

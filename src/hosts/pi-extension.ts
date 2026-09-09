@@ -53,6 +53,7 @@ const { isUnisolatedWorkerSpawn } = require(`${LIB_DIR}/framework/auto-dispatch.
 const { flagForReview } = require(`${LIB_DIR}/framework/flag-review.ts`) as typeof import("./framework/flag-review.ts");
 const { createScheduleManager, scheduledOffDue } = require(`${LIB_DIR}/framework/scheduled-off.ts`) as typeof import("./framework/scheduled-off.ts");
 const { installPiReviewer } = require(`${LIB_DIR}/agents/install.ts`) as typeof import("./agents/install.ts");
+const { registerDecisionPanel } = require(`${LIB_DIR}/hosts/pi-panel.ts`) as typeof import("./pi-panel.ts");
 
 
 // Install the framework-owned reviewer agent (idempotent, version-stamped).
@@ -559,4 +560,15 @@ export default function (pi: ExtensionAPI) {
       }
     },
   });
+
+  // -- decision panel (/orchestrate-panel) -----------------------------------
+  // The user-facing decision inbox: proposals + human-review views over queue
+  // state (tab toggles). Pure UI over the shared panels core; fail-closed —
+  // if the TUI surface is unavailable the command notifies instead of
+  // throwing, and queue_list remains the fallback read.
+  try {
+    registerDecisionPanel(pi, { stateDir: () => stateDir });
+  } catch {
+    // a broken panel must never affect pi — the command simply won't exist
+  }
 }
