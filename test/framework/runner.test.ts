@@ -443,6 +443,48 @@ describe("AUTOPILOT-6: deferred ticks recompute FLEET/QUEUE facts at delivery (n
     expect(ticks[0]).toContain("approved buffer low");
   });
 
+  test("auto-dispatch uses the fleet-vs-inventory UNION — an undercounting RPC cannot over-spawn (AUTOPILOT-6)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "orch-runner-adspawn-"));
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(newStore()));
+    const s0 = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+    // 3 live runs the RPC does NOT see (worktree-parent spawns went out via
+    // queue_dispatch; the status call lags) + 2 auto-dispatchable approved.
+    // The R-runs carry NO cwd: a completed worker auto-dispatches its REVIEWER
+    // (AUTOPILOT-8), and the modern slot math (AUTOPILOT-9) counts an in-flight
+    // reviewer against the pool — with a cwd, R1's reviewer would race the
+    // sweep and consume the free slot before the union math saw it. cwd-less
+    // R-runs keep the undercount-vs-union assertion deterministic.
+    for (const k of ["R1", "R2", "R3"]) {
+      addItem(s0, { key: k, title: k.toLowerCase(), status: "active", blocker: null, scope: "do it", evidence: "", value: "", urgency: "", risk: "low", runId: `run-${k}`, reviewerRunId: null, attempts: 0, notes: "" });
+    }
+    for (const k of ["B1", "B2"]) {
+      addItem(s0, { key: k, title: k.toLowerCase(), status: "approved", blocker: null, scope: "do it", cwd: "/tmp/repo", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: null, attempts: 0, notes: "" });
+    }
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(s0));
+    const workerSpawns: string[] = [];
+    const runner = createFrameworkRunner({
+      stateDir: dir,
+      autopilot: new Autopilot({ stateDir: dir }),
+      backend: {
+        spawn: async (task, o) => { if (!o?.agent) workerSpawns.push(String(task).split("\n")[0]); return `spawn-${workerSpawns.length}`; },
+        fleetStatus: async () => ({ totalActive: 0 }), // the RPC undercounts: reports ZERO live runs
+        steer: async () => "req",
+        asyncDirFor: () => null,
+      },
+      host: { interactive: () => true, loaded: () => true, busy: () => false, compacting: () => false },
+      deliver: () => {},
+      enabled: () => true,
+      sweepIntervalMs: 0,
+    });
+    runner.onCompletion({ runId: "run-R1", agent: "worker", success: true }); // → worker-done sweep → auto-dispatch A
+    await new Promise((r) => setTimeout(r, 150));
+    // R1 flipped → 2 of the 3 runs still live (store inventory) → exactly ONE
+    // free slot. The union count leaves no phantom free slots to over-spawn.
+    expect(workerSpawns.length).toBe(1);
+    expect(workerSpawns[0]).toContain("KEY: B1"); // the OLDEST eligible item, one only
+    runner.stop();
+  });
+
   test("zombie sweep never sees a fake 0: a failed fleet status (null backend) passes undefined → no flips", async () => {
     const dir = mkdtempSync(join(tmpdir(), "orch-runner-zombie-guard-"));
     writeFileSync(join(dir, "queue.json"), JSON.stringify(newStore()));

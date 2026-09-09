@@ -56,6 +56,9 @@ interface QueueState {
   approved: Array<{ key: string; title: string; line: string; lineIndex: number }>; // all dispatchable
   occupied: number;
   ready: number;
+  /** The queue-known inventory (max of the event ledger + store-derived),
+   *  pre-fleet clamp — used for the fleet-status-vs-inventory parity note. */
+  tracked?: number;
   /** Items awaiting the user's approval decision (status: proposal). */
   proposalsPending: number;
   ok: boolean;
@@ -345,12 +348,16 @@ export class Autopilot {
     // workers, reviewers, scouts, plain subagent calls (the general case).
     //   - fleet.totalActive (pi-subagents status) is the AUTHORITATIVE count:
     //     it sees every run the session spawned, whatever its role.
-    //   - fallback: max(event-ledger, store-derived) — the conservative union,
-    //     so a store undercount or a ledger miss can never report false free
-    //     slots. Store-derived includes active workers AND reviewing items with
-    //     a reviewer in flight.
-    const occupied = fleet?.totalActive ?? Math.max(this.ledger.size, snapshot.occupied);
-    const eff = { ...snapshot, occupied };
+    //   - FLEET-vs-INVENTORY PARITY (AUTOPILOT-6): the fleet count is the
+    //     FLOOR, never a replacement for what the engine's OWN view (event
+    //     ledger + store-derived) knows is running — a transient fleet
+    //     undercount (status RPC lagging a just-started parent) must never
+    //     report phantom free slots. Occupied = the conservative union:
+    //     max(fleet, ledger, store). The old store undercount / ledger miss
+    //     protection still holds — and now so does the RPC-undercount case.
+    const tracked = Math.max(this.ledger.size, snapshot.occupied);
+    const occupied = Math.max(fleet?.totalActive ?? 0, tracked);
+    const eff = { ...snapshot, occupied, tracked };
     const hash = this.queueHash(eff);
     // settled/activate/worker-done: only tick when the queue state changed.
     // timer: re-nudge a PERSISTENT gap even when unchanged — the orchestrator
@@ -575,13 +582,15 @@ export class Autopilot {
     const budgetLine = atRisk.length
       ? ` BUDGET: ${atRisk.map((b) => `${b.key} at ~${pctOf(b.used)} of its ${formatDurationMs(b.cap)} cap (~${formatDurationMs(b.remaining)} left)`).join("; ")} — cap risk: steer it to wrap up + commit, or plan a bigger-budget re-dispatch.`
       : "";
-    // Cross-check: the fleet counts ALL session subagents; when it sees runs
-    // the ledger/store haven't attributed (plain subagent calls, scouts), flag
-    // it so the orchestrator can run `subagent status`. Occupied itself is the
-    // fleet number (or the fallback) — never worker-only.
+    // Cross-check: when the authoritative fleet sees runs beyond what the
+    // engine's own view (ledger + store — the `tracked` inventory) attributes,
+    // flag it so the orchestrator can run `subagent status` on the untracked
+    // ones (scouts, plain subagent calls). Occupied itself is the conservative
+    // union — never a queue-only or an RPC-only number.
+    const tracked = state.tracked ?? state.occupied;
     const reconcile =
-      typeof fleetTotalActive === "number" && fleetTotalActive > state.occupied
-        ? ` (fleet status shows ${fleetTotalActive} active — ${fleetTotalActive - state.occupied} not tracked by the queue)`
+      typeof fleetTotalActive === "number" && fleetTotalActive > tracked
+        ? ` (fleet status shows ${fleetTotalActive} active — ${fleetTotalActive - tracked} not tracked by the queue)`
         : "";
 
     // Capacity gap → dispatch tick (the core fix: refill on slot-free).
@@ -668,8 +677,11 @@ export class Autopilot {
   refreshTickFacts(tick: Tick, fleet?: { totalActive?: number }, now = this.now()): Tick | null {
     if (tick.reason !== "dispatch" && tick.reason !== "intake") return tick;
     const snapshot = this.readQueueSnapshot();
-    const occupied = fleet?.totalActive ?? Math.max(this.ledger.size, snapshot.occupied);
-    const eff = { ...snapshot, occupied };
+    // Same FLEET-vs-INVENTORY PARITY as sweep: the authoritative fleet is the
+    // floor; the delivery-time numbers are the conservative union.
+    const tracked = Math.max(this.ledger.size, snapshot.occupied);
+    const occupied = Math.max(fleet?.totalActive ?? 0, tracked);
+    const eff = { ...snapshot, occupied, tracked };
     const source = typeof tick.facts.source === "string" ? tick.facts.source : "settled";
     const fresh = this.currentTick(eff, source, undefined, now, true, fleet?.totalActive);
     if (!fresh) return null; // the nudge no longer applies — the stale message must not be delivered

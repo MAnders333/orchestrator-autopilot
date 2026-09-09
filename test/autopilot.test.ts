@@ -406,6 +406,16 @@ describe("core.Autopilot (store-first)", () => {
     expect(JSON.parse(readFileSync(join(dir, "queue.json"), "utf8")).items["Z1"].status).toBe("active");
   });
 
+  test("fleet parity: a transient fleet UNDERTCOUNT never shows phantom free slots (occupied = UNION, AUTOPILOT-6)", () => {
+    writeStore(dir, [item({ key: "B1", status: "approved", title: "b1" })]);
+    const a = make({ quietPeriodMs: 0 });
+    a.handleAsyncStarted("b0f7631f", "workflow"); // a parent run the status RPC has NOT caught up to
+    const tick = a.sweep("timer", 1_000_000, { occupied: 0 }).tick; // the RPC undercounts: reports 0
+    expect(tick?.facts.occupied).toBe(1); // the ledger's parent is never erased by the lagging RPC
+    expect(tick?.message).toContain("FLEET: 1/3");
+    expect(tick?.message).not.toContain("0/3");
+  });
+
   test("fleet parity: a worktree-parent spawn counts in FLEET; its completion attributes correctly (AUTOPILOT-6)", () => {
     writeStore(dir, [
       item({ key: "P1", status: "active", runId: "b0f7631f", title: "parent" }),

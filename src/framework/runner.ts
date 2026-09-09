@@ -248,12 +248,14 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     // the engine sweep use it (one RPC, and the request is emitted synchronously
     // so hosts/replies see it immediately).
     const fleet = await opts.backend.fleetStatus();
-    // FLEET-vs-INVENTORY parity for the AUTO-DISPATCH slot math: the RPC count
-    // is the FLOOR, never a replacement for what the engine's OWN view (event
-    // ledger + store-derived occupied) knows is running — a transient fleet
-    // undercount (status RPC lagging a just-started parent) must not let the
-    // harness over-spawn into phantom free slots. Auto-dispatch fires on every
-    // free-slot window now (not just worker-done), so this guard matters more.
+    // FLEET-vS-INVENTORY PARITY (AUTOPILOT-6): the RPC count is the floor, never
+    // a replacement for what the engine's own view (event ledger + store)
+    // knows is running — a transient undercount (status RPC lagging a
+    // just-started parent) must not let the harness OVER-SPAWN into phantom
+    // free slots. Auto-dispatch fires on every free-slot window now (not just
+    // worker-done), so this guard matters more. Zombie reconciliation
+    // deliberately uses the RAW RPC count: only an authoritative 0 may trigger
+    // the net (undefined = RPC failed = skip — never a fake 0).
     const storeOccupied = (() => {
       const s = loadStore(opts.stateDir);
       return s ? storeToSnapshot(s).occupied : 0;
