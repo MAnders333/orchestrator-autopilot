@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Autopilot } from "../../src/core.ts";
-import { newStore, addItem } from "../../src/queue-store.ts";
+import { newStore, addItem, updateItem } from "../../src/queue-store.ts";
 import { createFrameworkRunner, type FrameworkRunner } from "../../src/framework/runner.ts";
 import type { SubagentBackend } from "../../src/backends/types.ts";
 
@@ -387,6 +387,85 @@ describe("the shared deferral (framework-level: busy sends held + flushed at set
     expect(deliveredUser.length).toBe(1); // the flush delivered it (host idle)
     expect(deliveredUser[0][0]).toBe("/orchestrate");
     expect(deliveredUser[0][1]).toEqual({ expandPromptTemplates: true });
+  });
+});
+
+describe("AUTOPILOT-6: deferred ticks recompute FLEET/QUEUE facts at delivery (never generation-time)", () => {
+  test("a dispatch tick deferred while busy is refreshed when flushed — CURRENT ready keys + CURRENT FLEET", async () => {
+    const f = setup();
+    seed(f, "A1");
+    seed(f, "A2");
+    f.busy = true;
+    f.runner.onTimer(); // generation: FLEET 0/3, QUEUE 2 ready (A1, A2) → busy → deferred
+    await new Promise((r) => setTimeout(r, 60));
+    expect(f.delivered.length).toBe(0); // nothing injected mid-turn
+    // mid-deferral the store moved: A1 dispatched (parent run) + A3 approved
+    const s = load(f);
+    updateItem(s, "A1", { status: "active", runId: "b0f7631f" });
+    addItem(s, { key: "A3", title: "a3", status: "approved", blocker: null, scope: "", evidence: "", value: "", urgency: "", risk: "low", runId: null, notes: "" });
+    save(f, s);
+    f.autopilot.handleAsyncStarted("b0f7631f", "workflow");
+    f.busy = false;
+    f.runner.onSettled(); // flush → delivery-time recompute
+    await new Promise((r) => setTimeout(r, 80));
+    const ticks = f.delivered.filter((m) => m.includes("[orch-tick:"));
+    expect(ticks.length).toBe(1); // one truthful nudge — no stale + fresh duplicates
+    expect(ticks[0]).toContain("[orch-tick: dispatch]");
+    expect(ticks[0]).toContain("FLEET: 1/3"); // the parent run is counted NOW
+    expect(ticks[0]).toContain("QUEUE: 2 ready (A2, A3)"); // CURRENT ready set
+    expect(ticks[0]).not.toContain("FLEET: 0/3"); // generation-time facts never surface
+    expect(ticks[0]).not.toContain("(A1, A2)");
+  });
+
+  test("a deferred dispatch tick whose slots filled mid-deferral never delivers 'X free' — the truthful current nudge", async () => {
+    const f = setup();
+    seed(f, "A1");
+    seed(f, "A2");
+    seed(f, "A3");
+    f.busy = true;
+    f.runner.onTimer();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(f.delivered.length).toBe(0);
+    // all three dispatched while the session stayed busy → 0 free, 0 ready
+    const s = load(f);
+    for (const k of ["A1", "A2", "A3"]) {
+      updateItem(s, k, { status: "active", runId: `run-${k}` });
+      f.autopilot.handleAsyncStarted(`run-${k}`, "workflow");
+    }
+    save(f, s);
+    f.busy = false;
+    f.runner.onSettled();
+    await new Promise((r) => setTimeout(r, 80));
+    const ticks = f.delivered.filter((m) => m.includes("[orch-tick:"));
+    expect(ticks.length).toBe(1);
+    expect(ticks[0]).toContain("[orch-tick: intake]"); // current truth: buffer empty
+    expect(ticks[0]).not.toContain("free"); // the stale "3 free" dispatch claim is gone
+    expect(ticks[0]).toContain("approved buffer low");
+  });
+
+  test("zombie sweep never sees a fake 0: a failed fleet status (null backend) passes undefined → no flips", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "orch-runner-zombie-guard-"));
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(newStore()));
+    const s0 = { ...JSON.parse(readFileSync(join(dir, "queue.json"), "utf8")) };
+    addItem(s0, { key: "Z1", title: "z1", status: "active", blocker: null, scope: "s", cwd: "/tmp/repo", evidence: "", value: "", urgency: "", risk: "low", runId: "live-run-1", reviewerRunId: null, timeoutMs: null, attempts: 0, notes: "" });
+    s0.items["Z1"].updatedAt = new Date(Date.now() - 3600_000).toISOString(); // idle past the 30m grace
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(s0));
+    const delivered: string[] = [];
+    const runner = createFrameworkRunner({
+      stateDir: dir,
+      autopilot: new Autopilot({ stateDir: dir }),
+      backend: { ...backend, fleetStatus: async () => null }, // the status RPC FAILED
+      host: { interactive: () => true, loaded: () => true, busy: () => false, compacting: () => false },
+      deliver: (m) => delivered.push(m),
+      enabled: () => true,
+      sweepIntervalMs: 0,
+    });
+    runner.onTimer();
+    await new Promise((r) => setTimeout(r, 80));
+    const after = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+    expect(after.items["Z1"].status).toBe("active"); // NOT flipped — unknown fleet ≠ fake 0
+    expect(delivered.some((m) => m.includes("zombie reconciliation"))).toBe(false);
+    runner.stop();
   });
 });
 

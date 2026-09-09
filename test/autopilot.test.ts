@@ -27,9 +27,11 @@ import {
   newStore,
   addItem,
   saveStore,
+  updateItem,
   type QueueStore,
   type QueueItem,
 } from "../src/queue-store.ts";
+import type { Tick } from "../src/types.ts";
 
 const FIXTURE = `# Orchestrator State
 updated: 2026-08-14T09:30Z
@@ -300,6 +302,136 @@ describe("core.Autopilot (store-first)", () => {
     expect(tick?.message).toContain("FLEET:");
     expect(tick?.message).toContain("QUEUE:");
     expect(tick?.facts.readyKeys).toEqual(["B1"]);
+  });
+
+  // AUTOPILOT-6 — delivery-time fact refresh: a tick deferred by the busy
+  // gate is flushed at the NEXT settle; the store can move underneath it
+  // (manual dispatch mid-window, auto-dispatch, completion flips). The flush
+  // recomputes FLEET/QUEUE facts from the LIVE store, so a late-delivered
+  // tick never claims "X free, N ready (…)" while those items are running.
+  test("refreshTickFacts: a deferred dispatch tick is recomputed against the LIVE store at delivery", () => {
+    writeStore(dir, [item({ key: "B1", status: "approved", title: "b1" })]);
+    const a = make({ quietPeriodMs: 0, maxSlots: 3 });
+    const gen = a.sweep("timer", 1_000_000).tick!;
+    expect(gen.reason).toBe("dispatch");
+    expect(gen.facts.readyKeys).toEqual(["B1"]); // generation-time facts: B1 ready, 0 occupied
+    expect(gen.facts.occupied).toBe(0);
+    // Between generation and delivery the store moved: B1 dispatched (parent
+    // workflow run) + B2 approved — the LIVE state, not the old snapshot.
+    const s = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+    updateItem(s, "B1", { status: "active", runId: "b0f7631f-parent" });
+    addItem(s, item({ key: "B2", title: "b2" }));
+    saveStore(dir, s);
+    a.handleAsyncStarted("b0f7631f-parent", "workflow"); // the fleet ledger sees the parent spawn
+    const fresh = a.refreshTickFacts(gen, undefined, 2_000_000)!;
+    expect(fresh.reason).toBe("dispatch"); // slots remain + B2 ready — the nudge still applies
+    expect(fresh.facts.occupied).toBe(1); // the dispatched parent counts in FLEET now
+    expect(fresh.facts.slotsFree).toBe(2);
+    expect(fresh.facts.readyKeys).toEqual(["B2"]); // B1 is NEVER listed ready again
+    expect(fresh.message).toContain("FLEET: 1/3");
+    expect(fresh.message).not.toContain("B1");
+    expect(fresh.facts.refreshedAt).toBe(2_000_000); // delivery-time stamp
+    expect(fresh.facts.generatedAt).toBe(1_000_000); // generation time preserved (audit trail)
+    // Telemetry characterization: the tick-refresh line timestamps the DELIVERY
+    // re-derivation — the gap from the generation `tick` line is the deferral.
+    expect(telemetry.some((l) => l.includes('"type":"tick-refresh"') && l.includes('"changed":true'))).toBe(true);
+  });
+
+  test("refreshTickFacts: full dispatch while busy → the stale '3 free' claim never surfaces (current nudge instead)", () => {
+    writeStore(dir, [
+      item({ key: "B1", status: "approved", title: "b1" }),
+      item({ key: "B2", status: "approved", title: "b2" }),
+      item({ key: "B3", status: "approved", title: "b3" }),
+    ]);
+    const a = make({ quietPeriodMs: 0, maxSlots: 3 });
+    const gen = a.sweep("timer", 1_000_000).tick!;
+    expect(gen.message).toContain("FLEET: 0/3");
+    expect(gen.message).toContain("3 free");
+    // Delivery time: all three items are LIVE (dispatched mid-window)
+    const s = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+    for (const k of ["B1", "B2", "B3"]) {
+      updateItem(s, k, { status: "active", runId: `run-${k}` });
+      a.handleAsyncStarted(`run-${k}`, "workflow");
+    }
+    saveStore(dir, s);
+    const fresh = a.refreshTickFacts(gen, undefined, 2_000_000);
+    expect(fresh).not.toBeNull(); // SOMETHING truthful applies: with the buffer empty the current nudge is intake
+    expect(fresh!.reason).toBe("intake"); // never a dispatch claiming free slots
+    expect(fresh!.message).not.toContain("free");
+    expect(fresh!.message).toContain("approved buffer low (0 ready");
+    expect(fresh!.facts.ready).toBe(0);
+  });
+
+  test("refreshTickFacts: no nudge applies to the current state → null (the stale message is dropped, never delivered)", () => {
+    writeStore(dir, [
+      item({ key: "B1", status: "approved", title: "b1" }),
+      item({ key: "B2", status: "approved", title: "b2" }),
+    ]);
+    const a = make({ quietPeriodMs: 0, maxSlots: 3 });
+    const gen = a.sweep("timer", 1_000_000).tick!;
+    expect(gen.reason).toBe("dispatch");
+    // Delivery time: three ad-hoc runs fill the fleet (the queue never tracks
+    // them) while the buffer stays full — neither dispatch nor intake applies.
+    a.handleAsyncStarted("scout-1", "scout");
+    a.handleAsyncStarted("scout-2", "scout");
+    a.handleAsyncStarted("scout-3", "scout");
+    expect(a.refreshTickFacts(gen, undefined, 2_000_000)).toBeNull();
+  });
+
+  test("refreshTickFacts: state unchanged since generation → the original dispatch tick stands", () => {
+    writeStore(dir, [item({ key: "B1", status: "approved", title: "b1" })]);
+    const a = make({ quietPeriodMs: 0 });
+    const gen = a.sweep("timer", 1_000_000).tick!;
+    const fresh = a.refreshTickFacts(gen, undefined, 2_000_000)!;
+    expect(fresh.message).toBe(gen.message); // no changes → identical message
+    expect(fresh.facts.readyKeys).toEqual(["B1"]);
+    expect(fresh.facts.occupied).toBe(0);
+    expect(fresh.facts.refreshedAt).toBe(2_000_000); // audit stamp still added at delivery
+  });
+
+  test("refreshTickFacts: review ticks pass through untouched (event-scoped facts, no FLEET/QUEUE claims)", () => {
+    const a = make();
+    const reviewTick: Tick = { reason: "review", message: "[orch-tick: review] R1 PASSED — awaiting you", facts: { key: "R1", verdict: "PASS" } };
+    expect(a.refreshTickFacts(reviewTick)).toBe(reviewTick);
+  });
+
+  test("zombieReconcile: an UNAVAILABLE fleet count (RPC failure) never acts as a fake 0 (AUTOPILOT-6)", () => {
+    const s = newStore();
+    addItem(s, item({ key: "Z1", status: "active", runId: "runner-alive", title: "long worker" }));
+    // idle past the grace — a REAL 0 would flip it, but the RPC failed:
+    s.items["Z1"].updatedAt = new Date(Date.now() - 45 * 60_000).toISOString();
+    saveStore(dir, s);
+    const r = make().zombieReconcile(undefined); // fleet status timed out — unknown ≠ 0
+    expect(r.flippedKeys).toEqual([]);
+    expect(JSON.parse(readFileSync(join(dir, "queue.json"), "utf8")).items["Z1"].status).toBe("active");
+  });
+
+  test("fleet parity: a worktree-parent spawn counts in FLEET; its completion attributes correctly (AUTOPILOT-6)", () => {
+    writeStore(dir, [
+      item({ key: "P1", status: "active", runId: "b0f7631f", title: "parent" }),
+      item({ key: "B1", status: "approved", title: "b1" }),
+    ]);
+    const a = make({ quietPeriodMs: 0 });
+    a.handleAsyncStarted("b0f7631f", "workflow"); // the parent spawn (queue_dispatch → workflow mode)
+    // The parent counts in FLEET via the ledger — no false 0 for the sweep /
+    // zombie net even when the queue view is light.
+    const sweepView = a.sweep("timer", 1_000_000).tick!;
+    expect(sweepView.facts.occupied).toBe(1);
+    expect(sweepView.message).toContain("FLEET: 1/3");
+    // The parent completes → ITS item is attributed + flipped (never left active)
+    const r = a.handleAsyncComplete({
+      runId: "b0f7631f",
+      agent: "workflow",
+      success: true,
+      results: [{ agent: "worker", runId: "b0f7631f-child", sessionPath: "/s/b0f7631f/run-0/session.jsonl" }],
+    });
+    expect(r.flipped).toBe(true);
+    const store = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+    expect(store.items["P1"].status).toBe("ai-review");
+    // The freed slot → dispatch nudge for the ready work, count back to 0
+    const after = a.sweep("worker-done", 2_000_000, { occupied: 0 }).tick!;
+    expect(after.facts.occupied).toBe(0);
+    expect(after.facts.readyKeys).toEqual(["B1"]);
   });
 
   test("resolveStateDir: basename-scoped — deterministic per profile, no mode-name semantics", () => {

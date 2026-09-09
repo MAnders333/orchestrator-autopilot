@@ -14,6 +14,11 @@
 // The old state.md parse survives ONLY as a transition-period fallback (the
 // store is migrated once from state.md, then md is retired).
 //
+// Deferred delivery (AUTOPILOT-6): a tick whose delivery the busy-deferral
+// held is RE-DERIVED from the live store at delivery (refreshTickFacts) — the
+// facts in the message are the facts at delivery, never a stale generation-time
+// snapshot ("X free, N ready" can never be shown while those items run).
+//
 // Fail-safe to action: when neither store nor md is available, we tick anyway
 // rather than risk a missed refill — a spurious tick costs one LLM turn, a
 // missed one costs an idle slot.
@@ -390,9 +395,16 @@ export class Autopilot {
    * notes; the orchestrator then re-dispatches deliberately (verifying
    * pi-parallel-* branches for partial work first) instead of a dead run
    * occupying a phantom slot indefinitely.
+   *
+   * FAKE-ZERO GUARD (AUTOPILOT-6): only an AUTHORITATIVE fleet count may
+   * trigger the net. When the RPC failed / the backend was unreachable the
+   * runner passes `undefined` — that is NOT evidence of an idle fleet and must
+   * never be coerced into a 0 (the old `?? 0` could flip LIVE runs whose
+   * status call just timed out). Undefined → skip; a real 0 is required.
    */
   zombieReconcile(fleetTotalActive: number | undefined, now = this.now()): { flippedKeys: string[] } {
-    if ((fleetTotalActive ?? 0) > 0) return { flippedKeys: [] }; // something IS running — fleet not authoritative-idle
+    if (fleetTotalActive === undefined) return { flippedKeys: [] }; // unknown fleet — NOT authority to flip (fake-zero guard)
+    if (fleetTotalActive > 0) return { flippedKeys: [] }; // something IS running — fleet not authoritative-idle
     const graceMs = this.cfg.zombieGraceMinutes * 60_000;
     if (graceMs <= 0) return { flippedKeys: [] }; // 0 disables the sweep
     const store = loadStore(this.cfg.stateDir);
@@ -532,7 +544,24 @@ export class Autopilot {
       // (a completion re-arms it via the ledger-size hash component).
       if (this.lastTickHash === this.queueHash(state)) return null;
     }
+    const tick = this.currentTick(state, source, runId, now, slotFreed, fleetTotalActive);
+    if (tick) this.rememberTick(state, now);
+    return tick;
+  }
 
+  /** The CURRENT-state tick decision — the single source of dispatch/intake
+   *  message text. decideTick calls it at GENERATION (behind the quiet/hash
+   *  gates above); refreshTickFacts calls it at DELIVERY so a busy-deferral
+   *  flush re-derives FLEET/QUEUE facts instead of presenting the snapshot
+   *  they were baked with. */
+  private currentTick(
+    state: QueueState,
+    source: string,
+    runId: string | undefined,
+    now: number,
+    slotFreed: boolean,
+    fleetTotalActive?: number,
+  ): Tick | null {
     const slotsFree = Math.max(0, this.cfg.maxSlots - state.occupied);
     const ready = state.ready;
     const readyKeys = state.approved.map((a) => a.key); // approved = dispatchable (the fold)
@@ -559,7 +588,6 @@ export class Autopilot {
     // FLEET counts ALL session subagents (workers + reviewers + scouts — any
     // dispatched run occupies a slot); QUEUE comes from the store.
     if (slotFreed && slotsFree > 0 && ready >= 1) {
-      this.rememberTick(state, now);
       return {
         reason: "dispatch",
         message:
@@ -576,6 +604,7 @@ export class Autopilot {
           source,
           runId,
           fleetTotalActive,
+          generatedAt: now,
           // Budget health: per-active-run remaining budget + cap (ms) and the
           // failed-at-cap recovery keys (failed=cap vs failed=verdict is the
           // failCause flag on each failed item).
@@ -601,7 +630,6 @@ export class Autopilot {
         const oldest = this.oldestProposalAgeMs(now);
         if (oldest !== null && oldest < suppressionMs) return null;
       }
-      this.rememberTick(state, now);
       const stale = this.oldestProposalKey();
       return {
         reason: "intake",
@@ -612,11 +640,47 @@ export class Autopilot {
           `Propose the next batch for approval per the approval gate (evidence + scope + value/urgency + risk). ` +
           `This is a real scan, not a quick check — present candidates. Not a user request; the ≤2-line rule does NOT apply to intake ticks.` +
           (stale ? ` NOTE: ${stale} has been pending for a while — resolve or reject it so it stops blocking the buffer.` : ""),
-        facts: { ready, readyKeys, threshold: this.cfg.queueLowThreshold, source, runId },
+        facts: { ready, readyKeys, threshold: this.cfg.queueLowThreshold, source, runId, generatedAt: now },
       };
     }
 
     return null;
+  }
+
+  /**
+   * DELIVERY-TIME FACT REFRESH (AUTOPILOT-6). A dispatch/intake tick that the
+   * busy-deferral held is flushed at the host's NEXT settle — possibly long
+   * after generation, when the store has moved underneath it (items the tick
+   * listed as ready were dispatched mid-window, completions flipped items,
+   * auto-dispatch filled slots). Re-derive the facts from the LIVE store (+
+   * authoritative fleet when the caller has one, else the conservative
+   * ledger/store fallback) so a late-delivered tick NEVER claims "X free,
+   * N ready (…)" while those items are running:
+   *   - returns the CURRENT truthful nudge (dispatch-first, then intake) with
+   *     fresh facts + a refreshedAt stamp (generatedAt preserved for the audit
+   *     trail); null when NO nudge applies to the current state — the flush
+   *     drops the stale message rather than deliver it;
+   *   - review ticks pass through untouched (their facts are event-scoped —
+   *     key/verdict — they carry no FLEET/QUEUE claims).
+   * The CURRENT state's hash is remembered so the same-settle sweep does not
+   * re-fire the identical fresh nudge.
+   */
+  refreshTickFacts(tick: Tick, fleet?: { totalActive?: number }, now = this.now()): Tick | null {
+    if (tick.reason !== "dispatch" && tick.reason !== "intake") return tick;
+    const snapshot = this.readQueueSnapshot();
+    const occupied = fleet?.totalActive ?? Math.max(this.ledger.size, snapshot.occupied);
+    const eff = { ...snapshot, occupied };
+    const source = typeof tick.facts.source === "string" ? tick.facts.source : "settled";
+    const fresh = this.currentTick(eff, source, undefined, now, true, fleet?.totalActive);
+    if (!fresh) return null; // the nudge no longer applies — the stale message must not be delivered
+    this.rememberTick(eff, now); // arm the same-settle sweep dedupe with the CURRENT hash
+    const generatedAt = typeof tick.facts.generatedAt === "number" ? tick.facts.generatedAt : now;
+    const facts = { ...fresh.facts, generatedAt, refreshedAt: now };
+    // Delivery-time telemetry: the gap between the generation `tick` line and
+    // this `tick-refresh` line IS the busy-deferral delay — and `changed`
+    // records whether the live facts moved underneath the held message.
+    this.logEvent("tick-refresh", { reason: fresh.reason, from: tick.reason, changed: fresh.message !== tick.message });
+    return { ...fresh, facts };
   }
 
   private queueHash(state: QueueState): string {

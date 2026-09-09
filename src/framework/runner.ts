@@ -12,7 +12,7 @@
 import type { SubagentBackend } from "../backends/types.ts";
 import { join } from "node:path";
 import { storeToSnapshot, type Autopilot } from "../core.ts";
-import type { CompletionEvent } from "../types.ts";
+import type { CompletionEvent, Tick } from "../types.ts";
 import { loadAutopilotConfig } from "../config.ts";
 import { loadStore, itemByRunId } from "../queue-store.ts";
 import { flagForReview } from "./flag-review.ts";
@@ -127,15 +127,56 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
   // the host's deliver threw) are held here + flushed at the host's
   // settle/idle event (the agent is idle then). This is framework logic;
   // the hosts only wire their idle event to onSettled + supply delivery.
-  const deferred: Array<{ message: string; kind: "tick" | "user"; options?: Record<string, unknown> }> = [];
-  const queueDeferred = (message: string, kind: "tick" | "user", options?: Record<string, unknown>): void => {
-    deferred.push({ message, kind, options });
+  // DELIVERY-TIME FACTS (AUTOPILOT-6): a deferred dispatch/intake tick keeps
+  // its engine Tick and is RE-DERIVED against the live store at each flush —
+  // see refreshDeferredFacts below.
+  interface DeferredEntry {
+    message: string;
+    kind: "tick" | "user";
+    /** The engine tick a deferred tick entry was generated from (dispatch /
+     *  intake refreshes recompute its FLEET/QUEUE facts at delivery; harness
+     *  and review ticks have no such facts). */
+    tick?: Tick;
+    /** Delivery-time refresh decided the nudge no longer applies — drop. */
+    drop?: boolean;
+    options?: Record<string, unknown>;
+  }
+  const deferred: DeferredEntry[] = [];
+  const queueDeferred = (message: string, kind: "tick" | "user", tick?: Tick, options?: Record<string, unknown>): void => {
+    deferred.push({ message, kind, ...(tick ? { tick } : {}), ...(options ? { options } : {}) });
     flushDeferred();
+  };
+  // Recompute the FLEET/QUEUE facts of every held dispatch/intake tick from
+  // the LIVE store before a flush delivers it. Between generation and the
+  // busy-deferral flush the store can move (manual dispatch mid-window, an
+  // auto-dispatch, a completion flip): "QUEUE: N ready (…)" must never list
+  // items that are already active/running, and "FLEET: X free" must never
+  // forget runs that started meanwhile. refreshTickFacts returns the CURRENT
+  // truthful nudge or null (= no nudge applies anymore → drop the stale text
+  // instead of contradicting the live state).
+  const refreshDeferredFacts = (): void => {
+    for (const d of deferred) {
+      if (d.kind !== "tick" || !d.tick || d.drop) continue;
+      if (d.tick.reason !== "dispatch" && d.tick.reason !== "intake") continue;
+      const fresh = autopilot.refreshTickFacts(d.tick);
+      if (!fresh) {
+        d.drop = true; // generation-time facts are STALE by delivery — never present them
+        continue;
+      }
+      d.message = fresh.message;
+      d.tick = fresh;
+    }
   };
   const flushDeferred = (): void => {
     if (!deferred.length) return;
+    refreshDeferredFacts();
+    // De-dupe identical ticks within one flush: a busy window that saw both a
+    // nudge and a state-changing sweep can accumulate two dispatch ticks that
+    // refresh to the SAME current message — deliver it once.
+    const deliveredThisFlush = new Set<string>();
     const hold: typeof deferred = [];
     for (const d of deferred) {
+      if (d.drop) continue;
       if (d.kind === "user") {
         if (!opts.deliverUserMessage) continue; // no user-delivery on this host
         try {
@@ -145,8 +186,10 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
         }
         continue;
       }
+      if (deliveredThisFlush.has(d.message)) continue; // already delivered this flush
       const r = router.send(d.message, { bypassCooldown: true });
       if (r === "deferred") hold.push(d); // the runtime still rejected it
+      else if (r === "delivered") deliveredThisFlush.add(d.message);
       // "dropped" (interactive/loaded) — permanent, drop; "delivered" — done
     }
     deferred.length = 0;
@@ -155,12 +198,12 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
   /** Host-facing: defer a DIRECT user-message send (the /orchestrate injection,
    *  the toggle message) — delivered via deliverUserMessage at the settle. */
   const deferUserMessage = (message: string, options?: Record<string, unknown>): void => {
-    queueDeferred(message, "user", options);
+    queueDeferred(message, "user", undefined, options);
   };
-  const sendTick = (t: { message?: string } | null | undefined): void => {
+  const sendTick = (t: Tick | null | undefined): void => {
     if (!t?.message) return;
     const r = router.send(t.message);
-    if (r === "deferred") queueDeferred(t.message, "tick");
+    if (r === "deferred") queueDeferred(t.message, "tick", t); // hold the ENGINE tick — its facts refresh at delivery
   };
 
   // The auto-actions opt-out: env (AUTOPILOT_AUTO_DISPATCH=0) or the option.
@@ -232,7 +275,7 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       // preservation capture above already ran, so even a timed-out worker's
       // last commits were journalled while its branch still existed.
       try {
-        const zombies = autopilot.zombieReconcile(fleet?.totalActive ?? 0);
+        const zombies = autopilot.zombieReconcile(fleet?.totalActive); // undefined (RPC failed) must NOT act as a fake 0
         if (zombies.flippedKeys.length) {
           harnessTick([`zombie reconciliation flipped ${zombies.flippedKeys.join(", ")} to failed (no live run — verify partial work on pi-parallel-* branches before re-dispatch)`], fleet?.totalActive);
           // DECISION TICK per flip — the canonical one-line move record, in

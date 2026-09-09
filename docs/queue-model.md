@@ -96,6 +96,15 @@ Reason vocabulary: ticks arrive as `[orch-tick: <reason>]` — `dispatch` /
   the periodic 10-min sweep, and worker completions. The tick fires only for
   the MANUAL cases (high-risk or incomplete) — and then only when the
   harness left something for it.
+  - **Delivery-time facts (AUTOPILOT-6)**: the FLEET/QUEUE numbers are
+    recomputed from the live store when a tick is DELIVERED, not baked at
+    generation — a tick deferred by a busy session (flushed at the next
+    settle) can never claim "X free, N ready (…)" for items that are already
+    active/running. If the current state no longer warrants the nudge, the
+    stale message is dropped (the current intake/dispatch nudge, if any,
+    replaces it). Telemetry records each re-derivation as `tick-refresh`
+    (timestamped at delivery; the gap from the generation `tick` line is the
+    deferral window).
 - **intake** — approved count < `queueLowThreshold` (2) → "run a full intake
   scan, propose the next batch".
   - **Intake suppression**: while ANY proposal is pending (the user is
