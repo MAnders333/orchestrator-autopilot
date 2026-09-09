@@ -31,6 +31,7 @@ import {
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { applyPanelDecision, buildPanelDoc, type PanelActionId, type PanelItem, type PanelKind } from "../framework/panels.ts";
 import { loadStoreOrNew, queueLengths, resolveSeries } from "../queue-store.ts";
+import { formatDurationMs } from "../duration.ts";
 
 type Theme = ExtensionContext["ui"]["theme"];
 
@@ -400,6 +401,14 @@ export class DecisionPanel implements Component, Focusable {
         // and the human sees the repo's resolved series once the cwd is set
         if (it.seriesHint) {
           lines.push(...wrap(th.fg("muted", `   ↳ ${it.seriesHint}`), 4));
+        }
+        // Budget-governance row: the cap the item runs under (and, when a
+        // previous run was CUT OFF at it, the explicit budget-capped marker) —
+        // re-dispatch with a larger budget is the obvious next step.
+        if (it.timeoutMs) {
+          lines.push(t(it.budgetCapped
+            ? th.fg("error", `   budget ${formatDurationMs(it.timeoutMs)} — budget-capped: re-dispatch with a LARGER budget`)
+            : th.fg("dim", `   budget ${formatDurationMs(it.timeoutMs)}`)));
         }
         const hints = it.actions.map((a) => `[${PANEL_KEY[a]}] ${PANEL_LABEL[a]}`);
         lines.push("");

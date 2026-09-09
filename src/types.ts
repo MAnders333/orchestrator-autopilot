@@ -6,7 +6,15 @@
 // Types
 // ---------------------------------------------------------------------------
 
-export type TickReason = "dispatch" | "intake" | "review";
+export type TickReason = "dispatch" | "intake" | "review" | "failure" | "budget";
+
+// reason semantics:
+//   dispatch/intake — queue-capacity nudges (decideTick)
+//   review          — reviewer/verdict routing + stuck-review nudges
+//   failure         — a worker run FAILED (budget-capped or verdict) — the
+//                     operator must see it and re-dispatch / recover
+//   budget          — an ACTIVE run has consumed ~75%+ of its recorded
+//                     wall-clock budget (timeoutMs) — proactive cap warning
 
 export interface Tick {
   reason: TickReason;

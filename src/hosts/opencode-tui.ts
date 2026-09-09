@@ -27,6 +27,7 @@ import { join } from "node:path";
 import { resolveStateDir } from "../config.ts";
 import { applyPanelDecision, buildPanelDoc, type PanelActionId, type PanelItem, type PanelKind } from "../framework/panels.ts";
 import { loadStoreOrNew, queueLengths } from "../queue-store.ts";
+import { formatDurationMs } from "../duration.ts";
 import type { TuiPlugin } from "@opencode-ai/plugin/tui";
 
 // The plugin API surface we touch — kept local so the host can evolve it.
@@ -177,6 +178,11 @@ function renderPanelContent(api: TuiApi, ctl: PanelController): JSX.Element {
       // Destined-series hint (proposals view): provisional Q-<n> handles are
       // renamed at approval — shown here so the rename is never a surprise.
       if (it.seriesHint) lines.push(`    ↳ ${it.seriesHint}`);
+      if (it.timeoutMs) {
+        lines.push(it.budgetCapped
+          ? `    budget ${formatDurationMs(it.timeoutMs)} — budget-capped: re-dispatch with a LARGER budget`
+          : `    budget ${formatDurationMs(it.timeoutMs)}`);
+      }
       const hints = it.actions
         .map((a) => (a === "approve" ? "[a] approve" : a === "reject" ? "[r] reject" : a === "defer" ? "[d] defer" : a === "refine" ? "[e] refine" : "[x] re-dispatch"))
         .join("  ");

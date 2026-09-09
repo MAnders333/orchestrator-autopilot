@@ -15,6 +15,19 @@ import { join } from "node:path";
 
 export type QueueStatus = "proposal" | "approved" | "blocked" | "active" | "ai-review" | "human-review" | "failed" | "done" | "rejected";
 export type BlockerReason = "parked" | "serialized" | "merge" | "decision" | null;
+/** WHY an item reached `failed` — the failed=cap vs failed=verdict distinction
+ *  (BUDGET-GOVERNANCE). `budget-capped`: the worker run was CUT OFF by the
+ *  item's requested wall-clock budget (timeoutMs) mid-task — the failure says
+ *  nothing about the work, and the re-dispatch must run with a BIGGER budget.
+ *  `verdict`: the run ended with an unsuccessful verdict/exit (incl. a review
+ *  FAIL reaching the attempts cap). `zombie`: the run's completion event was
+ *  lost (fleet idle past grace). null = not failed, or a legacy/pre-governance
+ *  failure with no recorded cause. */
+export type FailCause = "budget-capped" | "verdict" | "zombie";
+
+export function isFailCause(v: unknown): v is FailCause {
+  return v === "budget-capped" || v === "verdict" || v === "zombie";
+}
 
 const STATUSES: QueueStatus[] = ["proposal", "approved", "blocked", "active", "ai-review", "human-review", "failed", "done", "rejected"];
 
@@ -46,6 +59,13 @@ export interface QueueItem {
   timeoutMs: number | null;
   /** re-dispatch attempt counter (review-FAIL cap is 5) */
   attempts: number;
+  /** Why this item reached `failed` (see FailCause). null when not failed or
+   *  a legacy failure with no recorded cause. Set by the event-driven flips
+   *  (worker completion, review-cap, zombie reconciliation) and cleared on any
+   *  transition OUT of failed — a stale cause must never ride into a fresh
+   *  run. The capped-failure path ALSO writes a human note, so both the
+   *  machine flag and the operator-visible text say 'budget-capped'. */
+  failCause?: FailCause | null;
   /** free-form notes/description — no schema constraints on content */
   notes: string;
   createdAt: string;
@@ -115,6 +135,7 @@ export function loadStore(stateDir: string): QueueStore | null {
         if (it.reviewerRunId === undefined) it.reviewerRunId = null;
         if (it.timeoutMs === undefined) it.timeoutMs = null;
         if (it.attempts === undefined) it.attempts = 0;
+        if (it.failCause === undefined) it.failCause = null;
         if (it.runId === undefined) it.runId = null;
         if (it.cwd === undefined) it.cwd = null;
         if (it.blocker === undefined) it.blocker = null;
@@ -222,6 +243,12 @@ export function queryItems(store: QueueStore, q: QueueQuery = {}): Array<Partial
       title: i.title,
       runId: i.runId,
       reviewerRunId: i.reviewerRunId, // the reviewer-in-flight fact — an ai-review item with a reviewerRunId is ALREADY dispatched (do NOT queue_review it)
+      // Budget-governance read facts: the cap the item runs under, and WHY it
+      // failed (budget-capped vs verdict) — the operator-facing 'panel' read
+      // must distinguish a run that died at its budget from one that failed on
+      // a verdict without loading notes.
+      timeoutMs: i.timeoutMs,
+      failCause: i.failCause ?? null,
       updatedAt: i.updatedAt,
     };
     if (q.includeNotes) {
@@ -374,6 +401,7 @@ export interface UpdatePatch {
   reviewerRunId?: string | null;
   timeoutMs?: number | null;
   attempts?: number;
+  failCause?: FailCause | null;
   title?: string;
   scope?: string;
   cwd?: string | null;
@@ -397,6 +425,12 @@ export function updateItem(store: QueueStore, key: string, patch: UpdatePatch, n
   }
   const from = item.status;
   const to = clean.status;
+  // Leaving `failed` (re-dispatch to active, verified-complete to done, human
+  // re-open to approved, drop to rejected) clears the failure cause — a stale
+  // 'budget-capped' flag must not describe the NEXT run of the same item.
+  // (A metadata-only patch with status undefined leaves the cause alone, as
+  // does a re-statement of status failed while the item stays failed.)
+  if (to !== undefined && to !== "failed") clean.failCause = null;
   // done/human-review/failed are terminal-ish for their runs: the AI review
   // is over at human-review, so clear stale run refs (a done item must not
   // keep pointing at a dead worker; the FAIL flip already nulls them; this

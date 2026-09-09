@@ -6,8 +6,8 @@
 // opencode: promptAsync injection).
 //
 // The MESSAGE is delivered as-is — core.ts's ticks already carry the
-// `[orch-tick: <reason>]` prefix (dispatch | intake | review); hosts must not
-// add another.
+// `[orch-tick: <reason>]` prefix (dispatch | intake | review | failure |
+// budget); hosts must not add another.
 
 export interface TickHostState {
   /** A live orchestrator session exists (pi: interactive TUI; opencode: a

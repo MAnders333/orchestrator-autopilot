@@ -27,11 +27,13 @@ import {
   itemByReviewerRunId,
   updateItem,
   type QueueStore,
+  type FailCause,
 } from "./queue-store.ts";
 import type { Tick, TickReason, CompletionEvent, DomainEvent, AutopilotResult } from "./types.ts";
 import type { AutopilotConfig } from "./config.ts";
 import { parseVerdict } from "./verdict.ts";
 import { collectRunIds } from "./run-ids.ts";
+import { formatDurationMs } from "./duration.ts";
 
 // The snapshot shape the tick engine consumes (derived from the queue store).
 // The legacy md parser (queue.ts) is RETIRED — state.md exists only as a
@@ -52,6 +54,14 @@ interface QueueState {
   /** Items awaiting the user's approval decision (status: proposal). */
   proposalsPending: number;
   ok: boolean;
+  /** Budget telemetry: ACTIVE items with a recorded wall-clock budget
+   *  (timeoutMs) — remaining/cap per run, so dispatch ticks can surface cap
+   *  risk (~75% used) before the run is cut off. Derived from the item's
+   *  updatedAt (the flip-to-active dispatch stamp ≈ run start). */
+  budget: Array<{ key: string; cap: number; remaining: number; elapsed: number; used: number }>;
+  /** Keys of FAILED items whose cause is budget-capped — the at-cap recovery
+   *  queue (re-dispatch with a bigger budget). */
+  budgetCappedFailed: string[];
 }
 
 
@@ -71,6 +81,9 @@ export class Autopilot {
   private lastTickHash = "";
   private lastSettledHash = "";
   private lastReviewTickAt = 0;
+  /** Runs already warned about approaching their budget (one warning per run
+   *  per Autopilot lifetime — the timer must not nag every sweep). */
+  private budgetWarned = new Set<string>();
 
   constructor(config: AutopilotConfig) {
     this.cfg = {
@@ -114,15 +127,36 @@ export class Autopilot {
 
     let flipped = false;
     let flippedKey = "";
+    let failCause: FailCause | null = null;
     const store = loadStore(this.cfg.stateDir);
     if (store) {
       for (const cand of candidates) {
         const it = itemByRunId(store, cand);
         if (it && it.status === "active") {
-          updateItem(store, it.key, { status: outcome });
+          // BUDGET-GOVERNANCE: make the FAIL cause EXPLICIT. A run that was
+          // cut off by its wall-clock budget (the runtime reported timedOut,
+          // or the run lived at/over the item's recorded timeoutMs) is a CAP
+          // failure — the work is unjudged and the recovery is a bigger-budget
+          // re-dispatch — NOT the same as a run that ended with an unsuccessful
+          // verdict. Recorded as the machine flag failCause + a human note.
+          if (outcome === "failed") {
+            failCause = workerFailCause(ev, it.timeoutMs, it.updatedAt, now);
+            const capNote = failCause === "budget-capped"
+              ? `[budget-capped] ${new Date(now).toISOString()} — worker run ${topRunId} hit the item's wall-clock budget` +
+                (it.timeoutMs ? ` (cap ${formatDurationMs(it.timeoutMs)}, timeoutMs ${it.timeoutMs}ms)` : " (runtime default)") +
+                ` and was CUT OFF mid-task — this is a CAP, not a verdict on the work. Partial work may exist on the pi-parallel-* branch (verify before re-dispatch). RE-DISPATCH WITH A BIGGER BUDGET: queue_update('${it.key}', {timeoutMs: <larger than ${it.timeoutMs ? `${it.timeoutMs}ms` : "the previous cap"}>}) then queue_dispatch — the recorded budget rides every dispatch lane.`
+              : `[failed: verdict] ${new Date(now).toISOString()} — worker run ${topRunId} ended unsuccessfully (not budget-capped). Read its output; verify partial work on the pi-parallel-* branch before re-dispatching (failed items are re-dispatchable: queue_dispatch).`;
+            updateItem(store, it.key, {
+              status: "failed",
+              failCause,
+              notes: it.notes ? `${it.notes}\n\n${capNote}` : capNote,
+            });
+          } else {
+            updateItem(store, it.key, { status: "ai-review" });
+          }
           flipped = true;
           flippedKey = it.key; // capture inside the loop — the FIRST matching item, not any same-status item
-          this.logEvent("flip", { key: it.key, runId: cand, outcome });
+          this.logEvent("flip", { key: it.key, runId: cand, outcome, failCause: failCause ?? undefined });
           break;
         }
       }
@@ -138,6 +172,39 @@ export class Autopilot {
     const domainEvents: DomainEvent[] = [];
     if (flipped) {
       domainEvents.push({ name: "orch:item-completed", data: { key: flippedKey, runId: topRunId, outcome } });
+      // A WORKER FAILURE must never be silent (the historical gap: children
+      // died at the budget default with no signal; recovery was archaeology).
+      // Surface it as a failure tick — the operator sees it was capped and the
+      // message routes a bigger-budget re-dispatch instead of generic
+      // fail-forward. The verdict path also ticks (a failed run is exactly
+      // when judgment is needed), without the budget-cap wording.
+      if (outcome === "failed") {
+        const item = loadStore(this.cfg.stateDir)?.items[flippedKey];
+        const cap = item?.timeoutMs ?? null;
+        domainEvents.push({ name: "orch:item-failed", data: { key: flippedKey, runId: topRunId, cause: failCause, timeoutMs: cap } });
+        const capped = failCause === "budget-capped";
+        return {
+          tick: {
+            reason: "failure",
+            message: capped
+              ? `[orch-tick: failure] ${flippedKey} FAILED — its worker run ${topRunId.slice(0, 8)} hit the item's wall-clock budget cap` +
+                (cap ? ` (${formatDurationMs(cap)})` : "") +
+                ` and was CUT OFF mid-task (budget-capped, NOT a verdict on the work). Verify partial work on the pi-parallel-* branch, then RE-DISPATCH WITH A BIGGER BUDGET: queue_update('${flippedKey}', {timeoutMs: ${cap ? `> ${cap}` : "<a larger budget>"}}) then queue_dispatch (or let auto-dispatch take it — the recorded budget rides every lane). Respond ≤2 lines.`
+              : `[orch-tick: failure] ${flippedKey} FAILED — its worker run ${topRunId.slice(0, 8)} ended unsuccessfully (verdict/exit, not budget-capped). Read the run's output and verify partial work on the pi-parallel-* branch before re-dispatching (failed items are re-dispatchable: queue_dispatch). Respond ≤2 lines.`,
+            facts: {
+              key: flippedKey,
+              outcome: "failed",
+              failCause,
+              budgetCapped: capped,
+              ...(cap !== null ? { timeoutMs: cap } : {}),
+            },
+          },
+          domainEvents,
+          flipped,
+          freedSlot,
+          reviewerCompleted: isReviewerRun,
+        };
+      }
       return { tick: null, domainEvents, flipped, freedSlot, reviewerCompleted: isReviewerRun };
     }
 
@@ -173,7 +240,13 @@ export class Autopilot {
         if (verdict === "FAIL") {
           const attempts = (matched.attempts ?? 0) + 1;
           if (attempts >= this.cfg.reviewCap) {
-            updateItem(store, matched.key, { status: "failed", attempts });
+            const causeNote = `[failed: verdict] ${new Date(now).toISOString()} — review FAIL at attempt ${attempts} (cap ${this.cfg.reviewCap}) — the work failed AI review ${attempts} times, not a budget cap. Apply the findings directly, re-scope, or drop.`;
+            updateItem(store, matched.key, {
+              status: "failed",
+              attempts,
+              failCause: "verdict",
+              notes: matched.notes ? `${matched.notes}\n\n${causeNote}` : causeNote,
+            });
             saveStore(this.cfg.stateDir, store);
             domainEvents.push({ name: "orch:verdict", data: { key: matched.key, verdict: "FAIL", attempts } });
             this.logEvent("flip", { key: matched.key, outcome: "failed", source: "verdict-cap" });
@@ -262,7 +335,7 @@ export class Autopilot {
    * store active items.
    */
   sweep(source: "settled" | "activate" | "timer" | "worker-done", now = this.now(), fleet?: { totalActive?: number }): AutopilotResult {
-    const snapshot = this.readQueueSnapshot();
+    const snapshot = this.readQueueSnapshot(now);
     // Occupied = ALL subagents dispatched from the orchestrator session —
     // workers, reviewers, scouts, plain subagent calls (the general case).
     //   - fleet.totalActive (pi-subagents status) is the AUTHORITATIVE count:
@@ -284,9 +357,24 @@ export class Autopilot {
     this.logEvent("sweep", { source, occupied, ready: eff.ready, ledger: this.ledger.size, fleetTotalActive: fleet?.totalActive });
 
     const tick = this.decideTick(eff, source, undefined, now, true, fleet?.totalActive);
-    if (!tick) return empty();
-    this.logEvent("tick", { reason: tick.reason, source });
-    return { tick, domainEvents: [], flipped: false, freedSlot: false, reviewerCompleted: false };
+    if (tick) {
+      this.logEvent("tick", { reason: tick.reason, source });
+      return { tick, domainEvents: [], flipped: false, freedSlot: false, reviewerCompleted: false };
+    }
+    // BUDGET TELEMETRY at the timer heartbeat: an ACTIVE budgeted run past
+    // ~75% of its wall-clock budget gets ONE proactive warning per run (the
+    // operator can steer it to wrap up / commit before the cap cuts it off)
+    // instead of the failure being the first signal. Nudged on the timer only
+    // (the completion path for the cap itself is event-driven + deduped); the
+    // warned set prevents a 10-minute nag for the same run.
+    if (source === "timer") {
+      const budgetTick = this.budgetWarningTick(eff.budget);
+      if (budgetTick) {
+        this.logEvent("tick", { reason: budgetTick.reason, source });
+        return { tick: budgetTick, domainEvents: [], flipped: false, freedSlot: false, reviewerCompleted: false };
+      }
+    }
+    return empty();
   }
 
   /**
@@ -320,6 +408,7 @@ export class Autopilot {
         `(run ${it.runId ?? "?"}): timeout/crash/lost completion event. Partial work may exist on pi-parallel-* branches — verify before re-dispatch.`;
       updateItem(store, it.key, {
         status: "failed",
+        failCause: "zombie",
         notes: it.notes ? `${it.notes}\n\n${evidence}` : evidence,
       });
       flippedKeys.push(it.key);
@@ -353,6 +442,32 @@ export class Autopilot {
       reason: "review",
       message,
       facts: { aiReview: aiKeys, humanReview: humanKeys, count: aiKeys.length + humanKeys.length, why },
+    };
+  }
+
+  /**
+   * Budget warning tick — ONE proactive per-run nudge at the timer heartbeat
+   * when an ACTIVE budgeted run has consumed ~75%+ of its recorded wall-clock
+   * budget. Warned keys are remembered for the Autopilot lifetime and pruned
+   * once the run leaves the at-risk set, so a re-dispatch that runs long again
+   * warns once more, but the same run is never nagged every 10 minutes.
+   */
+  private budgetWarningTick(budget: QueueState["budget"]): Tick | null {
+    const atRisk = budget.filter((b) => b.used >= 0.75);
+    const riskKeys = new Set(atRisk.map((b) => b.key));
+    // Prune runs that finished (or were re-dispatched below the line).
+    for (const k of this.budgetWarned) {
+      if (!riskKeys.has(k)) this.budgetWarned.delete(k);
+    }
+    const fresh = atRisk.filter((b) => !this.budgetWarned.has(b.key));
+    if (!fresh.length) return null;
+    for (const b of fresh) this.budgetWarned.add(b.key);
+    const pctOf = (used: number): string => (used >= 1 ? "100%+" : `${Math.floor(used * 100)}%`);
+    return {
+      reason: "budget",
+      message:
+        `[orch-tick: budget] ${fresh.map((b) => `${b.key} has used ~${pctOf(b.used)} of its ${formatDurationMs(b.cap)} wall-clock budget (~${formatDurationMs(b.remaining)} left)`).join("; ")} — a budget cap will cut the run off mid-task. Steer it to wrap up + commit, or plan the bigger-budget re-dispatch now. Not a user request; respond ≤2 lines.`,
+      facts: { budget: fresh.map((b) => ({ key: b.key, cap: b.cap, remaining: b.remaining, elapsed: b.elapsed, used: b.used })) },
     };
   }
 
@@ -396,12 +511,12 @@ export class Autopilot {
 
   // -- internals ------------------------------------------------------------
 
-  private readQueueSnapshot(): QueueState {
+  private readQueueSnapshot(now = this.now()): QueueState {
     const store = loadStore(this.cfg.stateDir);
     // No md fallback: state.md is retired (migration ran once at activation).
     // Missing store → empty snapshot → fail-safe to action (spurious tick costs
     // one turn; a missed one costs an idle slot).
-    return store ? storeToSnapshot(store) : emptyState();
+    return store ? storeToSnapshot(store, now) : emptyState();
   }
 
   private decideTick(
@@ -421,6 +536,16 @@ export class Autopilot {
     const slotsFree = Math.max(0, this.cfg.maxSlots - state.occupied);
     const ready = state.ready;
     const readyKeys = state.approved.map((a) => a.key); // approved = dispatchable (the fold)
+    // BUDGET-GOVERNANCE telemetry: any ACTIVE run past ~75% of its recorded
+    // wall-clock budget is cap-risk — name it in the dispatch message so the
+    // operator can steer/commit (or plan a bigger-budget re-dispatch) before
+    // the cap cuts the run off. Facts always carry the full per-run
+    // remaining/cap rows + the failed-at-cap recovery keys.
+    const atRisk = state.budget.filter((b) => b.used >= 0.75);
+    const pctOf = (used: number): string => (used >= 1 ? "100%+" : `${Math.floor(used * 100)}%`);
+    const budgetLine = atRisk.length
+      ? ` BUDGET: ${atRisk.map((b) => `${b.key} at ~${pctOf(b.used)} of its ${formatDurationMs(b.cap)} cap (~${formatDurationMs(b.remaining)} left)`).join("; ")} — cap risk: steer it to wrap up + commit, or plan a bigger-budget re-dispatch.`
+      : "";
     // Cross-check: the fleet counts ALL session subagents; when it sees runs
     // the ledger/store haven't attributed (plain subagent calls, scouts), flag
     // it so the orchestrator can run `subagent status`. Occupied itself is the
@@ -441,8 +566,22 @@ export class Autopilot {
           `[orch-tick: dispatch] FLEET: ${state.occupied}/${this.cfg.maxSlots} subagent runs active (workers + reviewers + scouts), ${slotsFree} free. ` +
           `QUEUE: ${ready} ready (${readyKeys.join(", ") || "none"}).` +
           reconcile +
+          budgetLine +
           ` Rule: a slot is free + queue has ready work → dispatch it. System ping: run your loop. Respond ≤2 lines. Not a user request.`,
-        facts: { slotsFree, occupied: state.occupied, ready, readyKeys, source, runId, fleetTotalActive },
+        facts: {
+          slotsFree,
+          occupied: state.occupied,
+          ready,
+          readyKeys,
+          source,
+          runId,
+          fleetTotalActive,
+          // Budget health: per-active-run remaining budget + cap (ms) and the
+          // failed-at-cap recovery keys (failed=cap vs failed=verdict is the
+          // failCause flag on each failed item).
+          ...(state.budget.length ? { budget: state.budget.map((b) => ({ key: b.key, cap: b.cap, remaining: b.remaining, elapsed: b.elapsed, used: b.used })) } : {}),
+          ...(state.budgetCappedFailed.length ? { budgetCapped: state.budgetCappedFailed } : {}),
+        },
       };
     }
 
@@ -513,12 +652,29 @@ export class Autopilot {
  * Occupied = ALL subagents the queue has in flight: active items (workers) +
  * reviewing items with a reviewer dispatched (reviewerRunId set). This is the
  * store fallback for the fleet number — the fleet RPC totalActive is preferred
- * and covers runs the queue doesn't track (scouts, plain subagent calls). */
-export function storeToSnapshot(store: QueueStore): QueueState {
+ * and covers runs the queue doesn't track (scouts, plain subagent calls).
+ * `now` also drives the budget telemetry: elapsed = now − the item's
+ * flip-to-active updatedAt stamp (≈ dispatch time), remaining = cap − elapsed. */
+export function storeToSnapshot(store: QueueStore, now = Date.now()): QueueState {
   const items = Object.values(store.items);
   const active = items
     .filter((i) => i.status === "active")
     .map((i) => ({ key: i.key, runId: i.runId ?? undefined, status: "working" as const, title: i.title, line: "", lineIndex: 0, section: "active" as const }));
+  const budget = active
+    .filter((a) => {
+      const it = store.items[a.key];
+      return it.timeoutMs !== null && it.timeoutMs !== undefined && it.timeoutMs > 0;
+    })
+    .map((a) => {
+      const it = store.items[a.key];
+      const cap = it.timeoutMs as number;
+      const startedAt = Date.parse(it.updatedAt || "");
+      const elapsed = Number.isFinite(startedAt) ? Math.max(0, now - startedAt) : 0;
+      return { key: a.key, cap, elapsed, remaining: Math.max(0, cap - elapsed), used: cap > 0 ? elapsed / cap : 0 };
+    });
+  const budgetCappedFailed = items
+    .filter((i) => i.status === "failed" && i.failCause === "budget-capped")
+    .map((i) => i.key);
   const approved = items
     .filter((i) => i.status === "approved")
     .map((i) => ({ key: i.key, title: i.title, line: "", lineIndex: 0 }));
@@ -526,7 +682,7 @@ export function storeToSnapshot(store: QueueStore): QueueState {
   const occupied = active.length + reviewingWithReviewer.length;
   const ready = approved.length; // approved = dispatchable (the fold)
   const proposalsPending = items.filter((i) => i.status === "proposal").length;
-  return { active, approved, occupied, ready, proposalsPending, ok: true };
+  return { active, approved, occupied, ready, proposalsPending, ok: true, budget, budgetCappedFailed };
 }
 
 function stateHash(state: QueueState): string {
@@ -542,9 +698,24 @@ function stateHash(state: QueueState): string {
 }
 
 function emptyState(): QueueState {
-  return { active: [], approved: [], occupied: 0, ready: 0, proposalsPending: 0, ok: false };
+  return { active: [], approved: [], occupied: 0, ready: 0, proposalsPending: 0, ok: false, budget: [], budgetCappedFailed: [] };
 }
 
 function empty(): AutopilotResult {
   return { tick: null, domainEvents: [], flipped: false, freedSlot: false, reviewerCompleted: false };
+}
+
+/** Classify a FAILED worker run: a budget CAP cut it off (runtime reported
+ *  timedOut, or the run lived at/over the item's recorded timeoutMs — the
+ *  deterministic backstop when the runtime does not say 'timed out'), versus
+ *  an unsuccessful verdict/exit. Elapsed comes from the item's updatedAt (the
+ *  flip-to-active stamp ≈ dispatch time); only items with a recorded budget
+ *  are ever classified by elapsed. */
+function workerFailCause(ev: CompletionEvent, timeoutMs: number | null | undefined, updatedAt: string, now: number): FailCause {
+  if (ev.timedOut === true) return "budget-capped";
+  if (timeoutMs && timeoutMs > 0) {
+    const startedAt = Date.parse(updatedAt || "");
+    if (Number.isFinite(startedAt) && now - startedAt >= timeoutMs) return "budget-capped";
+  }
+  return "verdict";
 }

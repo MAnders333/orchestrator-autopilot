@@ -57,6 +57,13 @@ export interface PanelItem {
   /** The human-readable summary: scope first line for a proposal, title +
    *  scope head for a review item. */
   summary: string;
+  /** Budget-governance row facts: the item's recorded wall-clock budget
+   *  (timeoutMs, null = unset → runtime default) and whether a previous run
+   *  FAILED because it hit that budget (failCause budget-capped) rather than
+   *  on a verdict. Rows render these so a bigger-budget re-dispatch is the
+   *  obvious next step, never a silent uniform cap. */
+  timeoutMs: number | null;
+  budgetCapped: boolean;
   /** Where to navigate to act on this item (repo, branch@tip diffs, files). */
   targets: PanelTarget[];
   /** The actions this item currently supports (derived from its status). */
@@ -176,6 +183,8 @@ export function buildPanelDoc(stateDir: string, kind: PanelKind): PanelDocument 
         cwd: i.cwd,
         updatedAt: i.updatedAt,
         summary: scopeHead(i.scope) || i.title,
+        timeoutMs: i.timeoutMs ?? null,
+        budgetCapped: i.failCause === "budget-capped",
         targets: [{ label: i.cwd ?? "no repo yet — refine to set cwd" }],
         seriesHint: seriesHintFor(stateDir, i),
         actions: actionsForStatus(i.status),
@@ -199,6 +208,8 @@ export function buildPanelDoc(stateDir: string, kind: PanelKind): PanelDocument 
           updatedAt: i.updatedAt,
           summary: `${scopeHead(i.scope) || i.title}${i.notes ? ` — ${scopeHead(i.notes, 120)}` : ""}`,
           targets: allTargets,
+          timeoutMs: i.timeoutMs ?? null,
+          budgetCapped: i.failCause === "budget-capped",
           actions: actionsForStatus(i.status),
           fullScope: i.scope ?? "",
           fullNotes: i.notes ?? "",
