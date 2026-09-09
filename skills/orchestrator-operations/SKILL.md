@@ -30,6 +30,15 @@ only your own backend's notes.
   low/medium risk is dispatched AUTOMATICALLY when a slot frees (the task =
   `KEY: <key>` + the scope). Write good scopes at proposal/approval time —
   that is where the worker prompt lives now.
+- **Intake proposals carry their repo NOW (cwd at proposal)**: any proposal
+  that names a repo is `queue_add`ed with that repo as `cwd` — resolve the
+  root first (`git rev-parse --show-toplevel` in the repo) and cite it in the
+  evidence. The key then allocates its REAL series at proposal time
+  (registry → history → repo-name slug) — no provisional `Q-<n>` handle, no
+  rename surprise at approval. Only a genuinely repo-less candidate is added
+  without a `cwd`; the `queue_add` result calls that key out explicitly
+  (PROVISIONAL — rename at approval), because approving it (where `cwd`
+  becomes mandatory) renames the key into the repo's real series.
 - **The approval gate makes this possible**: reaching `approved` REQUIRES a
   non-empty `scope` + `cwd` (enforced by `queue_add`/`queue_update` — not skill
   guidance). Approved = fully specified = the harness can act without you.`

@@ -244,6 +244,11 @@ export class DecisionPanel implements Component, Focusable {
         for (const target of it.targets.slice(0, 2)) {
           lines.push(...wrap(th.fg("dim", `   ↳ ${target.label}`), 4));
         }
+        // Destined-series hint (proposals view): provisional Q-<n> handles are
+        // renamed at approval — shown here so the rename is never a surprise.
+        if (it.seriesHint) {
+          lines.push(...wrap(th.fg("dim", `   ◈ ${it.seriesHint}`), 4));
+        }
         const hints = it.actions.map((a) => `[${PANEL_KEY[a]}] ${PANEL_LABEL[a]}`);
         lines.push(t(th.fg("dim", `   ${hints.join("  ")}`)));
         lines.push("");

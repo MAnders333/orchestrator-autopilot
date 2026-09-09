@@ -168,6 +168,9 @@ function renderPanelContent(api: TuiApi, ctl: PanelController): JSX.Element {
       lines.push(`${selected ? "▸" : " "} ${it.key}${risk}`);
       lines.push(`    ${it.summary}`);
       if (it.targets[0]) lines.push(`    ↳ ${it.targets[0].label}`);
+      // Destined-series hint (proposals view): provisional Q-<n> handles are
+      // renamed at approval — shown here so the rename is never a surprise.
+      if (it.seriesHint) lines.push(`    ◈ ${it.seriesHint}`);
       const hints = it.actions
         .map((a) => (a === "approve" ? "[a] approve" : a === "reject" ? "[r] reject" : a === "defer" ? "[d] defer" : a === "refine" ? "[e] refine" : "[x] re-dispatch"))
         .join("  ");

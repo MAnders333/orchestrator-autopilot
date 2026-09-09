@@ -17,7 +17,7 @@
 // without that path.
 // -------------------------------------------------------------------------
 
-import { loadStoreOrNew, saveStore, updateItem, type QueueItem } from "../queue-store.ts";
+import { loadStoreOrNew, saveStore, updateItem, resolveSeries, type QueueItem } from "../queue-store.ts";
 import { approvalReady } from "../tools/queue-ops.ts";
 import { humanReviewTargetsFor } from "./worktree-preservation.ts";
 
@@ -45,6 +45,11 @@ export interface PanelItem {
   targets: PanelTarget[];
   /** The actions this item currently supports (derived from its status). */
   actions: PanelActionId[];
+  /** Proposals view only — what happens to the key at approval: real-series
+   *  keys stay put; provisional Q-<n> handles (repo-less proposals) are
+   *  RENAMED into the repo's real series (registry → history → slug). Shown
+   *  so an approval-time rename is never a surprise. */
+  seriesHint?: string;
 }
 
 export interface PanelSection {
@@ -86,6 +91,25 @@ function toTargets(lines: string[]): PanelTarget[] {
   });
 }
 
+/** The destined-series hint for the proposals feed — resolved against the
+ *  SAME store + registry the approved transition renames with, so the panel
+ *  can never predict a different series than the one the rename produces.
+ *  - provisionalKey item (repo-less proposal): the Q-<n> handle is temporary
+ *    — approval with a cwd renames it into the repo's real series.
+ *  - cwd-bearing item: the key is ALREADY in its real series (allocated at
+ *    queue_add from cwd); approval keeps it.
+ *  - otherwise (legacy/odd items): no hint. */
+export function seriesHintFor(stateDir: string, item: QueueItem): string | null {
+  if (item.provisionalKey) {
+    return `'${item.key}' is a PROVISIONAL handle (repo-less proposal — no cwd): at approval the key is RENAMED into the repo's real series (registry → history → slug). Expect the key to change.`;
+  }
+  if (item.cwd) {
+    const series = resolveSeries(stateDir, item.cwd);
+    return `real series key — cwd ${item.cwd} resolves to series ${series || "Q"} (registry → history → slug); approval does NOT rename.`;
+  }
+  return null;
+}
+
 /** Build the panel document for one view, fed directly from queue state. */
 export function buildPanelDoc(stateDir: string, kind: PanelKind): PanelDocument {
   const store = loadStoreOrNew(stateDir);
@@ -96,17 +120,21 @@ export function buildPanelDoc(stateDir: string, kind: PanelKind): PanelDocument 
   if (kind === "proposals") {
     document.sections.push({
       title: "Proposals — awaiting your call (approve / reject / defer / refine)",
-      items: items.map((i) => ({
-        key: i.key,
-        title: i.title,
-        status: i.status,
-        risk: i.risk,
-        cwd: i.cwd,
-        updatedAt: i.updatedAt,
-        summary: scopeHead(i.scope) || i.title,
-        targets: [{ label: i.cwd ?? "no repo yet — refine to set cwd" }],
-        actions: actionsForStatus(i.status),
-      })),
+      items: items.map((i) => {
+        const hint = seriesHintFor(stateDir, i);
+        return {
+          key: i.key,
+          title: i.title,
+          status: i.status,
+          risk: i.risk,
+          cwd: i.cwd,
+          updatedAt: i.updatedAt,
+          summary: scopeHead(i.scope) || i.title,
+          targets: [{ label: i.cwd ?? "no repo yet — refine to set cwd" }],
+          actions: actionsForStatus(i.status),
+          ...(hint ? { seriesHint: hint } : {}),
+        };
+      }),
     });
   } else {
     document.sections.push({

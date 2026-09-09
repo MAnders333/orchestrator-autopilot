@@ -156,6 +156,10 @@ describe("queue_add — key auto-allocation", () => {
     saveStore(dir, s);
     const added = await queueAdd(ctx, { title: "brainstormed proposal" }); // no cwd, no series → provisional Q
     expect(added.text).toMatch(/Q-\d+/);
+    // the tool text CALLS OUT the provisional handle — never a silent Q-<n>
+    expect(added.text.toLowerCase()).toContain("provisional");
+    expect(added.text.toLowerCase()).toContain("rename");
+    expect(added.text).toContain("git rev-parse"); // the fix hint: pass cwd to get the real key now
     const before = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8")).items;
     const keyBefore = Object.keys(before).find((k) => k.startsWith("Q-"))!;
     expect(before[keyBefore].provisionalKey).toBe(true);
@@ -181,9 +185,23 @@ describe("queue_add — key auto-allocation", () => {
     expect(after["MY-KEY"].provisionalKey).toBeUndefined();
   });
 
+  test("cwd at proposal → REAL series key from history (no Q, no provisional note)", async () => {
+    // the repo already has a series (history) — the proposal must land in it NOW
+    const s = ctx.storeOrNew();
+    addItem(s, item("B48-EARLIER", { cwd: "/repo/b" }));
+    saveStore(dir, s);
+    const r = await queueAdd(ctx, { title: "repo-backed proposal", cwd: "/repo/b" });
+    expect(r.text).toMatch(/^added 'B-\d+' \(proposal\)/);
+    expect(r.text.toLowerCase()).not.toContain("provisional");
+    const items = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8")).items;
+    const key = Object.keys(items).find((k) => k.startsWith("B-"))!;
+    expect(items[key].provisionalKey).toBeUndefined(); // real series key at proposal time
+  });
+
   test("provisional in the RIGHT series stays put (marker cleared, no rename)", async () => {
     const r = await queueAdd(ctx, { title: "cwd known at proposal", cwd: "/repo/z" }); // slug series Z-1, NOT provisional
     expect(r.text).toContain("Z-1");
+    expect(r.text.toLowerCase()).not.toContain("provisional");
     const after = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8")).items;
     expect(after["Z-1"].provisionalKey).toBeUndefined(); // cwd was present → real series immediately
   });

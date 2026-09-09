@@ -111,9 +111,17 @@ value · urgency · risk · runId · **notes** (free-form — no schema constrai
 content; use it for descriptions, rationale, parking reasons) · createdAt ·
 updatedAt.
 
-**Key allocation:** omit `key` and pass `series` (e.g. `"B"`) — the harness
-allocates the next sequential id `B-<max+1>` (hand-numbering collides). Which
-series belongs to which repo/workstream: read the **queue-id-series** skill.
+**Key allocation:** pass `cwd` — the target repo's root, resolved with
+`git rev-parse --show-toplevel` — and the harness resolves the series
+(registry → history → repo-name slug) and allocates the real sequential id
+`B-<max+1>` AT PROPOSAL TIME (hand-numbering collides). Intake proposals that
+name a repo MUST do this, so the proposal carries its real series key
+immediately. Only a genuinely repo-less proposal (home repo not yet decided)
+is added without `cwd`; it gets a provisional `Q-<n>` handle that the
+`queue_add` result calls out explicitly, and the approved transition — where
+`cwd` becomes mandatory — renames it into the repo's real series. Explicit
+`series` is for starting a NEW workstream only. Which series belongs to which
+repo/workstream: read the **queue-id-series** skill.
 
 **Transition ownership** (machine vs judgment — do not blur this line):
 
@@ -163,10 +171,22 @@ proposal cites the exact file/commit/line. No evidence = no proposal.
 
 **Diff scan:** compare against the existing Backlog in state.md. Surface only NEW or CHANGED items — don't re-propose what's already queued.
 
+**Every repo-naming proposal is added WITH its repo as `cwd`.** Before calling
+`queue_add` on any candidate that names or belongs to a project, resolve the
+repo root — `git rev-parse --show-toplevel` run inside that repo (or
+`git -C <path> rev-parse --show-toplevel`) — and pass it as `cwd`. The key then
+allocates its REAL series at proposal time (registry → history → slug): no
+provisional `Q-<n>` handle, no rename surprise at approval. Cite the resolved
+repo root in the proposal's Evidence line. Only a genuinely repo-less
+candidate (home repo not yet decided) is added without `cwd` — and the
+`queue_add` result then marks the key PROVISIONAL, rename-at-approval, so it
+is never a silent surprise.
+
 **For each candidate, produce a proposal entry:**
 - Source + id (ticket key, action item id, doc title, MR number)
 - Title (1 line)
-- Evidence (a quote from the source — the exact action item text, ticket description, doc paragraph, or transcript line)
+- Evidence (a quote from the source — the exact action item text, ticket description, doc paragraph, or transcript line; include the repo root when the work lives in one)
+- Repo/cwd: the resolved repo root (`git rev-parse --show-toplevel`) — REQUIRED whenever the candidate names a repo; omit only for genuinely repo-less candidates
 - Draft scope (what a worker would actually do — the concrete task, not the ticket title)
 - Value: H/M/L — tied to a `goals.json` priority id (if it doesn't align to any, it's L)
 - Urgency: H/M/L — based on deadline, staleness, or blocking status
@@ -180,7 +200,7 @@ This is where you generate insights the user might miss — work that hasn't pop
 - Cross-reference sources: an action item mentions a dependency that has no Jira ticket → the gap is the candidate. A meeting transcript raises a risk ("we should handle X before the UF migration") that never became an action item → that's a candidate.
 - Apply industry standards: you know what a healthy data pipeline, marketing measurement stack, or AI enablement program looks like. If you see a gap between the current state and the standard, that's a candidate — but cite the standard and the current-state evidence.
 - Every beyond-source proposal MUST cite concrete evidence: which source(s), which quote/line, which goals.json priority it advances. No evidence = no proposal.
-- Label beyond-source proposals distinctly: `B1: [BEYOND] <title> — ...` so the user applies extra scrutiny.
+- Label beyond-source proposals distinctly: append `[BEYOND]` to the proposal's real key (`B-42: [BEYOND] <title> — ...`) so the user applies extra scrutiny.
 
 **Cadence:** beyond-source synthesis runs on deliberate deep scans — the user says
 `/orchestrate scan --beyond`, asks for a weekly review, **or an `[orch-tick: intake]`
@@ -202,21 +222,31 @@ sends) still surface a final `Dispatch? yes / steer / stop` before launch. Mark 
 
 ### How items get into the queue
 
-Present intake proposals in priority order (value × urgency; first-sourced first). For each:
+Candidates are added at intake time (`queue_add`, status=proposal) with their
+repo as `cwd` — so each one already holds its REAL series key (e.g. `B-42`),
+except genuinely repo-less candidates (provisional `Q-<n>`, called out by the
+add). Present them in priority order (value × urgency; first-sourced first).
+For each:
 ```
-B1: [<source>] "<task title>"
+B-42: [<source>] "<task title>"
+    Repo: <resolved repo root — git rev-parse --show-toplevel>
     Evidence: <exact source quote — action item text, ticket/doc/transcript line, git state, ...>
     Scope: "<the concrete worker prompt — this IS what gets dispatched>"
     Value: H/M/L (<goals.json priority id>)  Urgency: H/M/L  Risk: low/med/high
     Add to queue? (yes / no / redirect: <new scope>)
 ```
 
-The user says:
-- `yes` / `approve B1` → `queue_update(B1, { status: "approved" })` (or `queue_add` if it was never stored)
-- `no` / `drop B1` → `queue_update(B1, { status: "rejected" })`
-- `redirect B1: <new scope>` → `queue_update(B1, { status: "approved", scope: <new> })`
-- `add goal: <X>` → `queue_add(<key>, { status: "approved", title, scope, ... })`
+The user says (use the item's real key — approving it does NOT rename it):
+- `yes` / `approve B-42` → `queue_update(B-42, { status: "approved" })` (or `queue_add` if it was never stored)
+- `no` / `drop B-42` → `queue_update(B-42, { status: "rejected" })`
+- `redirect B-42: <new scope>` → `queue_update(B-42, { status: "approved", scope: <new> })`
+- `add goal: <X>` → `queue_add(<key>, { status: "approved", title, scope, cwd: <repo>, ... })`
 - `approve all low/med` → batch `queue_update` all non-high-risk items to approved
+
+The ONLY rename is the provisional path: approving a repo-less `Q-<n>`
+requires the missing `cwd`, and the key then renames into the repo's real
+series (registry → history → slug) — recorded in the item's notes and echoed
+by the tool result.
 
 The orchestrator keeps the buffer full: when Approved drops below ~2 ready items AND
 Backlog has candidates, propose the next batch (P4 auto-refill).

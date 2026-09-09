@@ -72,6 +72,19 @@ describe("DecisionPanel renders width-safely from queue state", () => {
     expect(Math.max(...lineWidths(narrow))).toBeLessThanOrEqual(60);
   });
 
+  test("proposals render the destined-series hint (real keys stable; provisional Q-<n> rename called out)", () => {
+    const { panel } = setup([
+      item({ key: "B-42", status: "proposal", scope: "parse the thing", cwd: "/tmp/repo-b" }),
+      item({ key: "Q-3", status: "proposal", scope: "repo-less idea", provisionalKey: true }),
+    ]);
+    const text = panel.render(80).join("\n");
+    expect(text).toContain("B-42");
+    expect(text.toLowerCase()).toContain("does not rename"); // approval keeps real-series keys
+    expect(text).toContain("Q-3");
+    expect(text.toLowerCase()).toContain("provisional"); // the repo-less handle is called out
+    expect(Math.max(...lineWidths(panel.render(60)))).toBeLessThanOrEqual(60); // hint wraps, no overflow
+  });
+
   test("empty view says all clear; no crash at render", () => {
     const { panel } = setup([item({ key: "A1", status: "approved" })]);
     const lines = panel.render(80);

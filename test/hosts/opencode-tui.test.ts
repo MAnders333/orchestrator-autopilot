@@ -129,6 +129,8 @@ describe("opencode TUI plugin registration + state-dir resolution", () => {
     const text = [setup.externalOutput.takeText(), setup.captureCharFrame()].join("\n");
     expect(text).toContain("P1");
     expect(text).toContain("Rewrite the parser");
+    // the destined-series hint renders on the proposal line (repo-backed: stable)
+    expect(text.toLowerCase()).toContain("does not rename");
   });
 
   test("resolves the state dir from the opencode config's orchestrate command (config-carried)", () => {

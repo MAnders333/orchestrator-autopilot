@@ -60,6 +60,28 @@ describe("buildPanelDoc — the feed from queue state", () => {
     expect(p1.targets[0].label).toBe("/tmp/repo");
   });
 
+  test("proposals view carries the destined-series hint — real keys stay put, provisional Q-<n> is called out", () => {
+    const { dir } = dirWith([
+      // repo-backed proposal: key allocated from cwd at queue_add → real series B
+      item({ key: "B-42", status: "proposal", scope: "task", cwd: "/tmp/repo-b", updatedAt: "2026-09-01T09:00:00.000Z" }),
+      // genuinely repo-less proposal: provisional handle, rename at approval
+      item({ key: "Q-3", status: "proposal", scope: "brainstorm", cwd: null, provisionalKey: true, updatedAt: "2026-09-01T09:05:00.000Z" }),
+      item({ key: "H1", status: "human-review", scope: "work", cwd: "/tmp/repo-h" }),
+    ]);
+    const doc = buildPanelDoc(dir, "proposals");
+    const byKey = Object.fromEntries(doc.sections[0].items.map((i) => [i.key, i]));
+    // real-series key: hint confirms approval keeps it (no rename surprise)
+    expect(byKey["B-42"].seriesHint).toContain("does NOT rename");
+    expect(byKey["B-42"].seriesHint).toContain("series B"); // destined series resolved from the repo (registry → history → slug)
+    // provisional handle: the rename at approval is announced up front
+    expect(byKey["Q-3"].seriesHint?.toLowerCase()).toContain("provisional");
+    expect(byKey["Q-3"].seriesHint?.toLowerCase()).toContain("renamed");
+    expect(byKey["Q-3"].seriesHint).toContain("registry → history → slug");
+    // the human-review view carries no series hint (keys there are final)
+    const hr = buildPanelDoc(dir, "human-review");
+    expect(hr.sections[0].items[0].seriesHint).toBeUndefined();
+  });
+
   test("human-review view shows ONLY human-review items with navigation targets", () => {
     const { dir } = dirWith([
       item({ key: "H1", status: "human-review", title: "findings doc", scope: "Produce the findings report", cwd: "/tmp/repo", notes: "wrote docs/findings.md" }),

@@ -149,7 +149,14 @@ export async function queueAdd(ctx: QueueOpsCtx, params: Record<string, unknown>
       ...(provisional ? { provisionalKey: true } : {}),
     });
     saveStore(ctx.stateDir, store);
-    return { text: `added '${key}' (${status})`, details: {} };
+    // Provisional keys are ALWAYS called out in the tool text: a repo-less
+    // proposal gets a Q-<n> handle by necessity (nothing to derive a series
+    // from), but the caller must know it is temporary — approval with a cwd
+    // RENAMES it into the repo's real series (registry → history → slug).
+    const provisionalNote = provisional
+      ? ` — NOTE: '${key}' is a PROVISIONAL handle (no cwd — repo-less proposal). At approval, where cwd becomes mandatory, the key is RENAMED into the repo's real series (registry → history → slug). Pass cwd (git rev-parse --show-toplevel of the target repo) to queue_add to get a stable real-series key now.`
+      : "";
+    return { text: `added '${key}' (${status})${provisionalNote}`, details: {} };
   } catch (e) {
     return err(e, "queue_add");
   }
