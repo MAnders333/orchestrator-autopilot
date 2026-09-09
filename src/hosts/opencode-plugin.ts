@@ -71,6 +71,9 @@ export interface OpenCodeFramework {
   schedules: ReturnType<typeof createScheduleManager>;
   /** The orchestrator's session settled (session.idle) → settled sweep. */
   onSettled(): void;
+  /** Explicit activation sweep (/autopilot on) — the harness fills free slots
+   *  immediately instead of waiting for the first idle/timer (AUTOPILOT-9). */
+  activate(): void;
   /** Feed a session event (busy tracking + settled + tick target). */
   handleSessionEvent(event: unknown): void;
   dispose(): void;
@@ -251,6 +254,7 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
     tools,
     schedules,
     onSettled: () => runner.onSettled(),
+    activate: () => runner.activate(),
     handleSessionEvent(event: unknown) {
       const e = event as { type?: string; properties?: { sessionID?: string; status?: { type?: string } } };
       const sid = e.properties?.sessionID;
@@ -360,6 +364,10 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
         } else if ((r.mode === "on" || r.mode === "off") && sid) {
           schedules.cancel(sid); // explicit toggle cancels a pending schedule
         }
+        if (r.mode === "on") fw.activate(); // activation sweep: the harness fills
+        // free slots immediately instead of waiting for the first idle/timer
+        // (AUTOPILOT-9). Tick delivery is gated on the session, so pre-idle it
+        // only dispatches.
         return r.message;
       } catch (err) {
         return `autopilot failed: ${err instanceof Error ? err.message : String(err)}`;

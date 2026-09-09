@@ -481,3 +481,122 @@ describe("the shared autopilot gate (toggle off → harness idle)", () => {
     runner.stop();
   });
 });
+
+describe("AUTOPILOT-9: auto-dispatch fills free slots on EVERY free-slot window (idle slots never strand approved items)", () => {
+  // A recording fixture: real store + real Autopilot + real runner; the only
+  // mock is the backend (spawn/fleet RPC), exactly like the pi host wires it.
+  function quickSetup(over: { enabled?: boolean } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), "orch-runner-a9-"));
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(newStore()));
+    const spawns: Array<{ task: string; cwd?: string }> = [];
+    const backend: SubagentBackend = {
+      spawn: async (task, o) => {
+        spawns.push({ task, cwd: o?.cwd });
+        return `run-${spawns.length}`;
+      },
+      fleetStatus: async () => ({ totalActive: 0 }),
+      steer: async () => "req",
+      asyncDirFor: () => null,
+    };
+    const delivered: string[] = [];
+    const runner = createFrameworkRunner({
+      stateDir: dir,
+      autopilot: new Autopilot({ stateDir: dir }),
+      backend,
+      host: { interactive: () => true, loaded: () => true, busy: () => false, compacting: () => false },
+      deliver: (m) => delivered.push(m),
+      enabled: () => over.enabled ?? true,
+      sweepIntervalMs: 0,
+    });
+    const save = (items: Array<Record<string, unknown>>) => {
+      const s = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+      for (const it of items) addItem(s, it as never);
+      writeFileSync(join(dir, "queue.json"), JSON.stringify(s));
+    };
+    const load = () => JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+    return { dir, spawns, delivered, runner, save, load };
+  }
+  function eligible(key: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      key,
+      title: key.toLowerCase(),
+      status: "approved",
+      blocker: null,
+      scope: "do the thing",
+      cwd: "/tmp/repo",
+      evidence: "",
+      value: "",
+      urgency: "",
+      risk: "low",
+      runId: null,
+      reviewerRunId: null,
+      attempts: 0,
+      notes: "",
+      createdAt: "a",
+      updatedAt: "b",
+      ...over,
+    };
+  }
+
+  test("TIMER sweep with a free slot auto-dispatches the eligible item (the old code only filled on worker-done)", async () => {
+    const f = quickSetup();
+    f.save([eligible("A1")]);
+    f.runner.onTimer(); // idle periodic sweep — a free slot + approved work
+    await new Promise((r) => setTimeout(r, 80));
+    expect(f.spawns.length).toBe(1); // the harness acted WITHOUT any worker-done event
+    expect(f.spawns[0].task).toContain("KEY: A1");
+    expect(f.spawns[0].cwd).toBe("/tmp/repo");
+    expect(f.load().items["A1"].status).toBe("active");
+    const harness = f.delivered.find((m) => m.includes("[orch-tick: harness]"));
+    expect(harness).toBeTruthy();
+    expect(harness).toContain("dispatched A1");
+  });
+
+  test("SETTLED sweep (an orchestrator turn ended) with a free slot + approved work auto-dispatches too", async () => {
+    const f = quickSetup();
+    f.save([eligible("B1")]);
+    f.runner.onSettled();
+    await new Promise((r) => setTimeout(r, 80));
+    expect(f.spawns.length).toBe(1);
+    expect(f.load().items["B1"].status).toBe("active");
+  });
+
+  test("activate() (the /autopilot on sweep) fills free slots IMMEDIATELY — the early-ON window no longer strands", async () => {
+    const f = quickSetup();
+    f.save([eligible("C1")]);
+    f.runner.activate();
+    await new Promise((r) => setTimeout(r, 80));
+    expect(f.spawns.length).toBe(1);
+    expect(f.load().items["C1"].status).toBe("active");
+  });
+
+  test("OFF gate holds on EVERY new sweep source: no auto-dispatch, no ticks (periodic/settled/activate)", async () => {
+    const f = quickSetup({ enabled: false });
+    f.save([eligible("D1")]);
+    f.runner.onTimer();
+    f.runner.onSettled();
+    f.runner.activate();
+    await new Promise((r) => setTimeout(r, 80));
+    expect(f.spawns.length).toBe(0); // NO auto-dispatch anywhere while OFF
+    expect(f.delivered.length).toBe(0); // NO ticks
+    expect(f.load().items["D1"].status).toBe("approved"); // untouched
+  });
+
+  test("slot math uses the fleet-vs-inventory UNION so an undercounting RPC cannot over-spawn", async () => {
+    const f = quickSetup();
+    // 1 active run the RPC does NOT see (status call lags a just-started
+    // parent) + 3 eligible approved. The union says 2 free slots → exactly 2
+    // spawns; the RPC-only math would have spawned 3.
+    f.save([
+      eligible("LIVE1", { status: "active", runId: "run-live" }),
+      eligible("E1"),
+      eligible("E2", { updatedAt: "c" }),
+      eligible("E3", { updatedAt: "d" }),
+    ]);
+    f.runner.onTimer();
+    await new Promise((r) => setTimeout(r, 80));
+    expect(f.spawns.map((s) => s.task.split(/\n/)[0])).toEqual(["KEY: E1", "KEY: E2"]); // 2 free, not 3
+    expect(f.load().items["E3"].status).toBe("approved"); // no slot left
+  });
+});
+

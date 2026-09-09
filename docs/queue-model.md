@@ -91,8 +91,11 @@ Reason vocabulary: ticks arrive as `[orch-tick: <reason>]` — `dispatch` /
 
 - **dispatch** — a slot is free AND ≥1 approved item → "dispatch it". The
   harness AUTO-dispatches fully-specified approved items (scope + cwd +
-  low/medium risk — the approval gate guarantees them); the tick fires only
-  for the MANUAL cases (high-risk or incomplete).
+  low/medium risk — the approval gate guarantees them) on EVERY free-slot
+  window: the activation sweep (`/autopilot on`), the turn-end settle sweep,
+  the periodic 10-min sweep, and worker completions. The tick fires only for
+  the MANUAL cases (high-risk or incomplete) — and then only when the
+  harness left something for it.
 - **intake** — approved count < `queueLowThreshold` (2) → "run a full intake
   scan, propose the next batch".
   - **Intake suppression**: while ANY proposal is pending (the user is

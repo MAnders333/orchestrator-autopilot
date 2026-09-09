@@ -299,8 +299,11 @@ it did with ONE `[orch-tick: harness]` message. Do NOT manually
 the MANUAL cases + overrides:
 
 - **Auto-dispatch**: an approved item (scope + cwd + low/med risk) fills a
-  free slot by itself. The approval gate REQUIRES a complete scope + cwd —
-  approved IS fully specified, which is what makes this possible.
+  free slot by itself — on EVERY free-slot window (activation, your turn
+  ending, the periodic sweep, worker completion); idle approved items never
+  wait for a worker to finish (AUTOPILOT-9). The approval gate REQUIRES a
+  complete scope + cwd — approved IS fully specified, which is what makes
+  this possible.
 - **Auto-review**: a completed worker's item gets the reviewer dispatched
   automatically with the same fields (KEY + scope + cwd). `queue_review` is
   the OVERRIDE: high-risk items, a custom review focus, or steering.

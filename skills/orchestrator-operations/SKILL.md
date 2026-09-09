@@ -28,7 +28,10 @@ only your own backend's notes.
 
 - **Auto-dispatch**: an approved item with a complete `scope` + `cwd` +
   low/medium risk is dispatched AUTOMATICALLY when a slot frees (the task =
-  `KEY: <key>` + the scope). Write good scopes at proposal/approval time —
+  `KEY: <key>` + the scope) — on ANY free-slot window: activation
+  (`/autopilot on`), your turn ending (settle), the periodic sweep, or a
+  worker completion. The harness never leaves an approved item next to an
+  idle slot (AUTOPILOT-9). Write good scopes at proposal/approval time —
   that is where the worker prompt lives now.
 - **Intake proposals carry their repo NOW (cwd at proposal)**: any proposal
   that names a repo is `queue_add`ed with that repo as `cwd` — resolve the

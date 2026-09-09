@@ -11,7 +11,7 @@
 
 import type { SubagentBackend } from "../backends/types.ts";
 import { join } from "node:path";
-import type { Autopilot } from "../core.ts";
+import { storeToSnapshot, type Autopilot } from "../core.ts";
 import type { CompletionEvent } from "../types.ts";
 import { loadAutopilotConfig } from "../config.ts";
 import { loadStore, itemByRunId } from "../queue-store.ts";
@@ -65,6 +65,9 @@ export interface FrameworkRunner {
   onSettled(): void;
   /** Periodic re-nudge (bypasses the hash — re-ticks a persistent gap). */
   onTimer(): void;
+  /** Explicit activation sweep (/autopilot on) — the harness fills free slots
+   *  immediately instead of waiting for the first settle/timer (AUTOPILOT-9). */
+  activate(): void;
   start(): void;
   stop(): void;
 }
@@ -202,6 +205,17 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     // the engine sweep use it (one RPC, and the request is emitted synchronously
     // so hosts/replies see it immediately).
     const fleet = await opts.backend.fleetStatus();
+    // FLEET-vs-INVENTORY parity for the AUTO-DISPATCH slot math: the RPC count
+    // is the FLOOR, never a replacement for what the engine's OWN view (event
+    // ledger + store-derived occupied) knows is running — a transient fleet
+    // undercount (status RPC lagging a just-started parent) must not let the
+    // harness over-spawn into phantom free slots. Auto-dispatch fires on every
+    // free-slot window now (not just worker-done), so this guard matters more.
+    const storeOccupied = (() => {
+      const s = loadStore(opts.stateDir);
+      return s ? storeToSnapshot(s).occupied : 0;
+    })();
+    const effectiveTotalActive = Math.max(fleet?.totalActive ?? 0, autopilot.status().running, storeOccupied);
     if (source === "timer") {
       // RETENTION: drop keep refs whose job is done (item terminal, or tip
       // reachable from main) so preserved refs don't accumulate forever.
@@ -242,10 +256,17 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     }
     // A — fill free slots with auto-dispatchable items before deciding ticks,
     // so the dispatch nudge fires only for the MANUAL cases (high-risk or
-    // incomplete scope/cwd).
-    if (source === "worker-done" && autoDispatchOn) {
+    // incomplete scope/cwd). Fires on EVERY free-slot window — the activation
+    // path, the turn-end settle, the periodic sweep, AND worker completions:
+    // the docs/skill contract is "an approved item fills a free slot by itself"
+    // (no worker-done qualifier), and the worker-done-only gate stranded
+    // approved items next to idle slots until a completion happened (observed
+    // live: early-ON window fired ZERO auto-dispatches; idle free slots needed
+    // the manual dispatch tick — AUTOPILOT-9). The eligible-item + slot guards
+    // make the extra triggers inert when there is nothing to do.
+    if (autoDispatchOn) {
       try {
-        const dispatched = await autoDispatchEligible(opts.stateDir, opts.backend, cfg().maxSlots, fleet?.totalActive);
+        const dispatched = await autoDispatchEligible(opts.stateDir, opts.backend, cfg().maxSlots, effectiveTotalActive);
         if (dispatched.length) harnessTick([`dispatched ${dispatched.map((d) => d.key).join(", ")}`], fleet?.totalActive);
       } catch {
         // silent — the tick still nudges the manual cases
@@ -389,6 +410,9 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       } catch {
         // never let the timer break the host
       }
+    },
+    activate() {
+      void sweep("activate");
     },
     start() {
       if (opts.sweepIntervalMs > 0 && !timer) {

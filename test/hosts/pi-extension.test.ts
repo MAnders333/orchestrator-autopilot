@@ -425,6 +425,31 @@ describe("pi adapter smoke", () => {
     expect(injected).toBeDefined();
   });
 
+  test("AUTOPILOT-9: /autopilot on auto-dispatches eligible approved items in the ACTIVATION sweep (idle slots never strand)", async () => {
+    // Seed an eligible approved item (scope + cwd + low risk) into the scratch
+    // store BEFORE activation. The ON command used to ONLY inject /orchestrate
+    // + nudge — the harness filled free slots exclusively on worker-done, so an
+    // early-ON window stranded approved items until the first completion
+    // (observed live). The activation sweep now fills slots immediately.
+    writeFileSync(join(dir, "queue.json"), JSON.stringify({ version: 1, items: {} }));
+    const s = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+    s.items["A9"] = {
+      key: "A9", title: "a9", status: "approved", blocker: null,
+      scope: "do the thing", cwd: dir, evidence: "", value: "", urgency: "", risk: "low",
+      runId: null, reviewerRunId: null, attempts: 0, notes: "",
+      createdAt: "2026-09-09T00:00:00.000Z", updatedAt: "2026-09-09T00:00:00.000Z",
+    };
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(s));
+    await runAutopilotCmd("on");
+    const req = await waitForSpawnRequest(); // the activation sweep spawned the worker
+    expect(req.payload.method).toBe("spawn");
+    await replyToLastSpawn("run-a9");
+    await new Promise((r) => setTimeout(r, 30));
+    const store = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+    expect(store.items["A9"].status).toBe("active");
+    expect(store.items["A9"].runId).toBe("run-a9");
+  });
+
   test("queue_add + queue_update mutate the store (free-form notes)", async () => {
     const add = pi._tools()["queue_add"];
     await add.execute("c1", { key: "B4-AGENTIC-JUDGE-TIMEOUT", title: "judge timeout", scope: "add timeout", notes: "free-form notes" }, undefined, undefined, ctx);
@@ -443,8 +468,14 @@ describe("pi adapter smoke", () => {
   test("queue_dispatch WARNs when manually dispatching an auto-dispatchable item (double-dispatch guard)", async () => {
     startSession("tui");
     await runAutopilotCmd("on");
+    // The activation sweep runs async — let it finish against the migrated
+    // store (G1 active, A6 approved-without-scope: nothing eligible) so it
+    // cannot race this test's item.
+    await new Promise((r) => setTimeout(r, 40));
     const repo = makeRepo();
     const s0 = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+    // AUTO-1 becomes approved AFTER activation — the mid-turn manual dispatch
+    // window (the harness takes it at the next settle/timer otherwise).
     s0.items["AUTO-1"] = { key: "AUTO-1", title: "auto", status: "approved", blocker: null, scope: "do the thing", cwd: repo, evidence: "", value: "M", urgency: "M", risk: "low", runId: null, reviewerRunId: null, attempts: 0, notes: "", createdAt: "a", updatedAt: "b" };
     writeFileSync(join(dir, "queue.json"), JSON.stringify(s0));
     const disp = pi._tools()["queue_dispatch"];

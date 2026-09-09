@@ -530,6 +530,11 @@ export default function (pi: ExtensionAPI) {
           // message (autopilotModeMessage) carries the run-your-loop now
           // directive. The first tick can never race the injection because
           // no tick is fired here.
+          // EXCEPT auto-actions: the activation sweep refreshes the fleet and
+          // lets the harness fill free slots IMMEDIATELY (approved items never
+          // wait for the first settle/timer — AUTOPILOT-9). Its ticks are
+          // gated on orchestratorLoaded, so pre-injection it can only dispatch.
+          runner.activate();
           maybeInjectOrchestrate();
           informOrchestrator("on");
           ctx.ui.notify(`Autopilot ON (session ${sessionId.slice(0, 8)}) — orchestrator mode loaded, capacity ticks enabled`, "info");
