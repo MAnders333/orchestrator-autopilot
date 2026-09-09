@@ -135,6 +135,33 @@ describe("DecisionPanel keyboard flow", () => {
     expect(read()["P1"].scope).toContain("thi");
   });
 
+  test("repo-less provisional proposal: refine collects the repo → key stays Q-<n>; approval renames it (seriesHint live)", () => {
+    const { panel, read } = setup([
+      item({ key: "B1", status: "proposal", scope: "history item", cwd: "/repo/b", updatedAt: "2026-09-01T09:00:00.000Z" }),
+      item({ key: "Q1", status: "proposal", provisionalKey: true, scope: "the task" }),
+    ]);
+    panel.handleInput("j"); // select Q1 (oldest-first feed: B1, Q1)
+    panel.handleInput("e"); // refine — scope stage prefilled with the full scope
+    panel.handleInput("\r"); // scope unchanged → repo-less item now asks for its REPO
+    for (const ch of "/repo/b") panel.handleInput(ch);
+    // LIVE destined-series preview while the path is typed (registry/history/slug)
+    expect(panel.render(80).join("\n")).toContain("series B");
+    panel.handleInput("\r"); // submit the repo
+    let after = read()["Q1"];
+    expect(after.cwd).toBe("/repo/b");
+    expect(after.status).toBe("proposal");
+    expect(after.provisionalKey).toBe(true); // KEY STAYS Q-<n> — identity until approval
+    // seriesHint on the row reflects the now-resolvable destined series
+    expect(panel.render(80).join("\n")).toContain("renames Q1 into series B");
+    // approval completes the flow INSIDE the panel: Q-1 renames into the real series
+    panel.handleInput("a");
+    after = read();
+    expect(after["Q1"]).toBeUndefined();
+    expect(after["B-2"].status).toBe("approved");
+    expect(after["B-2"].provisionalKey).toBeUndefined();
+    expect(after["B-2"].notes).toContain("renamed from Q1");
+  });
+
   test("redispatch records findings without transitioning; esc closes the panel", () => {
     const sut = setup([item({ key: "H1", status: "human-review", scope: "work", cwd: "/tmp/repo" })]);
     const { panel, read } = sut;

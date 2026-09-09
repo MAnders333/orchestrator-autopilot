@@ -62,7 +62,7 @@ export interface PanelController {
   notify: () => void;
   items(): PanelItem[];
   otherLabel(): string;
-  act(action: PanelActionId, payload?: { scope?: string; findings?: string }): { ok: boolean; text: string } | null;
+  act(action: PanelActionId, payload?: { scope?: string; cwd?: string; findings?: string }): { ok: boolean; text: string } | null;
   toggleView(): void;
   move(delta: number): void;
 }
@@ -170,7 +170,7 @@ function renderPanelContent(api: TuiApi, ctl: PanelController): JSX.Element {
       if (it.targets[0]) lines.push(`    ↳ ${it.targets[0].label}`);
       // Destined-series hint (proposals view): provisional Q-<n> handles are
       // renamed at approval — shown here so the rename is never a surprise.
-      if (it.seriesHint) lines.push(`    ◈ ${it.seriesHint}`);
+      if (it.seriesHint) lines.push(`    ↳ ${it.seriesHint}`);
       const hints = it.actions
         .map((a) => (a === "approve" ? "[a] approve" : a === "reject" ? "[r] reject" : a === "defer" ? "[d] defer" : a === "refine" ? "[e] refine" : "[x] re-dispatch"))
         .join("  ");
@@ -179,7 +179,7 @@ function renderPanelContent(api: TuiApi, ctl: PanelController): JSX.Element {
     }
   }
   if (ctl.lastResult) lines.push(`${ctl.lastResult.isError ? "!!" : "✓"} ${ctl.lastResult.text}`);
-  lines.push("↑↓/jk: select · tab: view · enter/a: approve · r: reject · d: defer · e: refine · x: re-dispatch · esc: close");
+  lines.push("↑↓/jk: select · tab: view · enter/a: approve · r: reject · d: defer · e: refine scope+repo · x: re-dispatch · esc: close");
 
   return jsx("text", { children: lines.join("\n") });
 }
@@ -199,15 +199,51 @@ function promptFor(api: TuiApi, ctl: PanelController, which: "refine" | "redispa
   if (!item) return;
   const refine = which === "refine";
   const key = item.key;
+  if (!refine) {
+    api.ui.dialog.replace(
+      () =>
+        jsx(api.ui.DialogPrompt!, {
+          title: `Re-dispatch with findings — ${key}`,
+          onConfirm: (value: string) => {
+            const r = ctl.act("redispatch", { findings: value });
+            if (r) api.ui.toast({ variant: r.ok ? "success" : "error", message: r.text });
+          },
+        }),
+    );
+    return;
+  }
+  // Refine = scope, then — for a REPO-LESS proposal — the repo (cwd). The
+  // approval gate needs a cwd, and the provisional Q-<n> key renames into the
+  // repo's real series at approval, so the repo field closes the repo-less
+  // gap without leaving the panel. DialogPrompt covers both (two prompts).
+  const repoPrompt = (scope: string) => {
+    api.ui.dialog.replace(
+      () =>
+        jsx(api.ui.DialogPrompt!, {
+          title: `Repo (cwd) — ${key}`,
+          placeholder: "repo path — empty keeps it repo-less (approval needs a repo)",
+          onConfirm: (value: string) => {
+            const cwd = value.trim();
+            const r = cwd ? ctl.act("refine", { scope, cwd }) : ctl.act("refine", { scope });
+            if (r) api.ui.toast({ variant: r.ok ? "success" : "error", message: r.text });
+          },
+        }),
+    );
+  };
   const fullScope = refine ? (loadStoreOrNew(ctl.stateDir).items[key]?.scope ?? "") : "";
   api.ui.dialog.replace(
     () =>
       jsx(api.ui.DialogPrompt!, {
-        title: refine ? `Refine scope — ${key}` : `Re-dispatch with findings — ${key}`,
+        title: `Refine scope — ${key}`,
         value: fullScope,
         onConfirm: (value: string) => {
-          const r = refine ? ctl.act("refine", { scope: value }) : ctl.act("redispatch", { findings: value });
-          if (r) api.ui.toast({ variant: r.ok ? "success" : "error", message: r.text });
+          const stillRepoLess = !loadStoreOrNew(ctl.stateDir).items[key]?.cwd;
+          if (!stillRepoLess) {
+            const r = ctl.act("refine", { scope: value });
+            if (r) api.ui.toast({ variant: r.ok ? "success" : "error", message: r.text });
+            return;
+          }
+          repoPrompt(value);
         },
       }),
   );

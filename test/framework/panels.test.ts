@@ -147,6 +147,23 @@ describe("buildPanelDoc — the feed from queue state", () => {
     expect(PANEL_ACTIONS.refine.needsInput).toBe(true);
     expect(PANEL_ACTIONS.redispatch.needsInput).toBe(true);
   });
+  test("buildPanelDoc carries a seriesHint for provisional proposals that resolves once the repo is set", () => {
+    const { dir } = dirWith([
+      item({ key: "B1", status: "proposal", title: "history", scope: "x", cwd: "/repo/b", updatedAt: "2026-09-01T09:00:00.000Z" }),
+      item({ key: "Q1", status: "proposal", provisionalKey: true, title: "brainstormed", scope: "the task" }),
+      item({ key: "P1", status: "proposal", title: "plain", scope: "no hint here" }),
+    ]);
+    const q1 = (d: string) => buildPanelDoc(d, "proposals").sections[0].items.find((i) => i.key === "Q1")!;
+    expect(q1(dir).seriesHint).toContain("provisional"); // repo-less: the rename is coming, no series yet
+    // set the repo via the panel → the hint resolves (registry/history/slug)
+    applyPanelDecision(dir, "Q1", "refine", { scope: "the task", cwd: "/repo/b" });
+    const after = q1(dir);
+    expect(after.cwd).toBe("/repo/b");
+    expect(after.seriesHint).toContain("series B"); // history vote — NOT the item's own provisional Q
+    // non-provisional keys carry no hint
+    const p1 = buildPanelDoc(dir, "proposals").sections[0].items.find((i) => i.key === "P1")!;
+    expect(p1.seriesHint).toBeNull();
+  });
 });
 
 describe("applyPanelDecision — validated store mutations", () => {
@@ -232,5 +249,47 @@ describe("applyPanelDecision — validated store mutations", () => {
       item({ key: "D1", status: "done" }),
     ]);
     for (const k of ["A1", "B1", "D1"]) expect(applyPanelDecision(dir, k, "approve").ok).toBe(false);
+  });
+
+  test("refine accepts the repo (cwd) — scope and/or cwd are persisted, identity held until approval", () => {
+    const { dir, read } = dirWith([item({ key: "Q1", status: "proposal", provisionalKey: true, scope: "the task", cwd: null })]);
+    // cwd-only refine (scope already good from intake)
+    expect(applyPanelDecision(dir, "Q1", "refine", { cwd: "/repo/b" }).ok).toBe(true);
+    let after = read().items["Q1"];
+    expect(after.cwd).toBe("/repo/b");
+    expect(after.scope).toBe("the task"); // untouched
+    expect(after.provisionalKey).toBe(true); // KEY STAYS Q-<n> — identity is not the repo yet
+    expect(after.status).toBe("proposal");
+    // scope+cwd together
+    const r = applyPanelDecision(dir, "Q1", "refine", { scope: "sharper scope", cwd: "/repo/b" });
+    expect(r.ok).toBe(true);
+    after = read().items["Q1"];
+    expect(after.scope).toBe("sharper scope");
+    expect(after.cwd).toBe("/repo/b");
+    // neither field → rejected
+    expect(applyPanelDecision(dir, "Q1", "refine", {}).ok).toBe(false);
+    expect(applyPanelDecision(dir, "Q1", "refine", { scope: "   " }).ok).toBe(false);
+    // still repo-less + no scope stays unapprovable until refine supplies both
+    const { dir: d2, read: r2 } = dirWith([item({ key: "Q2", status: "proposal", provisionalKey: true, title: "empty" })]);
+    applyPanelDecision(d2, "Q2", "refine", { cwd: "/repo/x" });
+    expect(applyPanelDecision(d2, "Q2", "approve").ok).toBe(false); // gate: scope still missing
+    expect(r2().items["Q2"].status).toBe("proposal");
+  });
+
+  test("approve of a repo-set provisional proposal RENAMES it into the repo's real series (panel == queue_update path)", () => {
+    const { dir, read } = dirWith([
+      item({ key: "B1", status: "proposal", title: "history", scope: "h", cwd: "/repo/b", updatedAt: "2026-09-01T09:00:00.000Z" }),
+      item({ key: "Q1", status: "proposal", provisionalKey: true, scope: "the task", cwd: "/repo/b" }),
+    ]);
+    const r = applyPanelDecision(dir, "Q1", "approve");
+    expect(r.ok).toBe(true);
+    const after = read().items;
+    expect(after["Q1"]).toBeUndefined(); // provisional handle gone
+    expect(after["B-2"]).toBeDefined(); // real series (B1 counted as 1) — the item could NOT vote its own Q
+    expect(after["B-2"].status).toBe("approved");
+    expect(after["B-2"].provisionalKey).toBeUndefined(); // marker cleared
+    expect(after["B-2"].notes).toContain("renamed from Q1");
+    // the event carries the FINAL key so consumers dispatch the live item
+    expect(r.event?.data).toMatchObject({ key: "B-2", renamedFrom: "Q1", action: "approve", to: "approved" });
   });
 });

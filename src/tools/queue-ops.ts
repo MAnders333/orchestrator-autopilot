@@ -162,6 +162,37 @@ export async function queueAdd(ctx: QueueOpsCtx, params: Record<string, unknown>
   }
 }
 
+/** PROVISIONAL-KEY RENAME — the ONE implementation, shared by queue_update
+ *  (approval via tool) and the decision panel (approve in the UI). Call when
+ *  the item is ALREADY approved in `store` and carries a cwd. Resolves the
+ *  real series EXCLUDING the item's own vote (a freshly-specified provisional
+ *  Q handle would otherwise win updatedAt ties against its repo's history),
+ *  records cwd → series for future adds, renames the key when its series
+ *  differs, and drops the provisional marker. Returns the new key, or null
+ *  when the key already sits in the right series (marker cleared in place).
+ *  The caller persists the store. */
+export function renameProvisionalKey(stateDir: string, store: QueueStore, key: string): string | null {
+  const updated = store.items[key];
+  if (!updated || updated.provisionalKey !== true || !updated.cwd) return null;
+  const realSeries = resolveSeries(stateDir, updated.cwd, { excludeKey: key });
+  recordSeries(stateDir, updated.cwd, realSeries);
+  const currentSeries = /^([A-Za-z0-9_-]+?)-\d+/.exec(updated.key)?.[1] ?? "";
+  if (currentSeries === realSeries) {
+    updated.provisionalKey = undefined; // already in the real series — the marker is just dropped
+    return null;
+  }
+  const newKey = nextKeyFor(store, realSeries);
+  const renameNote = `(renamed from ${updated.key} at approval — provisional handle → real series ${realSeries})`;
+  store.items[newKey] = {
+    ...updated,
+    key: newKey,
+    provisionalKey: undefined,
+    notes: updated.notes ? `${updated.notes}\n\n${renameNote}` : renameNote,
+  };
+  delete store.items[updated.key];
+  return newKey;
+}
+
 /** queue_update — validated transitions, blocker, free-form fields. */
 export async function queueUpdate(ctx: QueueOpsCtx, params: Record<string, unknown>): Promise<ToolResult> {
   try {
@@ -174,11 +205,10 @@ export async function queueUpdate(ctx: QueueOpsCtx, params: Record<string, unkno
     if (nextStatus === "approved" && !approvalReady(nextScope, nextCwd)) {
       return { text: "queue_update: approval requires a complete scope + cwd (the scope is the worker prompt; cwd is the repo it runs in) — blocked items are for waiting, not dispatchable work", details: {} };
     }
-    // Capture the REAL series BEFORE the transition mutates the store: the
-    // renamed item itself would otherwise participate in the history vote
-    // (its fresh updatedAt wins ties) and resolve to its own provisional Q.
+    // An approval may complete a PROVISIONAL key: run the shared rename AFTER
+    // the mutation (resolveSeries excludes the item's own vote, so the rename
+    // cannot resolve to its own provisional Q).
     const renamingProvisional = cur.provisionalKey === true && nextStatus === "approved" && !!nextCwd;
-    const realSeries = renamingProvisional ? resolveSeries(ctx.stateDir, nextCwd) : null;
     updateItem(store, params.key as string, {
       status: params.status as never,
       blocker: params.blocker as never,
@@ -194,31 +224,13 @@ export async function queueUpdate(ctx: QueueOpsCtx, params: Record<string, unkno
       notes: params.notes as string | undefined,
     });
     saveStore(ctx.stateDir, store);
-
-    // PROVISIONAL-KEY RENAME at approval: a proposal allocated without a cwd
-    // carries a provisional Q-<n> handle; the approved transition is where
-    // cwd becomes mandatory — so it is where the item gets its REAL series
-    // (resolved pre-mutation above). Explicit keys are never renamed, and a
-    // provisional key already in the right series just loses its marker.
-    const updated = store.items[params.key as string];
-    if (renamingProvisional && updated && realSeries) {
-      recordSeries(ctx.stateDir, updated.cwd!, realSeries);
-      const currentSeries = /^([A-Za-z0-9_-]+?)-\d+/.exec(updated.key)?.[1] ?? "";
-      if (currentSeries !== realSeries) {
-        const newKey = nextKeyFor(store, realSeries);
-        const renameNote = `(renamed from ${updated.key} at approval — provisional handle → real series ${realSeries})`;
-        store.items[newKey] = {
-          ...updated,
-          key: newKey,
-          provisionalKey: undefined,
-          notes: updated.notes ? `${updated.notes}\n\n${renameNote}` : renameNote,
-        };
-        delete store.items[updated.key];
-        saveStore(ctx.stateDir, store);
-        return { text: `updated '${params.key}' → approved; provisional key renamed to '${newKey}' (series ${realSeries})`, details: { renamedFrom: params.key, key: newKey } };
+    if (renamingProvisional) {
+      const renamedTo = renameProvisionalKey(ctx.stateDir, store, params.key as string);
+      saveStore(ctx.stateDir, store); // marker clear AND/OR the rename
+      if (renamedTo) {
+        const series = /^([A-Za-z0-9_-]+?)-\d+/.exec(renamedTo)?.[1] ?? renamedTo;
+        return { text: `updated '${params.key}' → approved; provisional key renamed to '${renamedTo}' (series ${series})`, details: { renamedFrom: params.key, key: renamedTo } };
       }
-      updated.provisionalKey = undefined;
-      saveStore(ctx.stateDir, store);
     }
     return { text: `updated '${params.key}'`, details: {} };
   } catch (e) {

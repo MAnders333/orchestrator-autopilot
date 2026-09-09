@@ -18,7 +18,7 @@
 // -------------------------------------------------------------------------
 
 import { loadStoreOrNew, saveStore, updateItem, resolveSeries, type QueueItem } from "../queue-store.ts";
-import { approvalReady } from "../tools/queue-ops.ts";
+import { approvalReady, renameProvisionalKey } from "../tools/queue-ops.ts";
 import { humanReviewTargetsFor } from "./worktree-preservation.ts";
 
 export type PanelKind = "proposals" | "human-review";
@@ -59,11 +59,12 @@ export interface PanelItem {
   targets: PanelTarget[];
   /** The actions this item currently supports (derived from its status). */
   actions: PanelActionId[];
-  /** Proposals view only — what happens to the key at approval: real-series
-   *  keys stay put; provisional Q-<n> handles (repo-less proposals) are
-   *  RENAMED into the repo's real series (registry → history → slug). Shown
-   *  so an approval-time rename is never a surprise. */
-  seriesHint?: string;
+  /** Proposal view only: what happens to the item's KEY. Provisional Q-<n>
+   *  handles are renamed at approval into the repo's real series (resolved
+   *  registry → history → slug once a cwd is set); non-provisional keys carry
+   *  no hint. Hosts render it so the human sees the rename coming.
+   *  Absent (undefined) on the human-review view — keys there are final. */
+  seriesHint?: string | null;
   /** The FULL untruncated scope (the worker prompt). Truncation is a RENDER
    *  choice — hosts show this verbatim in detail/expand views. */
   fullScope: string;
@@ -108,30 +109,35 @@ function scopeHead(scope: string | null | undefined, cap = 120): string {
   return (scope ?? "").split(/\n/)[0].trim().slice(0, cap);
 }
 
-function toTargets(lines: string[]): PanelTarget[] {
-  return lines.map((l) => {
-    const label = l; // targets carry their navigation hint in prose (diff/view commands)
-    return { label };
-  });
-}
-
 /** The destined-series hint for the proposals feed — resolved against the
  *  SAME store + registry the approved transition renames with, so the panel
  *  can never predict a different series than the one the rename produces.
- *  - provisionalKey item (repo-less proposal): the Q-<n> handle is temporary
- *    — approval with a cwd renames it into the repo's real series.
- *  - cwd-bearing item: the key is ALREADY in its real series (allocated at
- *    queue_add from cwd); approval keeps it.
+ *  - provisional key with no repo yet: the rename is coming — announced up
+ *    front (and the hint resolves live once a cwd is set, because the panel
+ *    rebuilds from the store after every decision).
+ *  - cwd-bearing item: real-series keys stay put (allocated from cwd at
+ *    queue_add); provisional keys rename into the resolved series.
  *  - otherwise (legacy/odd items): no hint. */
 export function seriesHintFor(stateDir: string, item: QueueItem): string | null {
   if (item.provisionalKey) {
-    return `'${item.key}' is a PROVISIONAL handle (repo-less proposal — no cwd): at approval the key is RENAMED into the repo's real series (registry → history → slug). Expect the key to change.`;
+    if (!item.cwd) {
+      return `${item.key} is a provisional handle (repo-less proposal — no cwd yet): at approval the key is renamed into the repo's real series (registry → history → slug). Expect the key to change.`;
+    }
+    const series = resolveSeries(stateDir, item.cwd, { excludeKey: item.key });
+    return `repo set — approval renames ${item.key} into series ${series}`;
   }
   if (item.cwd) {
     const series = resolveSeries(stateDir, item.cwd);
     return `real series key — cwd ${item.cwd} resolves to series ${series || "Q"} (registry → history → slug); approval does NOT rename.`;
   }
   return null;
+}
+
+function toTargets(lines: string[]): PanelTarget[] {
+  return lines.map((l) => {
+    const label = l; // targets carry their navigation hint in prose (diff/view commands)
+    return { label };
+  });
 }
 
 /** Project the FULL item metadata for the detail view — free-form text is
@@ -160,25 +166,22 @@ export function buildPanelDoc(stateDir: string, kind: PanelKind): PanelDocument 
   if (kind === "proposals") {
     document.sections.push({
       title: "Proposals — awaiting your call (approve / reject / defer / refine)",
-      items: items.map((i) => {
-        const hint = seriesHintFor(stateDir, i);
-        return {
-          key: i.key,
-          title: i.title,
-          status: i.status,
-          risk: i.risk,
-          cwd: i.cwd,
-          updatedAt: i.updatedAt,
-          summary: scopeHead(i.scope) || i.title,
-          targets: [{ label: i.cwd ?? "no repo yet — refine to set cwd" }],
-          actions: actionsForStatus(i.status),
-          ...(hint ? { seriesHint: hint } : {}),
-          fullScope: i.scope ?? "",
-          fullNotes: i.notes ?? "",
-          fullTargets: [{ label: i.cwd ?? "no repo yet — refine to set cwd" }],
-          meta: metaFor(i),
-        };
-      }),
+      items: items.map((i) => ({
+        key: i.key,
+        title: i.title,
+        status: i.status,
+        risk: i.risk,
+        cwd: i.cwd,
+        updatedAt: i.updatedAt,
+        summary: scopeHead(i.scope) || i.title,
+        targets: [{ label: i.cwd ?? "no repo yet — refine to set cwd" }],
+        seriesHint: seriesHintFor(stateDir, i),
+        actions: actionsForStatus(i.status),
+        fullScope: i.scope ?? "",
+        fullNotes: i.notes ?? "",
+        fullTargets: [{ label: i.cwd ?? "no repo yet — refine to set cwd" }],
+        meta: metaFor(i),
+      })),
     });
   } else {
     document.sections.push({
@@ -214,6 +217,9 @@ export interface HumanDecisionEvent {
     from: string;
     to: string | null;
     findings?: string;
+    /** set when the decision renamed a provisional key (approve) — the event
+     *  carries the FINAL key so consumers dispatch the live item. */
+    renamedFrom?: string;
   };
 }
 
@@ -231,7 +237,7 @@ function result(text: string, event?: HumanDecisionEvent): PanelDecisionResult {
  *  validated by the same ALLOWED map + approval gate the queue_* tools use;
  *  re-dispatch records the human's findings (no transition — the harness
  *  moves the item and spawns the redo, exactly like the review-FAIL path). */
-export function applyPanelDecision(stateDir: string, key: string, action: PanelActionId, payload?: { scope?: string; findings?: string; blocker?: string }): PanelDecisionResult {
+export function applyPanelDecision(stateDir: string, key: string, action: PanelActionId, payload?: { scope?: string; cwd?: string; findings?: string; blocker?: string }): PanelDecisionResult {
   const store = loadStoreOrNew(stateDir);
   const item: QueueItem | undefined = store.items[key];
   if (!item) return { ok: false, text: `panel: no item '${key}'` };
@@ -245,7 +251,15 @@ export function applyPanelDecision(stateDir: string, key: string, action: PanelA
           return { ok: false, text: `panel: ${key} is not fully specified (scope + cwd) — refine it first` };
         }
         updateItem(store, key, { status: "approved" });
+        // A provisional Q-<n> handle gets its REAL series here — the same
+        // rename queue_update performs at approval, so the panel and the tool
+        // cannot drift. The key stays Q-<n> (identity) until this moment.
+        const renamedTo = renameProvisionalKey(stateDir, store, key);
         saveStore(stateDir, store);
+        if (renamedTo) {
+          const text = `approved '${key}' → renamed to '${renamedTo}' (provisional handle → real series)`;
+          return result(text, { name: "orch:human-decision", data: { ...base, key: renamedTo, renamedFrom: key, to: "approved" } });
+        }
         return result(`approved '${key}' (proposal → approved, dispatchable)`, { name: "orch:human-decision", data: { ...base, to: "approved" } });
       }
       if (item.status === "human-review") {
@@ -275,10 +289,15 @@ export function applyPanelDecision(stateDir: string, key: string, action: PanelA
     case "refine": {
       if (item.status !== "proposal") return { ok: false, text: `panel: '${key}' is ${item.status} — refine edits a proposal's scope` };
       const scope = (payload?.scope ?? "").trim();
-      if (!scope) return { ok: false, text: `panel: refine needs new scope text for '${key}'` };
-      updateItem(store, key, { scope });
+      const cwd = (payload?.cwd ?? "").trim();
+      if (!scope && !cwd) return { ok: false, text: `panel: refine needs new scope text or a repo (cwd) for '${key}'` };
+      const patch: { scope?: string; cwd?: string } = {};
+      if (scope) patch.scope = scope;
+      if (cwd) patch.cwd = cwd;
+      updateItem(store, key, patch);
       saveStore(stateDir, store);
-      return result(`refined '${key}' scope`, { name: "orch:human-decision", data: { ...base, to: "proposal" } });
+      const changed = [scope ? "scope" : null, cwd ? "repo (cwd)" : null].filter(Boolean).join(" + ");
+      return result(`refined '${key}' ${changed}`, { name: "orch:human-decision", data: { ...base, to: "proposal" } });
     }
 
     case "redispatch": {

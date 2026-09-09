@@ -288,11 +288,14 @@ export function seriesSlugFor(cwd: string): string {
  *  slug — it survives repo renames and preserves sub-series). Same counting
  *  rule as nextKeyFor: the series is the text BEFORE the first digit
  *  (`B48-EARLIER` → B, `EVAL-EXPT-M9` → EVAL-EXPT-M). Most frequent wins;
- *  ties broken by most recently updated. */
-function historicalSeries(store: QueueStore, cwd: string): string | null {
+ *  ties broken by most recently updated. `excludeKey` skips one item (the
+ *  caller's own key) so a freshly-specified provisional Q handle cannot vote
+ *  for its own provisional series. */
+function historicalSeries(store: QueueStore, cwd: string, excludeKey?: string): string | null {
   const counts = new Map<string, { n: number; latest: number }>();
   for (const it of Object.values(store.items)) {
     if (it.cwd !== cwd) continue;
+    if (excludeKey && it.key === excludeKey) continue;
     const m = /^([A-Za-z0-9_-]*?)(?:\d|$)/.exec(it.key);
     let series = m?.[1].replace(/[-_]+$/, "");
     if (!series) continue;
@@ -322,14 +325,16 @@ function historicalSeries(store: QueueStore, cwd: string): string | null {
 }
 
 /** Resolve the series for a cwd: registry → history → slug. Records nothing —
- *  the caller records the series it actually used. */
-export function resolveSeries(stateDir: string, cwd: string): string {
+ *  the caller records the series it actually used. `excludeKey` excludes one
+ *  item from the history vote (the item being renamed must not vote for its
+ *  own provisional series — it would win updatedAt ties). */
+export function resolveSeries(stateDir: string, cwd: string, opts?: { excludeKey?: string }): string {
   if (!cwd) return "Q";
   const hit = readSeriesRegistry(stateDir)[cwd];
   if (hit?.series) return hit.series;
   const store = loadStore(stateDir);
   if (store) {
-    const hist = historicalSeries(store, cwd);
+    const hist = historicalSeries(store, cwd, opts?.excludeKey);
     if (hist) return hist;
   }
   return seriesSlugFor(cwd);
@@ -371,6 +376,7 @@ export interface UpdatePatch {
   attempts?: number;
   title?: string;
   scope?: string;
+  cwd?: string | null;
   evidence?: string;
   value?: string;
   urgency?: string;

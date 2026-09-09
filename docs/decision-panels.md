@@ -62,6 +62,18 @@ Research date: 2026-09. Evidence is per-source and cited inline (`[verified]`).
   confirmed the `/panel` slash command registers. Live smoke caught + fixed a
   real bug: the opener command was in the mode-gated layer (not dispatchable
   from base mode) — split into an UNMODE'd opener layer + mode'd panel layer.
+- **Done** — repo field in refine (the repo-less proposal gap): refine now
+  collects the repo (cwd) too. pi refine input asks for the repo after the
+  scope when the proposal is repo-less, with a LIVE destined-series preview
+  while the path is typed; opencode refine adds a second DialogPrompt for the
+  repo. `applyPanelDecision` persists the cwd on refine (key stays `Q-<n>`,
+  identity), the proposals feed carries a `seriesHint` (destined series once
+  the repo resolves: registry → history → slug), and the panel's approve now
+  runs the SAME provisional-key rename as `queue_update` (shared
+  `renameProvisionalKey`; series resolution excludes the item's own vote, so
+  the rename cannot resolve back to Q). Hermetic tests on all three layers
+  (core + both hosts): repo-less proposal → repo from the panel → key stays
+  `Q-<n>` → approval renames it into the real series, all inside the panel.
 - **Remaining** — 0.5.1 publish (OTP) + final live smoke against the published
   artifact (auto-navigation stub).
 

@@ -186,6 +186,48 @@ describe("opencode TUI controller + commands", () => {
     expect(readState(stateDir)["P1"].status).toBe("approved");
   });
 
+  test("repo-less proposal: refine's second DialogPrompt collects the repo → key stays Q-<n>, approval renames it", async () => {
+    seedState(stateDir, [
+      item({ key: "B1", status: "proposal", scope: "history item", cwd: "/repo/b", updatedAt: "2026-09-01T09:00:00.000Z" }),
+      item({ key: "Q1", status: "proposal", provisionalKey: true, scope: "the task" }),
+    ]);
+    const f = makeFake(configDir);
+    await tui(f.api, {}, {});
+    const layer = f.layers.find((l: any) => l.mode === "orch-panel");
+    layer.commands.find((c: any) => c.name === "orch.selDown").run(); // Q1 (oldest-first feed)
+    layer.commands.find((c: any) => c.name === "orch.refine").run();
+    expect(f.dialogs.length).toBe(1);
+    f.dialogs[0].render().props.onConfirm("the task, refined"); // scope done
+    // repo-less → a SECOND DialogPrompt asks for the repo (the approval-gate gap)
+    expect(f.dialogs.length).toBe(2);
+    const repoDlg = f.dialogs[1].render();
+    expect(repoDlg.props.title).toContain("Repo");
+    repoDlg.props.onConfirm("/repo/b");
+    let q1 = readState(stateDir)["Q1"];
+    expect(q1.scope).toBe("the task, refined");
+    expect(q1.cwd).toBe("/repo/b");
+    expect(q1.provisionalKey).toBe(true); // KEY STAYS Q-<n> — identity until approval
+    // the row's seriesHint now shows the resolvable destined series
+    const ctlRender = await (async () => {
+      const { testRender } = await import("@opentui/solid");
+      const f2 = makeFake(configDir);
+      await tui(f2.api, {}, {});
+      const route = f2.routes.find((r: any) => r.name === "orchestrator-panel");
+      const setup = await testRender(() => route.render({ params: {} }), { width: 60, height: 24 });
+      await setup.renderOnce();
+      await setup.flush();
+      return [setup.externalOutput.takeText(), setup.captureCharFrame()].join("\n");
+    })();
+    expect(ctlRender).toContain("renames Q1 into series B");
+    // approval completes the flow INSIDE the panel: Q-1 renames into the real series
+    layer.commands.find((c: any) => c.name === "orch.approve").run();
+    q1 = readState(stateDir);
+    expect(q1["Q1"]).toBeUndefined();
+    expect(q1["B-2"].status).toBe("approved");
+    expect(q1["B-2"].provisionalKey).toBeUndefined();
+    expect(q1["B-2"].notes).toContain("renamed from Q1");
+  });
+
   test("redispatch dialog records findings without transitioning (harness re-dispatches)", async () => {
     seedState(stateDir, [item({ key: "H1", status: "human-review", scope: "work", cwd: "/tmp/repo" })]);
     const f = makeFake(configDir);

@@ -10,9 +10,10 @@
 // the command fails closed and the regular tick JSON remains the fallback.
 //
 // Keymap (footer-printed): ↑/↓ select · m expand (full item) · t/tab toggle view ·
-// enter/a approve · r reject · d defer · e refine (text field) · x re-dispatch (text field)
+// enter/a approve · r reject · d defer · e refine (scope + repo input) · x re-dispatch (text field)
 // · esc/q close. The refine/re-dispatch field is a real multi-line editor: enter
-// submits, shift+enter inserts a newline, esc cancels.
+// submits, shift+enter inserts a newline, esc cancels. Repo-less proposals get a
+// second "repo (cwd)" stage during refine — the repo the work lands in.
 // -------------------------------------------------------------------------
 
 import {
@@ -29,7 +30,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { applyPanelDecision, buildPanelDoc, type PanelActionId, type PanelItem, type PanelKind } from "../framework/panels.ts";
-import { loadStoreOrNew, queueLengths } from "../queue-store.ts";
+import { loadStoreOrNew, queueLengths, resolveSeries } from "../queue-store.ts";
 
 type Theme = ExtensionContext["ui"]["theme"];
 
@@ -80,12 +81,16 @@ export class DecisionPanel implements Component, Focusable {
   private sel = 0;
   private counts = { proposals: 0, "human-review": 0 };
   private lastResult: { text: string; isError: boolean } | null = null;
-  /** null = nav mode; "refine" | "redispatch" = text-input mode (a real,
-   *  focused multi-line editor field with a visible caret). */
-  private inputFor: "refine" | "redispatch" | null = null;
+  /** null = nav mode; "refine" (scope) → "refine-repo" (repo-less proposals
+   *  then ask for their repo) | "redispatch" = text-input stages. A real,
+   *  focused multi-line editor with a visible caret renders in input mode. */
+  private inputFor: "refine" | "refine-repo" | "redispatch" | null = null;
   private editor: Editor;
   /** null = nav/list mode; an index into `items` = that item's full-detail view. */
   private detailFor: number | null = null;
+  /** The scope typed in the refine stage — submitted together with the repo
+   *  field when the item is repo-less. */
+  private pendingScope: string | null = null;
   private cached?: { width: number; lines: string[] };
 
   constructor(private opts: DecisionPanelOptions) {
@@ -133,7 +138,7 @@ export class DecisionPanel implements Component, Focusable {
     this.cached = undefined;
   }
 
-  private apply(action: PanelActionId, payload?: { scope?: string; findings?: string }): void {
+  private apply(action: PanelActionId, payload?: { scope?: string; cwd?: string; findings?: string }): void {
     const item = this.items[this.sel];
     if (!item) return;
     const r = applyPanelDecision(this.opts.stateDir, item.key, action, payload);
@@ -152,8 +157,32 @@ export class DecisionPanel implements Component, Focusable {
       this.opts.tui.requestRender();
       return;
     }
-    if (forAction === "refine") this.apply("refine", { scope: value });
-    else this.apply("redispatch", { findings: value });
+    if (forAction === "redispatch") {
+      this.apply("redispatch", { findings: value });
+      return;
+    }
+    if (forAction === "refine") {
+      // Scope stage done. An item that already has a repo is refined here;
+      // a REPO-LESS proposal moves on to the repo field (the approval gate
+      // needs a cwd, and this is where the panel can supply it).
+      this.pendingScope = value;
+      if (loadStoreOrNew(this.opts.stateDir).items[item.key]?.cwd) {
+        this.pendingScope = null;
+        this.apply("refine", { scope: value });
+        return;
+      }
+      this.inputFor = "refine-repo";
+      this.editor.setText("");
+      this.opts.tui.requestRender();
+      return;
+    }
+    // refine-repo stage: a non-empty repo sets the item's cwd (the KEY stays
+    // provisional — approval renames it); empty keeps the item repo-less and
+    // applies the scope-only refine.
+    const repo = value.trim();
+    const scope = this.pendingScope;
+    this.pendingScope = null;
+    this.apply("refine", repo ? { scope: scope ?? undefined, cwd: repo } : { scope: scope ?? undefined });
   }
 
   // -- input ----------------------------------------------------------------
@@ -164,10 +193,14 @@ export class DecisionPanel implements Component, Focusable {
       // cancels the input (esc is not a printable — the editor ignores it).
       if (matchesKey(data, Key.escape)) {
         this.inputFor = null;
+        this.pendingScope = null;
         this.opts.tui.requestRender();
         return;
       }
       this.editor.handleInput(data);
+      // typing must NOT hit the width-cache — the input line + the live
+      // destined-series preview re-render from the current value
+      this.cached = undefined;
       this.opts.tui.requestRender();
       return;
     }
@@ -227,6 +260,7 @@ export class DecisionPanel implements Component, Focusable {
       const item = this.items[this.sel];
       if (item && item.actions.includes("refine")) {
         this.inputFor = "refine";
+        this.pendingScope = null;
         // prefill the FULL scope (the worker prompt), not the truncated summary
         this.editor.setText(item.fullScope);
         this.cached = undefined;
@@ -352,12 +386,12 @@ export class DecisionPanel implements Component, Focusable {
           lines.push(...wrap(th.fg("dim", `   ↳ ${target.label}`), 4));
         }
         // Destined-series hint (proposals view): provisional Q-<n> handles are
-        // renamed at approval — shown here so the rename is never a surprise.
+        // renamed at approval — shown here so the rename is never a surprise,
+        // and the human sees the repo's resolved series once the cwd is set
         if (it.seriesHint) {
-          lines.push(...wrap(th.fg("dim", `   ◈ ${it.seriesHint}`), 4));
+          lines.push(...wrap(th.fg("muted", `   ↳ ${it.seriesHint}`), 4));
         }
         const hints = it.actions.map((a) => `[${PANEL_KEY[a]}] ${PANEL_LABEL[a]}`);
-        lines.push(t(th.fg("dim", `   ${hints.join("  ")}`)));
         lines.push("");
       }
     }
@@ -366,13 +400,26 @@ export class DecisionPanel implements Component, Focusable {
     // real focused editor with a visible caret (prefilled with the full scope
     // for refine; empty for findings).
     if (this.inputFor) {
-      const item = this.items[this.sel];
-      const where = item ? item.key : "?";
-      const label = this.inputFor === "refine" ? ` Refine scope — ${where}:` : ` Re-dispatch findings — ${where}:`;
+      const currentKey = this.items[this.sel]?.key ?? "";
+      const label =
+        this.inputFor === "refine"
+          ? ` Refine scope — ${currentKey}:`
+          : this.inputFor === "refine-repo"
+            ? ` Repo (cwd) — ${currentKey} (the repo this work lands in):`
+            : ` Re-dispatch findings — ${currentKey}:`;
       lines.push(t(th.fg("accent", th.bold(label))));
       this.editor.focused = this.focused;
       const inputLines = this.editor.render(inner - 2);
       lines.push(...inputLines.map((l) => "  " + l));
+      // LIVE destined-series preview: as the repo path is typed, the series
+      // this key would rename into is resolved (registry → history → slug).
+      if (this.inputFor === "refine-repo") {
+        const repoText = this.editor.getText().trim();
+        const hint = repoText
+          ? `→ approval renames ${currentKey} into series ${resolveSeries(this.opts.stateDir, repoText)}`
+          : `(empty keeps ${currentKey} repo-less — approval needs a repo)`;
+        lines.push(...wrap(th.fg("dim", `  ${hint}`), 2));
+      }
     }
 
     // Last decision result
@@ -423,7 +470,7 @@ export function registerDecisionPanel(
     if (ui) refreshPanelBadge(ui, deps.stateDir());
   };
   pi.registerCommand("orchestrate-panel", {
-    description: "Decision panel: proposals + human-review views (tab toggles; a approve · r reject · d defer · e refine · x re-dispatch)",
+    description: "Decision panel: proposals + human-review views (tab toggles; a approve · r reject · d defer · e refine scope+repo · x re-dispatch)",
     handler: async (args, ctx) => {
       ui = ctx.ui as typeof ui;
       const initial: PanelKind = (args ?? "").trim() === "review" ? "human-review" : "proposals";
