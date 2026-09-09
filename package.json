@@ -1,6 +1,6 @@
 {
   "name": "orchestrator-autopilot",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "Deterministic orchestrator autopilot \u2014 keeps a subagent worker fleet at capacity. One queue store + lifecycle + tools; each host loads only its own adapter.",
   "keywords": [
