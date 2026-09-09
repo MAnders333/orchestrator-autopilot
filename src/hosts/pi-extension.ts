@@ -487,6 +487,17 @@ export default function (pi: ExtensionAPI) {
       const val = rest.length ? rest.join(" ") : undefined; // full remainder — "off in 30m" must reach the shared parser intact
       hostCtx = ctx ?? null;
       try {
+        // PREREQUISITE PROBE (fail-closed, BEFORE the toggle writes state):
+        // the harness spawns through the subagent backend — without that
+        // runtime, dispatch/review would fail downstream in confusing ways.
+        // Say so NOW instead of half-activating.
+        if (cmd === "on") {
+          const fleet = await backend.fleetStatus();
+          if (fleet === null) {
+            ctx.ui.notify("Autopilot NOT activated: the subagent backend is unreachable (fleet status timed out). Install/enable the pi-subagents extension and retry — the queue tools work without it, but ticks/dispatch do not.", "error");
+            return;
+          }
+        }
         // ONE shared toggle implementation (config.autopilotCommand) — this
         // host keeps only its SIDE EFFECTS: the /orchestrate injection, the
         // activation nudge, the orchestrator mode notice, and the notify.

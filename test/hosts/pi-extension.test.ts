@@ -34,6 +34,14 @@ function mockPi() {
   // rejected with the real runtime error. This is what the live bug was: a
   // delayed activate sweep injected while the settled tick's turn ran.
   let agentBusy = false;
+  // The subagent backend's runtime reachability — the /autopilot on probe
+  // fleetStatus()'s this; false simulates pi-subagents absent (refusal path).
+  let fleetReachable = true;
+  // (manualFleetReplies lives at MODULE level — replyToLastStatus is
+  // module-scoped too — reset in beforeEach below.)
+  // Tests that reply to status RPCs MANUALLY (replyToLastStatus) set this so
+  // the fake's auto-answer does not race their replies.
+  let manualFleetReplies = false;
   const runtimeError = "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.";
   const pi = {
     events: {
@@ -44,6 +52,15 @@ function mockPi() {
       emit: (ch: string, payload: any) => {
         if (ch === "agent_start") agentBusy = true;
         if (ch === "agent_settled") agentBusy = false;
+        // Deferred auto-answer for STATUS RPCs: one macrotask later, so a test
+        // that replies SYNCHRONOUSLY right after triggering (replyToLastStatus)
+        // always wins the first-reply race. The payload is test-controllable
+        // (fleetAnswer) — default: reachable, empty fleet.
+        if (ch === "subagents:rpc:v1:request" && payload?.method === "status") {
+          setTimeout(() => {
+            for (const h of handlers[`subagents:rpc:v1:reply:${payload.requestId}`] ?? []) h(fleetAnswer);
+          }, 0);
+        }
         emitted.push({ channel: ch, payload });
       },
     },
@@ -91,6 +108,11 @@ function mockPi() {
 
 type MockPi = ReturnType<typeof mockPi>;
 
+// The fake pi's deferred status-RPC answer (one macrotask after the request —
+// synchronous manual replies always win). Default: backend reachable, empty
+// fleet; tests override per scenario.
+let fleetAnswer: unknown = { success: true, data: { fleet: { totalActive: 0, omitted: 0 } } };
+
 describe("pi adapter smoke", () => {
   let dir: string;
   let repo: string;
@@ -101,6 +123,7 @@ describe("pi adapter smoke", () => {
   let lastSid = "";
 
   beforeEach(async () => {
+    fleetAnswer = { success: true, data: { fleet: { totalActive: 0, omitted: 0 } } };
     dir = mkdtempSync(join(tmpdir(), "autopilot-smoke-"));
     writeFileSync(join(dir, "state.md"), LEGACY_MD);
     process.env.AUTOPILOT_STATE_DIR = dir;
@@ -164,6 +187,7 @@ describe("pi adapter smoke", () => {
   }
   /** Fire the RPC reply for the last emitted STATUS request (fleet status). */
   function replyToLastStatus(totalActive: number, entries: Array<{ agent: string }> = []) {
+    fleetAnswer = { success: true, data: { fleet: { totalActive, entries, omitted: 0 } } }; // if the manual reply lost the race, the deferred answer carries the right payload
     let req: { channel: string; payload: any } | undefined;
     for (let i = pi._emitted.length - 1; i >= 0; i--) {
       const e = pi._emitted[i];
@@ -374,6 +398,18 @@ describe("pi adapter smoke", () => {
     } finally {
       pi.sendMessage = origSend;
     }
+  });
+
+  test("PREREQ PROBE: backend unreachable → /autopilot on REFUSES (state stays off)", async () => {
+    fleetAnswer = { success: false }; // simulates pi-subagents absent
+    const notes: Array<[string, string]> = [];
+    ctx = { ui: { notify: (m: string, k: string) => notes.push([m, k]) }, cwd: dir };
+    await runAutopilotCmd("on");
+    expect(notes.some(([m]) => m.startsWith("Autopilot NOT activated"))).toBe(true);
+    // the toggle must NOT have written the per-session state
+    expect(existsSync(join(dir, "autopilot.sessions.json"))).toBe(false);
+    // and the orchestrator was never injected
+    expect(pi._sent.some((m) => m.kind === "user" && m.args?.[0] === "/orchestrate")).toBe(false);
   });
 
   test("autopilot on → migrates legacy state.md into queue.json + injects /orchestrate", async () => {

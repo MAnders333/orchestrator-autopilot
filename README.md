@@ -27,6 +27,11 @@ extension). It enables the tick loop and injects `/orchestrate`, the operating
 program (shipped as a package prompt). `/orchestrate` can also be run
 standalone without the harness.
 
+**Prompt precedence**: pi loads global prompts before package prompts, so a
+locally projected `/orchestrate` (e.g. from your dotfiles) deterministically
+SHADOWS the package one — your customizations win; fresh installs get the
+package version.
+
 ### opencode (npm plugin)
 
 `opencode.jsonc`:

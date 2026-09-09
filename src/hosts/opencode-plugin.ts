@@ -344,6 +344,15 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
       // ONE shared toggle implementation (config.autopilotCommand) — this host
       // only returns its message (pi's /autopilot notifies + injects instead).
       try {
+        // PREREQUISITE PROBE (fail-closed, BEFORE the toggle writes state):
+        // the harness spawns through the backend — without that runtime,
+        // dispatch/review would fail downstream in confusing ways.
+        if (action === "on") {
+          const fleet = await backend.fleetStatus();
+          if (fleet === null) {
+            return "Autopilot NOT activated: the subagent backend is unreachable (fleet status timed out). Install/enable the required backend extension and retry — the queue tools work without it, but ticks/dispatch do not.";
+          }
+        }
         const r = autopilotCommand(action, String(args.value ?? "").trim() || undefined, { stateDir, sessionId: sid ?? "" });
         if (!r.ok) return r.message;
         if (r.scheduledOffAt !== undefined && sid) {
