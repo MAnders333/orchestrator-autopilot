@@ -43,7 +43,7 @@ const LIB_DIR = (() => {
 })();
 // jiti resolves .ts imports at runtime; createRequire keeps this ESM-safe.
 const { Autopilot } = require(`${LIB_DIR}/core.ts`) as typeof import("./core.ts");
-const { loadAutopilotConfig, isAutopilotOn, appendTelemetry, autopilotCommand, autopilotModeMessage, resolveStateDir } = require(`${LIB_DIR}/config.ts`) as typeof import("./config.ts");
+const { loadAutopilotConfig, isAutopilotOn, appendTelemetry, autopilotCommand, autopilotModeMessage, resolveStateDir, writeSessionAutopilotState } = require(`${LIB_DIR}/config.ts`) as typeof import("./config.ts");
 const { loadStoreOrNew, ensureMigrated, queueLengths } = require(`${LIB_DIR}/queue-store.ts`) as typeof import("./queue-store.ts");
 const { createSubagentBackend, defaultRunsDir } = require(`${LIB_DIR}/backends/index.ts`) as typeof import("./backends/index.ts");
 const { queueList, queueAdd, queueUpdate, queueDispatch, queueReview, queueSteer, repoCheck } = require(`${LIB_DIR}/tools/queue-ops.ts`) as typeof import("./tools/queue-ops.ts");
@@ -295,7 +295,11 @@ export default function (pi: ExtensionAPI) {
     sessionId = (ctx?.sessionManager?.getSessionId?.() as string | undefined) ?? "";
     orchestratorLoaded = false;
     hostCtx = ctx ?? null;
-    maybeInjectOrchestrate(); // persisted per-session state → auto-load orchestrator mode
+    // A session ALWAYS starts with autopilot OFF — no auto-restore from a
+    // persisted on (resumed sessions), no legacy-sentinel auto-on. The user
+    // explicitly runs /autopilot on to engage the harness; that is the only
+    // activation path (it injects /orchestrate + the run-your-loop directive).
+    if (sessionId) writeSessionAutopilotState(stateDir, sessionId, "off");
   });
 
   // -- periodic capacity sweep (deterministic safety net) --------------------
@@ -515,8 +519,11 @@ export default function (pi: ExtensionAPI) {
         } else if (r.mode === "on") {
           schedules.cancel(sessionId); // explicit toggle cancels a pending schedule
           ensureMigrated(stateDir); // import legacy state.md into queue.json once
+          // STARTUP DOES NOT NUDGE: /orchestrate loads the mode; the ON
+          // message (autopilotModeMessage) carries the run-your-loop now
+          // directive. The first tick can never race the injection because
+          // no tick is fired here.
           maybeInjectOrchestrate();
-          runner.onActivate(); // nudge a pre-existing capacity gap immediately
           informOrchestrator("on");
           ctx.ui.notify(`Autopilot ON (session ${sessionId.slice(0, 8)}) — orchestrator mode loaded, capacity ticks enabled`, "info");
         } else if (r.mode === "off") {

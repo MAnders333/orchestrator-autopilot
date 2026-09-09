@@ -406,8 +406,10 @@ describe("pi adapter smoke", () => {
     ctx = { ui: { notify: (m: string, k: string) => notes.push([m, k]) }, cwd: dir };
     await runAutopilotCmd("on");
     expect(notes.some(([m]) => m.startsWith("Autopilot NOT activated"))).toBe(true);
-    // the toggle must NOT have written the per-session state
-    expect(existsSync(join(dir, "autopilot.sessions.json"))).toBe(false);
+    // the toggle must NOT have turned the session on (it starts OFF and the
+    // refusal leaves it OFF)
+    const sess = JSON.parse(readFileSync(join(dir, "autopilot.sessions.json"), "utf8"));
+    expect(Object.values(sess).every((v: any) => v.status !== "on")).toBe(true);
     // and the orchestrator was never injected
     expect(pi._sent.some((m) => m.kind === "user" && m.args?.[0] === "/orchestrate")).toBe(false);
   });
@@ -752,6 +754,34 @@ describe("pi adapter smoke", () => {
     emit("subagent:async-complete", { runId: "371d1bb9-aaaa", agent: "worker", success: true });
     expect(pi._sent.filter((s) => s.kind === "message").length).toBe(0);
   });
+  test("ACTIVATION: no immediate tick — /orchestrate + run-now directive only (startup never nudges)", async () => {
+    await runAutopilotCmd("on");
+    const users = pi._sent.filter((x) => x.kind === "user").map((x) => String(x.args?.[0] ?? ""));
+    // /orchestrate loaded first, then the run-now directive — and NO [orch-tick] message
+    expect(users.some((u) => u === "/orchestrate")).toBe(true);
+    expect(users.some((u) => u.includes("run your loop now"))).toBe(true);
+    expect(users.indexOf("/orchestrate")).toBeLessThan(users.findIndex((u) => u.includes("run your loop now")));
+    expect(pi._sent.some((x) => x.kind === "message" && JSON.stringify(x.args).includes("[orch-tick:"))).toBe(false);
+  });
+
+  test("SESSION START: a previously-on session restarts OFF — no auto-inject, explicit /autopilot on required", async () => {
+    startSession("tui", "fixed-sid");
+    await runAutopilotCmd("on"); // turn on in this session
+    expect(pi._sent.some((x) => x.kind === "user" && x.args?.[0] === "/orchestrate")).toBe(true);
+    pi._sent.length = 0;
+    startSession("tui", "fixed-sid"); // resume the SAME session — must NOT auto-restore ON
+    expect(pi._sent.filter((x) => x.kind === "user").length).toBe(0); // no auto-inject
+    expect(pi._sent.filter((x) => x.kind === "message").length).toBe(0); // no tick
+    // and the persisted per-session state was reset to OFF
+    const sess = JSON.parse(readFileSync(join(dir, "autopilot.sessions.json"), "utf8"));
+    expect(sess["fixed-sid"].status).toBe("off");
+    // the harness is idle until the user explicitly turns it on
+    emit("agent_settled", {});
+    await new Promise((r) => setTimeout(r, 20));
+    expect(pi._sent.some((x) => x.kind === "message" && JSON.stringify(x.args).includes("[orch-tick:"))).toBe(false);
+  });
+
+
 
   test("no env → the documented default state dir (the shared resolver never fails closed)", () => {
     delete process.env.AUTOPILOT_STATE_DIR;

@@ -65,8 +65,6 @@ export interface FrameworkRunner {
   onSettled(): void;
   /** Periodic re-nudge (bypasses the hash — re-ticks a persistent gap). */
   onTimer(): void;
-  /** One activation nudge (pi: /autopilot on; opencode: plugin start). */
-  onActivate(): void;
   start(): void;
   stop(): void;
 }
@@ -393,11 +391,6 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       } catch {
         // never let the timer break the host
       }
-    },
-    onActivate() {
-      flushDeferred();
-      flushHarness();
-      void sweep("activate");
     },
     start() {
       if (opts.sweepIntervalMs > 0 && !timer) {

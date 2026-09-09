@@ -118,16 +118,9 @@ export function readSessionAutopilotState(stateDir: string, sessionId: string): 
   const store = readSessionStore(stateDir);
   const mine = store[sessionId];
   if (mine?.status === "on" || mine?.status === "off") return mine.status;
-  if (readSentinel(stateDir) === "on") {
-    const next = { ...store, [sessionId]: { status: "on" as const, updatedAt: new Date().toISOString() } };
-    writeSessionStore(stateDir, next);
-    try {
-      writeAtomic(autopilotSentinelPath(stateDir), "off — migrated to per-session (" + new Date().toISOString() + ")\n");
-    } catch {
-      // best effort
-    }
-    return "on";
-  }
+  // Sessions start OFF (the host writes off at session_start). There is no
+  // legacy global-sentinel auto-on: activation is always an explicit
+  // /autopilot on.
   return "off";
 }
 
@@ -273,8 +266,14 @@ export function autopilotModeMessage(mode: "on" | "off", workspace?: { stateDir:
   const hint = mode === "on" && workspace
     ? `\n\nWorkspace facts: state dir ${workspace.stateDir} — autopilot.config.json there carries your \"workspace\" section (intake sources, goals file). Read it before intake scans; it is the single source of per-environment truth.`
     : "";
+  // The run-now directive makes startup DETERMINISTIC without a tick: the ON
+  // message is an instruction to act, arriving AFTER /orchestrate loaded the
+  // mode. Startup never nudges (no activation tick) — this replaces it.
+  const runNow = mode === "on"
+    ? "\n\nYou were just activated: run your loop now — call queue_list to read the queue, dispatch ready approved items into free slots, and run an intake scan (proposing the next batch) if the approved buffer is low (< 2 ready)."
+    : "";
   return mode === "on"
-    ? "Autopilot is now ON — the harness is active: it auto-dispatches approved items (scope + cwd + low/med risk), auto-dispatches reviews on completion, auto-re-dispatches on review FAIL, routes verdicts (PASS to done), and sends [orch-tick] state messages. You keep: approval, high-risk checkpoints, review overrides, flag_for_review, steering. Do not manually queue_dispatch/queue_review what the harness handles." + hint
+    ? "Autopilot is now ON — the harness is active: it auto-dispatches approved items (scope + cwd + low/med risk), auto-dispatches reviews on completion, auto-re-dispatches on review FAIL, routes verdicts (PASS to done), and sends [orch-tick] state messages. You keep: approval, high-risk checkpoints, review overrides, flag_for_review, steering. Do not manually queue_dispatch/queue_review what the harness handles." + hint + runNow
     : "Autopilot is now OFF — the harness is idle: no auto flips, no verdict routing, no auto-dispatch/review, no ticks. YOU must do everything manually: reconcile completions (queue_update active to reviewing/failed), route reviews (queue_review), read verdicts and move items (queue_update), dispatch (queue_dispatch), and flag (flag_for_review). The queue tools remain available. Re-enable by running the autopilot on command.";
 }
 

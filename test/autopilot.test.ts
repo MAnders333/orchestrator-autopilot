@@ -453,10 +453,14 @@ describe("core config + sentinel", () => {
     expect(isAutopilotOn(dir)).toBe(false);
   });
 
-  test("legacy global sentinel migrates to the first session, then legacy is off", () => {
+  test("unknown session defaults OFF — no legacy-sentinel auto-on", () => {
+    // The legacy global .autopilot=on must NOT turn a fresh session on: a
+    // session only ever starts via explicit /autopilot on.
     writeSentinel(dir, "on");
-    expect(readSessionAutopilotState(dir, "first-session")).toBe("on");
-    expect(readSentinel(dir)).toBe("off");
+    expect(readSessionAutopilotState(dir, "first-session")).toBe("off");
+    expect(readSentinel(dir)).toBe("on"); // untouched — not consumed by a migration
+    writeSessionAutopilotState(dir, "first-session", "on");
+    expect(readSessionAutopilotState(dir, "first-session")).toBe("on"); // explicit toggle works
     expect(readSessionAutopilotState(dir, "second-session")).toBe("off");
   });
 

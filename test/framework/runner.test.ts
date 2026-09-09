@@ -72,7 +72,7 @@ describe("framework runner (shared tick machinery)", () => {
   test("onActivate with a ready item → dispatch tick delivered through the gate", () => {
     const f = setup();
     seed(f, "A1");
-    f.runner.onActivate();
+    f.runner.onTimer();
     return new Promise((r) => setTimeout(r, 50)).then(() => {
       expect(f.delivered.length).toBe(1);
       expect(f.delivered[0]).toContain("[orch-tick: dispatch]");
@@ -121,27 +121,27 @@ describe("framework runner (shared tick machinery)", () => {
     const f = setup();
     seed(f, "A1");
     f.busy = true;
-    f.runner.onActivate();
+    f.runner.onTimer();
     await new Promise((r) => setTimeout(r, 50));
     expect(f.delivered.length).toBe(0);
     f.busy = false;
     f.interactive = false;
-    f.runner.onActivate();
+    f.runner.onTimer();
     await new Promise((r) => setTimeout(r, 50));
     expect(f.delivered.length).toBe(0);
     f.interactive = true;
     f.loaded = false;
-    f.runner.onActivate();
+    f.runner.onTimer();
     await new Promise((r) => setTimeout(r, 50));
     expect(f.delivered.length).toBe(0);
     f.loaded = true;
     f.compacting = true;
-    f.runner.onActivate();
+    f.runner.onTimer();
     await new Promise((r) => setTimeout(r, 50));
     expect(f.delivered.length).toBe(0);
     f.compacting = false;
     seed(f, "A2"); // queue hash changed → the quiet period allows a new tick
-    f.runner.onActivate();
+    f.runner.onTimer();
     await new Promise((r) => setTimeout(r, 50));
     expect(f.delivered.length).toBe(1);
   });
@@ -149,8 +149,8 @@ describe("framework runner (shared tick machinery)", () => {
   test("cooldown throttles rapid ticks (the double-fire dedupe)", async () => {
     const f = setup();
     seed(f, "A1");
-    f.runner.onActivate();
-    f.runner.onActivate(); // immediate second — within the 1500ms cooldown
+    f.runner.onTimer();
+    f.runner.onTimer(); // immediate second — within the 1500ms cooldown
     await new Promise((r) => setTimeout(r, 50));
     expect(f.delivered.length).toBe(1);
   });
@@ -159,7 +159,7 @@ describe("framework runner (shared tick machinery)", () => {
     const f = setup();
     seed(f, "A1");
     f.enabled = false;
-    f.runner.onActivate();
+    f.runner.onTimer();
     await new Promise((r) => setTimeout(r, 50));
     expect(f.delivered.length).toBe(0);
   });
@@ -306,7 +306,7 @@ describe("the shared deferral (framework-level: busy sends held + flushed at set
     const f = setup();
     seed(f, "A1");
     f.busy = true;
-    f.runner.onActivate(); // the sweep's tick → the router "deferred" → the runner holds it
+    f.runner.onTimer(); // the sweep's tick → the router "deferred" → the runner holds it
     await new Promise((r) => setTimeout(r, 60));
     expect(f.delivered.length).toBe(0); // nothing injected mid-turn
     f.busy = false; // the agent settles (pi: agent_settled; opencode: session.idle)
@@ -392,7 +392,7 @@ describe("the shared autopilot gate (toggle off → harness idle)", () => {
       sweepIntervalMs: 0,
       deliveryRetryDelayMs: 10,
     });
-    runner.onActivate(); // activation sweep → tick fires through the gate
+    runner.onTimer(); // activation sweep → tick fires through the gate
     await new Promise((r) => setTimeout(r, 5));
     expect(delivered.length).toBe(0); // first attempt failed async — NOT counted as delivered
     await new Promise((r) => setTimeout(r, 40)); // backoff elapses → retry
@@ -420,7 +420,7 @@ describe("the shared autopilot gate (toggle off → harness idle)", () => {
       sweepIntervalMs: 0,
       deliveryRetryDelayMs: 5,
     });
-    runner.onActivate();
+    runner.onTimer();
     // max 5 attempts + scheduling slack
     await new Promise((r) => setTimeout(r, 150));
     expect(calls).toBeLessThanOrEqual(6); // bounded — no infinite hot loop
