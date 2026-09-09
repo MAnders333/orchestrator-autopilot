@@ -176,6 +176,17 @@ describe("framework runner (shared tick machinery)", () => {
     expect(f.delivered.some((m) => m.includes("[orch-tick: dispatch]"))).toBe(true);
   });
 
+  test("onCompletion: a budget-capped worker failure DELIVERS the failure tick (never silent) with the bigger-budget hint", async () => {
+    const f = setup();
+    seed(f, "W1", { status: "active", runId: "9be47d4f-0839-4c8f-9f41-71764658da3c", timeoutMs: 43_200_000 });
+    f.runner.onCompletion({ runId: "9be47d4f-0839-4c8f-9f41-71764658da3c", agent: "worker", success: false, timedOut: true } as never);
+    await new Promise((r) => setTimeout(r, 60));
+    const st = load(f);
+    expect(st.items["W1"].status).toBe("failed");
+    expect(st.items["W1"].failCause).toBe("budget-capped");
+    expect(f.delivered.some((m) => m.includes("[orch-tick: failure]") && m.includes("RE-DISPATCH WITH A BIGGER BUDGET"))).toBe(true);
+  });
+
   test("onCompletion: reviewer Verdict: PASS → human-review + reviewTick", async () => {
     const f = setup();
     seed(f, "R1", { status: "ai-review", cwd: "/tmp/repo", risk: "low" });
