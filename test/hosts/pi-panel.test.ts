@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { newStore, saveStore, type QueueItem } from "../../src/queue-store.ts";
-import { DecisionPanel } from "../../src/hosts/pi-panel.ts";
+import { DecisionPanel, refreshPanelBadge } from "../../src/hosts/pi-panel.ts";
 
 const theme: Record<string, any> = {
   fg: (c: string, s: string) => (typeof s === "string" ? s : String(s)),
@@ -139,5 +139,33 @@ describe("DecisionPanel keyboard flow", () => {
     expect(read()["H1"].notes).toContain("merge");
     panel.handleInput("q");
     expect(sut.closed).toBe(true);
+  });
+});
+describe("refreshPanelBadge — the push nudge", () => {
+  test("shows pending counts when either view has items; clears when empty", () => {
+    const { dir } = (() => {
+      const { mkdtempSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+      const { join } = require("node:path") as typeof import("node:path");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { newStore, saveStore } = require("../../src/queue-store.ts") as typeof import("../../src/queue-store.ts");
+      const d = mkdtempSync(join(tmpdir(), "orch-badge-"));
+      const st = newStore();
+      st.items["P1"] = item({ key: "P1", status: "proposal", scope: "x", cwd: "/tmp" });
+      st.items["H1"] = item({ key: "H1", status: "human-review", scope: "x", cwd: "/tmp" });
+      saveStore(d, st);
+      return { dir: d, read: () => JSON.parse(readFileSync(join(d, "queue.json"), "utf8")).items };
+    })();
+    const widget: Record<string, unknown> = {};
+    const ui = { setWidget: (k: string, v: unknown) => { widget[k] = v; }, theme } as never;
+    refreshPanelBadge(ui, dir);
+    expect(widget["orch-panel-badge"]).toBeTruthy();
+    expect(String(widget["orch-panel-badge"])).toContain("proposals 1");
+    expect(String(widget["orch-panel-badge"])).toContain("human review 1");
+    // empty the queue → badge cleared
+    const { newStore, saveStore } = require("../../src/queue-store.ts") as typeof import("../../src/queue-store.ts");
+    const st = newStore();
+    saveStore(dir, st);
+    refreshPanelBadge(ui, dir);
+    expect(widget["orch-panel-badge"]).toBeUndefined();
   });
 });

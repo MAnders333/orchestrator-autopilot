@@ -1,6 +1,6 @@
 {
   "name": "orchestrator-autopilot",
-  "version": "0.4.0",
+  "version": "0.5.1",
   "type": "module",
   "description": "Deterministic orchestrator autopilot — keeps a subagent worker fleet at capacity. One queue store + lifecycle + tools; each host loads only its own adapter.",
   "keywords": [
@@ -26,13 +26,13 @@
   },
   "dependencies": {
     "@earendil-works/pi-tui": "^0.85.1",
-    "@opencode-ai/plugin": "^1.4.7"
+    "@opencode-ai/plugin": "^1.4.7",
+    "@opentui/solid": "0.5.11",
+    "@opentui/core": "0.5.11",
+    "solid-js": "1.9.12"
   },
   "peerDependencies": {
-    "typebox": "*",
-    "@opentui/solid": "0.5.x",
-    "@opentui/core": "0.5.x",
-    "solid-js": "1.9.x"
+    "typebox": "*"
   },
   "files": [
     "src",
@@ -42,20 +42,6 @@
     "README.md",
     "LICENSE"
   ],
-  "devDependencies": {
-    "@opentui/core": "0.5.11",
-    "@opentui/solid": "0.5.11",
-    "solid-js": "1.9.12"
-  },
-  "peerDependenciesMeta": {
-    "@opentui/solid": {
-      "optional": true
-    },
-    "@opentui/core": {
-      "optional": true
-    },
-    "solid-js": {
-      "optional": true
-    }
-  }
+  "devDependencies": {},
+  "peerDependenciesMeta": {}
 }

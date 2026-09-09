@@ -39,12 +39,13 @@ interface FakeApi {
   toasts: any[];
   navs: any[];
   dialogs: any[];
+  slotPlugins: any[];
   configDir: string;
   api: any;
 }
 
 function makeFake(configDir: string): FakeApi {
-  const f: FakeApi = { routes: [], layers: [], toasts: [], navs: [], dialogs: [], configDir, api: null as any };
+  const f: FakeApi = { routes: [], layers: [], toasts: [], navs: [], dialogs: [], slotPlugins: [], configDir, api: null as any };
   f.api = {
     route: {
       register: (rs: any[]) => f.routes.push(...rs),
@@ -53,6 +54,7 @@ function makeFake(configDir: string): FakeApi {
     keymap: { registerLayer: (l: any) => f.layers.push(l) },
     mode: { push: () => () => {} },
     state: { path: { config: configDir } },
+    slots: { register: (p: any) => f.slotPlugins.push(p) },
     ui: {
       toast: (t: any) => f.toasts.push(t),
       dialog: { replace: (render: () => any) => f.dialogs.push({ render }) },
@@ -89,16 +91,25 @@ beforeEach(() => {
 });
 
 describe("opencode TUI plugin registration + state-dir resolution", () => {
+  test("registers the pending-count badge slot (the push nudge)", async () => {
+    const f = makeFake(configDir);
+    await tui(f.api, {}, {});
+    expect(f.slotPlugins.length).toBe(1);
+    expect(typeof f.slotPlugins[0].slots.app_bottom).toBe("function");
+  });
+
   test("registers the route, the palette-open command, and the keymap layer", async () => {
     const f = makeFake(configDir);
     await tui(f.api, {}, {});
     const route = f.routes.find((r) => r.name === "orchestrator-panel");
     expect(route).toBeTruthy();
     expect(typeof route.render).toBe("function");
-    const layer = f.layers[0];
+    const opener = f.layers.find((l: any) => l.mode === undefined);
+    const layer = f.layers.find((l: any) => l.mode === "orch-panel");
     expect(layer.mode).toBe("orch-panel");
     const names = layer.commands.map((c: any) => c.name);
-    expect(names).toContain("orch.panel"); // palette/slash opener
+    expect(opener.commands.map((c: any) => c.name)).toContain("orch.panel"); // palette/slash opener is UNMODE'd
+    expect(opener.mode).toBeUndefined();
     expect(names).toContain("orch.approve");
     expect(names).toContain("orch.refine");
     const has = (k: string) => layer.bindings.some((b: any) => b.key === k);
@@ -148,7 +159,7 @@ describe("opencode TUI controller + commands", () => {
     seedState(stateDir, [item({ key: "H1", status: "human-review", scope: "work", cwd: "/tmp/repo" })]);
     const f = makeFake(configDir);
     await tui(f.api, {}, {});
-    const layer = f.layers[0];
+    const layer = f.layers.find((l: any) => l.mode === "orch-panel");
     const run = (name: string) => layer.commands.find((c: any) => c.name === name).run();
     run("orch.toggle"); // → human-review
     run("orch.approve");
@@ -160,7 +171,7 @@ describe("opencode TUI controller + commands", () => {
     seedState(stateDir, [item({ key: "P1", status: "proposal", scope: "old scope", cwd: "/tmp" })]);
     const f = makeFake(configDir);
     await tui(f.api, {}, {});
-    const layer = f.layers[0];
+    const layer = f.layers.find((l: any) => l.mode === "orch-panel");
     layer.commands.find((c: any) => c.name === "orch.refine").run();
     expect(f.dialogs.length).toBe(1);
     const el = f.dialogs[0].render();
@@ -179,7 +190,7 @@ describe("opencode TUI controller + commands", () => {
     const ctl = createPanelController(stateDir);
     ctl.kind = "human-review";
     await tui(f.api, {}, {});
-    const layer = f.layers[0];
+    const layer = f.layers.find((l: any) => l.mode === "orch-panel");
     layer.commands.find((c: any) => c.name === "orch.toggle").run(); // ensure HR view regardless of ctl init
     layer.commands.find((c: any) => c.name === "orch.redispatch").run();
     expect(f.dialogs.length).toBe(1);
@@ -191,7 +202,7 @@ describe("opencode TUI controller + commands", () => {
   test("close navigates home; toggle changes the controller view", async () => {
     const f = makeFake(configDir);
     await tui(f.api, {}, {});
-    const layer = f.layers[0];
+    const layer = f.layers.find((l: any) => l.mode === "orch-panel");
     layer.commands.find((c: any) => c.name === "orch.close").run();
     expect(f.navs[f.navs.length - 1].name).toBe("home");
     const ctl = createPanelController(stateDir);

@@ -38,6 +38,7 @@ interface TuiApi {
   };
   mode?: { push(mode: string): () => void };
   state: { path?: { config?: string } };
+  slots?: { register(p: { slots: Record<string, (...args: unknown[]) => unknown> }): string };
   ui: {
     toast(input: { variant?: "info" | "success" | "warning" | "error"; title?: string; message: string }): void;
     dialog?: {
@@ -109,6 +110,23 @@ export function createPanelController(stateDir: string): PanelController {
 }
 
 const WINDOW = 7;
+
+function pendingCounts(stateDir: string): { p: number; h: number } {
+  const counts = queueLengths(loadStoreOrNew(stateDir));
+  return { p: counts.proposal, h: counts["human-review"] };
+}
+
+/** The persistent app_bottom badge (the push nudge): shows pending counts
+ *  while either view has items; self-refreshes via a poll. Same feed as the
+ *  panel — never duplicative, just visible. */
+function BadgeComponent(props: { stateDir: string }): JSX.Element {
+  const [c, setC] = createSignal(pendingCounts(props.stateDir));
+  const timer = setInterval(() => setC(pendingCounts(props.stateDir)), 30_000);
+  onCleanup(() => clearInterval(timer));
+  const { p, h } = c();
+  if (p + h === 0) return null;
+  return jsx("text", { children: `decision panel — proposals ${p} · human review ${h} (open: /panel)` });
+}
 
 /** The route body — a Solid component: reads the controller (a signal bump
  *  re-renders after every action/navigation), pushes the panel keymap mode. */
@@ -204,6 +222,9 @@ export const tui: TuiPlugin = async (api, _options, _meta) => {
   const stateDir = tuiStateDir(configDir);
   const ctl = createPanelController(stateDir);
 
+  // THE PUSH NUDGE: a persistent app_bottom badge with live pending counts.
+  api.slots?.register({ slots: { app_bottom: (() => jsx(BadgeComponent, { stateDir })) as never } });
+
   api.route.register([
     {
       name: "orchestrator-panel",
@@ -215,10 +236,20 @@ export const tui: TuiPlugin = async (api, _options, _meta) => {
     },
   ]);
 
+  // Opener layer — UNMODE'd so /panel + the palette command work from the
+  // base UI (a mode-gated layer only activates while the panel route is open).
+  api.keymap.registerLayer({
+    commands: [
+      { name: "orch.panel", title: "Open decision panel", category: "Orchestrator", namespace: "palette", slashName: "panel", run: () => openPanel(api, ctl) },
+    ],
+    bindings: [],
+  });
+
+  // Panel-action layer — active only while the route is open (mode pushed by
+  // PanelComponent), so the a/r/d/e/x keys never leak into the prompt.
   api.keymap.registerLayer({
     mode: "orch-panel",
     commands: [
-      { name: "orch.panel", title: "Open decision panel", category: "Orchestrator", namespace: "palette", slashName: "panel", run: () => openPanel(api, ctl) },
       { name: "orch.close", title: "Close decision panel", category: "Orchestrator", run: () => api.route.navigate("home") },
       { name: "orch.toggle", title: "Toggle view (proposals / human review)", category: "Orchestrator", run: () => ctl.toggleView() },
       { name: "orch.selUp", title: "Select previous", category: "Orchestrator", run: () => ctl.move(-1) },
@@ -244,7 +275,6 @@ export const tui: TuiPlugin = async (api, _options, _meta) => {
       { key: "e", cmd: "orch.refine", desc: "Refine scope" },
       { key: "x", cmd: "orch.redispatch", desc: "Re-dispatch with findings" },
     ],
-  });
-};
+  });};
 
 export default { id: "orchestrator-autopilot", tui };

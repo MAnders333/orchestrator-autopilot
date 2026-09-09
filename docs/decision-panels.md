@@ -42,8 +42,17 @@ Research date: 2026-09. Evidence is per-source and cited inline (`[verified]`).
   carried PRE-migration STATE_DIR/GOALS_FILE paths (nonexistent dirs → empty
   queues for opencode hosts since the migration); now point at
   `orchestrator/work` + `orchestrator/personal`.
-- **Remaining** — nudges (pi status widget / attention notify), wiring
-  `tui.json` in the real opencode configs, live opencode load smoke.
+- **Done** — nudges: pi status-widget badge above the editor (pending counts,
+  refreshed on panel open/close/decisions + a 60s sweep) and an opencode
+  `app_bottom` badge (30s poll, Solid hook cleanup).
+- **Done** — wiring + live smoke: `tui.json` added to the work + personal
+  opencode configs (`"plugin": ["orchestrator-autopilot"]`); `opencode plugin`
+  install flow verified (tui target detection + @opentui deps); live TUI run
+  confirmed the `/panel` slash command registers. Live smoke caught + fixed a
+  real bug: the opener command was in the mode-gated layer (not dispatchable
+  from base mode) — split into an UNMODE'd opener layer + mode'd panel layer.
+- **Remaining** — 0.5.1 publish (OTP) + final live smoke against the published
+  artifact (auto-navigation stub).
 
 ---
 

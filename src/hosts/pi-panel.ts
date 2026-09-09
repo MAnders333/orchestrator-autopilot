@@ -36,6 +36,25 @@ export interface DecisionPanelOptions {
   tui: { requestRender(): void };
   /** Called to close the overlay (the ctx.ui.custom done callback). */
   done: () => void;
+  /** Called after every decision — hosts refresh their pending badge here. */
+  onChanged?: () => void;
+}
+
+/** The pending-count badge (setWidget above the editor). Fed from queue
+ *  state — shows when either view has items awaiting the user. */
+export function refreshPanelBadge(
+  ui: { setWidget(key: string, value: unknown): void; theme: Theme },
+  stateDir: string,
+): void {
+  const counts = queueLengths(loadStoreOrNew(stateDir));
+  const p = counts.proposal;
+  const h = counts["human-review"];
+  if (p + h === 0) {
+    ui.setWidget("orch-panel-badge", undefined);
+    return;
+  }
+  const th = ui.theme;
+  ui.setWidget("orch-panel-badge", [th.fg("accent", "∎") + ` decision panel: proposals ${p} · human review ${h} — /orchestrate-panel`]);
 }
 
 const VIEWS: Array<{ kind: PanelKind; label: string }> = [
@@ -90,6 +109,7 @@ export class DecisionPanel implements Component, Focusable {
     this.lastResult = { text: r.text, isError: !r.ok };
     this.refresh();
     if (this.items.length) this.sel = Math.min(this.sel, Math.max(0, this.items.length - 1));
+    this.opts.onChanged?.();
     this.opts.tui.requestRender();
   }
 
@@ -276,17 +296,36 @@ export function registerDecisionPanel(
   deps: { stateDir: () => string },
 ): void {
   if (typeof pi.registerCommand !== "function") return;
+  // Hold the most recent command ctx for badge refreshes (panel decisions +
+  // the periodic sweep). The badge is the PUSH nudge: pending counts above
+  // the editor when either view has items awaiting the user.
+  let ui: { setWidget(k: string, v: unknown): void; theme: Theme } | null = null;
+  const refresh = () => {
+    if (ui) refreshPanelBadge(ui, deps.stateDir());
+  };
   pi.registerCommand("orchestrate-panel", {
     description: "Decision panel: proposals + human-review views (tab toggles; a approve · r reject · d defer · e refine · x re-dispatch)",
     handler: async (args, ctx) => {
+      ui = ctx.ui as typeof ui;
       const initial: PanelKind = (args ?? "").trim() === "review" ? "human-review" : "proposals";
+      refresh();
       try {
         await ctx.ui.custom<undefined>(
           (tui, theme, _keybindings, done) =>
-            new DecisionPanel({ stateDir: deps.stateDir(), initial, theme, tui, done }),
+            new DecisionPanel({
+              stateDir: deps.stateDir(),
+              initial,
+              theme,
+              tui,
+              done: () => {
+                refresh();
+                done();
+              },
+              onChanged: refresh,
+            }),
           {
             overlay: true,
-            overlayOptions: { anchor: "center", width: "92%", minWidth: 60, maxHeight: "85%", margin: 1 },
+            overlayOptions: { anchor: "center", width: "96%", minWidth: 64, maxHeight: "92%", margin: 1 },
           },
         );
       } catch {
@@ -294,4 +333,7 @@ export function registerDecisionPanel(
       }
     },
   });
+  // Periodic badge refresh — the badge stays truthful between actions.
+  const timer = setInterval(refresh, 60_000);
+  timer.unref?.();
 }
