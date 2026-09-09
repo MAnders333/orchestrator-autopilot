@@ -123,22 +123,23 @@ describe("opencode host framework (hermetic, fake oc)", () => {
     const runId = r.details.runId as string;
     expect(store(f).items["W1"].status).toBe("active");
     // the fake worker exits after ~1.2s → onComplete → flip to reviewing
-    expect(await waitFor(() => store(f).items["W1"].status === "reviewing", 6000)).toBe(true);
+    expect(await waitFor(() => store(f).items["W1"].status === "ai-review", 6000)).toBe(true);
     fw.dispose();
     rmSync(f.root, { recursive: true, force: true });
   });
 
-  test("reviewer completion → Verdict: PASS → done", async () => {
+  test("reviewer completion → Verdict: PASS → human-review", async () => {
     const f = setup("Verdict: PASS\\nEverything checks out.");
     const fw = createOpenCodeFramework({ stateDir: f.stateDir, runsDir: f.runsDir, ocBin: f.ocBin, sweepIntervalMs: 0, delivery: delivery(f), onDomainEvent: (e) => f.events.push(e) });
-    seedItem(f, "R1", { status: "reviewing" });
+    seedItem(f, "R1", { status: "ai-review" });
     const r = await fw.tools.queue_review.execute({ key: "R1" });
     expect(r.details.runId).toBeTruthy();
     const runId = r.details.runId as string;
     const s = store(f);
     s.items["R1"].reviewerRunId = runId;
     writeFileSync(join(f.stateDir, "queue.json"), JSON.stringify(s));
-    expect(await waitFor(() => store(f).items["R1"].status === "done", 6000)).toBe(true);
+    // AI PASS → HUMAN review (your approval), NOT done
+    expect(await waitFor(() => store(f).items["R1"].status === "human-review", 6000)).toBe(true);
     expect(f.events.some((e) => e.name === "orch:reviewer-dispatched")).toBe(true);
     fw.dispose();
     rmSync(f.root, { recursive: true, force: true });

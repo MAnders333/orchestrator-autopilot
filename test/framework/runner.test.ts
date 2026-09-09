@@ -171,14 +171,14 @@ describe("framework runner (shared tick machinery)", () => {
     f.runner.onCompletion({ runId: "9be47d4f-0839-4c8f-9f41-71764658da3c", agent: "workflow", success: true } as never);
     await new Promise((r) => setTimeout(r, 50));
     const st = load(f);
-    expect(st.items["W1"].status).toBe("reviewing");
+    expect(st.items["W1"].status).toBe("ai-review");
     // the freed slot → worker-done sweep → dispatch tick
     expect(f.delivered.some((m) => m.includes("[orch-tick: dispatch]"))).toBe(true);
   });
 
-  test("onCompletion: reviewer Verdict: PASS → done + reviewTick", async () => {
+  test("onCompletion: reviewer Verdict: PASS → human-review + reviewTick", async () => {
     const f = setup();
-    seed(f, "R1", { status: "reviewing", cwd: "/tmp/repo", risk: "low" });
+    seed(f, "R1", { status: "ai-review", cwd: "/tmp/repo", risk: "low" });
     const s = load(f);
     s.items["R1"].reviewerRunId = "12345678-dead-beef";
     save(f, s);
@@ -190,7 +190,8 @@ describe("framework runner (shared tick machinery)", () => {
     } as never);
     await new Promise((r) => setTimeout(r, 50));
     const st = load(f);
-    expect(st.items["R1"].status).toBe("done");
+    // AI PASS → HUMAN review (awaiting the user), NOT done — user approval flips done
+    expect(st.items["R1"].status).toBe("human-review");
     expect(f.delivered.some((m) => m.includes("[orch-tick: review]"))).toBe(true);
     // DETERMINISTIC HANDOVER: the framework auto-flagged from the item
     const reviewLog = join(f.dir, "reviews.jsonl");
@@ -209,7 +210,7 @@ describe("framework runner (shared tick machinery)", () => {
     // all slots busy (fleet 3/3) + buffer full (2 ready) → the sweep yields
     // nothing → the reviewTick fallback nudges with the cause-aware wording.
     const s0 = load(f);
-    addItem(s0, { key: "S1", title: "s1", status: "reviewing", blocker: null, scope: "x", cwd: "/tmp", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: "rev-live", attempts: 0, notes: "", createdAt: "a", updatedAt: "b" });
+    addItem(s0, { key: "S1", title: "s1", status: "ai-review", blocker: null, scope: "x", cwd: "/tmp", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: "rev-live", attempts: 0, notes: "", createdAt: "a", updatedAt: "b" });
     addItem(s0, { key: "B1", title: "b1", status: "approved", blocker: null, scope: "x", cwd: "/tmp", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: null, attempts: 0, notes: "", createdAt: "a", updatedAt: "b" });
     addItem(s0, { key: "B2", title: "b2", status: "approved", blocker: null, scope: "x", cwd: "/tmp", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: null, attempts: 0, notes: "", createdAt: "a", updatedAt: "b" });
     save(f, s0);
@@ -234,7 +235,7 @@ describe("framework runner (shared tick machinery)", () => {
     const f = setup();
     // all slots busy (fleet 3/3) + buffer full (2 ready) → the sweep yields
     // nothing (no dispatch, no intake) → the reviewTick fallback nudges.
-    seed(f, "R1", { status: "reviewing" });
+    seed(f, "R1", { status: "ai-review" });
     seed(f, "B1");
     seed(f, "B2");
     f.runner = createFrameworkRunner({
@@ -253,6 +254,32 @@ describe("framework runner (shared tick machinery)", () => {
     f.runner.onTimer();
     await new Promise((r) => setTimeout(r, 50));
     expect(f.delivered.some((m) => m.includes("[orch-tick: review]"))).toBe(true);
+  });
+
+  test("reviewTick surfaces HUMAN-review items awaiting your approval (tracked stage, not done)", async () => {
+    const f = setup();
+    // all slots busy (fleet 3/3) so the sweep yields no tick → the reviewTick
+    // fallback nudges the HUMAN-review item awaiting your approval
+    seed(f, "H1", { status: "human-review", cwd: "/tmp/repo", risk: "low" });
+    seed(f, "B1");
+    seed(f, "B2");
+    f.runner = createFrameworkRunner({
+      autopilot: f.autopilot,
+      backend: { ...backend, fleetStatus: async () => ({ totalActive: 3 }) },
+      host: { interactive: () => f.interactive, loaded: () => f.loaded, busy: () => f.busy, compacting: () => f.compacting },
+      deliver: (m) => f.delivered.push(m),
+      enabled: () => f.enabled,
+      sweepIntervalMs: 0,
+    });
+    f.runner.onTimer();
+    await new Promise((r) => setTimeout(r, 50));
+    const nudge = f.delivered.find((m) => m.includes("[orch-tick: review]"));
+    expect(nudge).toBeTruthy();
+    expect(nudge).toContain("H1");
+    expect(nudge).toContain("Awaiting YOUR approval");
+    expect(nudge).toContain("status: done to accept");
+    // the item is NOT done — it is explicitly awaiting the human, not auto-complete
+    expect(load(f).items["H1"].status).toBe("human-review");
   });
 });
 
@@ -291,7 +318,7 @@ describe("auto-review (C) through the runner", () => {
     expect(spawns[0].task).toContain("KEY: C1");
     expect(spawns[0].task).toContain("Verdict: PASS");
     const after = load({ dir } as Fixture);
-    expect(after.items["C1"].status).toBe("reviewing");
+    expect(after.items["C1"].status).toBe("ai-review");
     expect(after.items["C1"].reviewerRunId).toBe("rev-1");
     runner.onSettled(); // the queued harness info flushes at the settle boundary
     await new Promise((r) => setTimeout(r, 80));

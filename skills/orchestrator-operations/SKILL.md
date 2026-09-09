@@ -73,13 +73,31 @@ only your own backend's notes.
   an active/failed item needs NO fake review state: stop the redo worker →
   `active→failed` (the worker stopped = failed) → `failed→done`
   ("verified-complete despite the failure record") — both transitions are
-  legal, no `active→reviewing` detour needed.
+  legal, no `active→ai-review` detour needed.
 - On **cap** (5 FAILs): the framework marked it failed — surface the options:
   apply the findings directly / review the work as-is / drop.
 - `queue_review(key, task?)` remains the tool for dispatching the reviewer on
-  a `reviewing` item.
-- **PASS** → the human handover: `flag_for_review` (below). Never hand off
-  before agent review passes.
+  an `ai-review` item.
+- **PASS** → the item moves to **`human-review`** (the tracked HUMAN-review
+  stage — NOT done), the harness auto-flags it for you, and the
+  `flag_for_review` handover (below) follows. Never hand off before agent
+  review passes; and never mark an item `done` before the HUMAN approves it.
+
+## Human review (the approval gate)
+
+- There are TWO review stages. **AI review** (`ai-review`) runs the reviewer;
+  on PASS it moves the item to **`human-review`**. **Human review** is you.
+  Nothing reaches `done` without your call.
+- When autopilot is **ON**, the harness does the AI review automatically and
+  auto-flags on PASS. When autopilot is **OFF**, YOU run the AI review
+  manually: dispatch `queue_review`, read the verdict, and move
+  `ai-review → human-review` (`queue_update`) on PASS.
+- You approve with `queue_update(key, { status: "done" })`. To re-dispatch
+  with your findings, `queue_update(key, { status: "active" })`. To drop it,
+  `{ status: "rejected" }`. The review tick surfaces `human-review` items as
+  *awaiting your approval* so nothing sits unnoticed.
+- `done` is the human-approved terminal state — re-openable via
+  `done → approved` if you later find issues.
 
 ## Completion standards
 
@@ -106,10 +124,12 @@ only your own backend's notes.
   SHAs / MR links the human should look at — name the files, never just
   "task done". Reason about risk (what happens if wrong) and blast radius
   (what breaks) before flagging; say what the user should DO next
-  (`action_needed`). Move the item reviewing → done (`queue_update`) after
-  flagging — the human's review is the FINAL gate: if the user finds issues,
-  re-open with `queue_update(key, { status: "approved" })` (done → approved,
-  attempts reset) and re-dispatch with the human's findings in the task.
+  (`action_needed`). The item should already be in `human-review` (the PASS
+  flow did this) — after the human approves, move it `human-review → done`
+  (`queue_update`). The human's review is the FINAL gate: if the user finds
+  issues, re-open with `queue_update(key, { status: "active" })` (human-review
+  → active re-dispatch with your findings) or `{ status: "approved" }`
+  (done → approved, attempts reset) and re-dispatch with the findings in the task.
 
 ## Queue model
 

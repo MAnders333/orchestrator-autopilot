@@ -288,14 +288,14 @@ describe("pi adapter smoke", () => {
     await runAutopilotCmd("on");
     // seed a reviewing item whose reviewerRunId matches the workflow id
     const s0 = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
-    s0.items["WEDGE-1"] = { key: "WEDGE-1", title: "wedge", status: "reviewing", blocker: null, scope: "x", cwd: "/tmp", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: "rev-abc-1234", attempts: 0, notes: "", createdAt: "a", updatedAt: "b" };
+    s0.items["WEDGE-1"] = { key: "WEDGE-1", title: "wedge", status: "ai-review", blocker: null, scope: "x", cwd: "/tmp", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: "rev-abc-1234", attempts: 0, notes: "", createdAt: "a", updatedAt: "b" };
     writeFileSync(join(dir, "queue.json"), JSON.stringify(s0));
     // the REAL pi async-complete payload: flat, no results, no agent
     emit("subagent:async-complete", { id: "rev-abc-1234", success: true, state: "complete", asyncDir: join(dir, "no-such-run") });
     await new Promise((r) => setTimeout(r, 100));
     const after = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
     // no run record → no verdict → the item must NOT flip silently (manual path)
-    expect(after.items["WEDGE-1"].status).toBe("reviewing");
+    expect(after.items["WEDGE-1"].status).toBe("ai-review");
   });
 
   test("REGRESSION: a sync sendUserMessage throw mid-command cannot fail /autopilot (injection retries)", async () => {
@@ -512,7 +512,7 @@ describe("pi adapter smoke", () => {
     replyToLastStatus(2, [{ agent: "worker" }, { agent: "reviewer" }]);
     await new Promise((r) => setTimeout(r, 20)); // let the async sweep finish
     const store = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
-    expect(store.items["G1"].status).toBe("reviewing");
+    expect(store.items["G1"].status).toBe("ai-review");
     const tick = pi._sent.find((s) => s.kind === "message");
     expect(tick).toBeDefined();
     expect(tick!.args[0].content).toContain("[orch-tick:");
@@ -599,7 +599,7 @@ describe("pi adapter smoke", () => {
     const repo = makeRepo();
     await runAutopilotCmd("on");
     const store0 = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
-    store0.items["A6"].status = "reviewing"; // review FAIL → re-dispatch
+    store0.items["A6"].status = "ai-review"; // review FAIL → re-dispatch
     writeFileSync(join(dir, "queue.json"), JSON.stringify(store0));
     const disp = pi._tools()["queue_dispatch"];
     const p = disp.execute("c3", { key: "A6", task: "KEY: A6 — fix findings" }, undefined, undefined, { ui: { notify: () => {} }, cwd: repo });

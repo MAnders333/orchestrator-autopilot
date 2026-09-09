@@ -129,7 +129,7 @@ toggle, or the event shape.
 
 ## Docs
 
-- `docs/queue-model.md` — the AUTHORITATIVE queue model: statuses (proposal / approved / blocked / active / reviewing / failed / done / rejected), transitions, and the tick behavior (dispatch / intake with proposal-pending suppression / review).
+- `docs/queue-model.md` — the AUTHORITATIVE queue model: statuses (proposal / approved / blocked / active / ai-review / human-review / failed / done / rejected), transitions, and the tick behavior (dispatch / intake with proposal-pending suppression / review).
 - `skills/orchestrator-operations/` — the GENERIC operating skill for consumers (dispatch contract, review-loop judgment, completion standards, the flag_for_review handover). Backend-conditional: `SKILL.md` detects the active host in-session (the `/autopilot` command = pi) and loads only `references/pi.md` or `references/opencode.md`. Add it to your tool's skills config.
 - The `flag_for_review` handover tool ships with the package (registered by the pi extension and the opencode plugin).
 

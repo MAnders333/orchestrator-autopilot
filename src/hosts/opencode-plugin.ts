@@ -159,7 +159,7 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
     queue_list: def(
       "List the orchestrator task queue (opencode host). Filter by status/since/sort; compact view by default, heavy fields only with includeNotes. Returns per-status counts + fleet occupancy + matching items.",
       [
-        { name: "status", type: "string", required: false, description: "status filter (proposal|approved|active|reviewing|failed|done)" },
+        { name: "status", type: "string", required: false, description: "status filter (proposal|approved|active|ai-review|human-review|failed|done)" },
         { name: "since", type: "string", required: false, description: "ISO timestamp — only items with updatedAt >= since" },
         { name: "sort", type: "string", required: false, description: "updatedAt|createdAt|key (default updatedAt desc)" },
         { name: "limit", type: "number", required: false, description: "max items (default 50)" },
@@ -213,7 +213,7 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
     queue_review: def(
       CONTRACTS.queue_review,
       [
-        { name: "key", type: "string", required: true, description: "queue key of a `reviewing` item" },
+        { name: "key", type: "string", required: true, description: "queue key of an `ai-review` item" },
         { name: "task", type: "string", required: false, description: "optional reviewer prompt; the verdict contract is injected if omitted" },
         { name: "timeoutMs", type: "number", required: false },
       ],

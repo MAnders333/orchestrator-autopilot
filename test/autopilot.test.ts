@@ -113,7 +113,7 @@ describe("core.Autopilot (store-first)", () => {
     expect(tick?.facts.occupied).toBe(0);
     // store persisted: G1 → reviewing
     const store = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
-    expect(store.items["G1"].status).toBe("reviewing");
+    expect(store.items["G1"].status).toBe("ai-review");
   });
 
   test("failed completion flips to failed", () => {
@@ -191,7 +191,7 @@ describe("core.Autopilot (store-first)", () => {
   test("reviewer verdict PASS → item done + verdict event + tick", () => {
     writeStore(dir, [
       item({ key: "G1", status: "active", runId: "371d1bb9", title: "g1" }),
-      item({ key: "R1", status: "reviewing", title: "r1" }),
+      item({ key: "R1", status: "ai-review", title: "r1" }),
     ]);
     const a = make();
     // R1 got a queue_review: reviewerRunId recorded
@@ -205,14 +205,15 @@ describe("core.Autopilot (store-first)", () => {
       results: [{ agent: "orchestrator-reviewer", output: "Verdict: PASS\nEverything checks out.", runId: "12345678-dead-beef" }],
     });
     expect(r.flipped).toBe(true);
-    expect(r.tick?.message).toContain("PASSED review");
+    expect(r.tick?.message).toContain("HUMAN review");
     expect(r.domainEvents.some((e) => e.name === "orch:verdict" && e.data.verdict === "PASS")).toBe(true);
     const store = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
-    expect(store.items["R1"].status).toBe("done");
+    // AI PASS puts the item in HUMAN review (your approval), not done
+    expect(store.items["R1"].status).toBe("human-review");
   });
 
   test("reviewer verdict FAIL → re-dispatch (active) + attempts incremented + persisted", () => {
-    writeStore(dir, [item({ key: "R1", status: "reviewing", title: "r1" })]);
+    writeStore(dir, [item({ key: "R1", status: "ai-review", title: "r1" })]);
     const st = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
     st.items["R1"].reviewerRunId = "12345678-dead-beef";
     writeFileSync(join(dir, "queue.json"), JSON.stringify(st));
@@ -229,7 +230,7 @@ describe("core.Autopilot (store-first)", () => {
   });
 
   test("reviewer verdict FAIL at cap → failed (PERSISTED) + cap tick", () => {
-    writeStore(dir, [item({ key: "R1", status: "reviewing", title: "r1" })]);
+    writeStore(dir, [item({ key: "R1", status: "ai-review", title: "r1" })]);
     const st = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
     st.items["R1"].reviewerRunId = "12345678-dead-beef";
     st.items["R1"].attempts = 4; // next FAIL hits the cap of 5
@@ -247,7 +248,7 @@ describe("core.Autopilot (store-first)", () => {
   });
 
   test("unparseable verdict → no flip, manual review tick", () => {
-    writeStore(dir, [item({ key: "R1", status: "reviewing", title: "r1" })]);
+    writeStore(dir, [item({ key: "R1", status: "ai-review", title: "r1" })]);
     const st = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
     st.items["R1"].reviewerRunId = "12345678-dead-beef";
     writeFileSync(join(dir, "queue.json"), JSON.stringify(st));
@@ -260,14 +261,14 @@ describe("core.Autopilot (store-first)", () => {
     expect(r.flipped).toBe(false);
     expect(r.tick?.message).toContain("not parseable");
     const store = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
-    expect(store.items["R1"].status).toBe("reviewing"); // untouched
+    expect(store.items["R1"].status).toBe("ai-review"); // untouched
   });
 
   test("reviewers in flight occupy a slot (store fallback counts them)", () => {
     // store: 1 active worker + 1 reviewing item with a reviewer dispatched
     writeStore(dir, [
       item({ key: "G1", status: "active", runId: "371d1bb9", title: "g1" }),
-      item({ key: "R1", status: "reviewing", title: "r1", reviewerRunId: "6f559944" }),
+      item({ key: "R1", status: "ai-review", title: "r1", reviewerRunId: "6f559944" }),
       item({ key: "B1", status: "approved", title: "b1" }),
     ]);
     const a = make();

@@ -145,7 +145,7 @@ describe("autoRedispatch (B)", () => {
 describe("autoReview (C)", () => {
   test("a completed item (reviewing) gets a reviewer with the SAME fields the dispatch used", async () => {
     const f = setup();
-    seed(f, [item("R1", { status: "reviewing", runId: "worker-run", reviewerRunId: null })]);
+    seed(f, [item("R1", { status: "ai-review", runId: "worker-run", reviewerRunId: null })]);
     const runId = await autoReview(f.dir, f.backend, "orchestrator-reviewer", "R1");
     expect(runId).toBeTruthy();
     const s = store(f);
@@ -161,9 +161,9 @@ describe("autoReview (C)", () => {
     const f = setup();
     seed(f, [
       item("A1", { status: "approved" }),                     // not reviewing
-      item("R2", { status: "reviewing", reviewerRunId: "x" }), // reviewer already running
-      item("R3", { status: "reviewing", scope: "  " }),        // no scope
-      item("R4", { status: "reviewing", cwd: null }),          // no cwd
+      item("R2", { status: "ai-review", reviewerRunId: "x" }), // reviewer already running
+      item("R3", { status: "ai-review", scope: "  " }),        // no scope
+      item("R4", { status: "ai-review", cwd: null }),          // no cwd
     ]);
     expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "A1")).toBeNull();
     expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "R2")).toBeNull();

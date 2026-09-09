@@ -11,10 +11,16 @@ behavior. This is the AUTHORITATIVE model; the orchestrator skills reference it.
 | `approved` | **dispatchable** — a free slot dispatches it |
 | `blocked` | waiting — blocker says why (`parked` \| `serialized` \| `merge` \| `decision`); reached from `approved` or directly from `proposal` (defer without approving) |
 | `active` | dispatched — worker running (runId set) |
-| `reviewing` | worker done — reviewer in flight (reviewerRunId set) |
+| `ai-review` | worker done — AI reviewer in flight (reviewerRunId set). This is the **AI review** stage |
+| `human-review` | AI review PASSED — **your** approval pending. Not done until you act |
 | `failed` | run failed (re-dispatchable) |
-| `done` | agent-reviewed + handed to the human (re-openable) |
+| `done` | **human-approved** — you accepted the flagged work (re-openable) |
 | `rejected` | terminal — deliberately dropped |
+
+An item is only `done` after the **human** approves it. `ai-review` is the
+machine review (run by the harness when autopilot is on, or by the orchestrator
+when it is off); `human-review` is the tracked stage where the flagged work sits
+awaiting your decision. There is no path from `ai-review` straight to `done`.
 
 There is no separate `ready` boolean — an approved item IS ready to dispatch; a
 not-yet-dispatchable approved item is `blocked`. (The `ready` field was folded
@@ -27,20 +33,24 @@ proposal  ─► approved │ rejected
 approved  ─► blocked │ active │ rejected
 proposal  ─► blocked (defer a candidate — parked/serialized/decision; no approval needed)
 blocked   ─► approved (unblock) │ rejected
-active    ─► reviewing │ failed        (event-driven: worker completion)
-reviewing ─► done │ failed │ active    (active = review-FAIL re-dispatch)
-failed    ─► active (recovery re-dispatch) │ done (verified-complete)
-done      ─► approved (human re-open: issues found in the user's review)
-rejected  ─► (terminal)
+active       ─► ai-review │ failed          (event-driven: worker completion)
+ai-review    ─► human-review │ failed │ active   (PASS → human-review; FAIL → active re-dispatch; cap → failed)
+human-review ─► done │ active │ rejected         (you approve → done; you find issues → active re-dispatch; you drop → rejected)
+failed       ─► active (recovery re-dispatch) │ done (verified-complete)
+done         ─► approved (human re-open: issues found after approval)
+rejected     ─► (terminal)
 ```
 
-`active→reviewing/failed` are event-driven (the completion handler flips them —
-do not set by hand). `reviewing→active` is the re-dispatch path after a review
-FAIL (attempts increment, capped at `reviewCap` = 5).
+`active→ai-review/failed` are event-driven (the completion handler flips them —
+do not set by hand). `ai-review→active` is the re-dispatch path after a review
+FAIL (attempts increment, capped at `reviewCap` = 5). `human-review→active` is
+your "this isn't right" path — re-dispatch with your findings.
 
-`done` is NOT a dead end: the human reviews the flagged work and, if issues
-are found, re-opens it via `done → approved` (attempts reset — a fresh agent
-review loop starts with the human's findings in the re-dispatch task).
+`done` is reached ONLY through `human-review`: the AI review PASS moves the
+item there, the harness auto-flags it for you, and your
+`queue_update(key, {status: "done"})` is what actually completes it.
+`done` is NOT a dead end: if you later find issues, re-open via `done → approved`
+(attempts reset — a fresh agent review loop starts with your findings).
 
 ## Tick behavior (what the orchestrator is nudged to do)
 
@@ -63,10 +73,14 @@ review loop starts with the human's findings in the re-dispatch task).
     risk). The contract: scan → propose (`queue_add`, status=proposal) → the
     user approves → the buffer refills. A framework config file for sources
     would be over-engineering — intake is agent judgment + consumer tooling.
-- **review** — items stuck in `reviewing` (a reviewer completed) → "read the
-  verdict, route each item". The harness AUTO-dispatches the reviewer when a
-  worker completes (same fields: KEY + scope + cwd); the verdict routing is
-  automatic (PASS → done, FAIL → re-dispatch, cap → failed). The orchestrator
-  keeps: approval, high-risk checkpoints, `queue_review` overrides, and the
-  `flag_for_review` human handover.
+- **review** — two stages. (1) **AI review**: items in `ai-review` (reviewer in
+  flight) → "read the verdict, route each item". The harness AUTO-dispatches the
+  reviewer when a worker completes (same fields: KEY + scope + cwd); verdict
+  routing is automatic (PASS → `human-review`, FAIL → re-dispatch, cap →
+  failed). (2) **Human review**: items in `human-review` are surfaced as
+  *awaiting YOUR approval* — you `queue_update(key, {status: "done"})` to
+  accept, `active` to re-dispatch with findings, or `rejected` to drop. On PASS
+  the harness auto-flags the item (`flag_for_review`); nothing reaches `done`
+  without your call. The orchestrator keeps: approval, high-risk checkpoints,
+  `queue_review` overrides, and the `flag_for_review` handover.
 - **blocked** items never trigger ticks (they are waiting by design).

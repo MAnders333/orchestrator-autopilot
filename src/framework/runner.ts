@@ -239,7 +239,7 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     }
     const result = autopilot.sweep(source, Date.now(), fleet ? { totalActive: fleet.totalActive } : undefined);
     if (result.tick) sendTick(result.tick);
-    // timer/activate safety net: stuck reviewing items get a review nudge —
+    // timer/activate safety net: stuck ai-review items get a review nudge —
     // the "stuck" wording (reviewers may still be running; never claim completion)
     else if (source === "timer" || source === "activate") sendTick(autopilot.reviewTick(undefined, "stuck"));
   };
@@ -255,7 +255,7 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       if (!enabled()) return;
       const result = autopilot.handleAsyncComplete(ev);
       if (opts.emit) opts.emit(result.domainEvents);
-      // TRANSITION-TIMED preservation capture: the active→reviewing/failed
+      // TRANSITION-TIMED preservation capture: the active→ai-review/failed
       // flip is the last queue-state change this run gets — journal its
       // parallel-branch tip NOW so commits that landed after the previous
       // sweep are still recorded (best-effort: if the runtime's own cleanup
@@ -271,14 +271,14 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       // B + C, ONE consolidated harness tick. B — a review FAIL
       // auto-re-dispatches with the findings (up to the cap; the engine
       // already flipped to active when attempts < cap). C — a worker
-      // completion (active → reviewing) auto-dispatches its review with the
+      // completion (active → ai-review) auto-dispatches its review with the
       // SAME fields the dispatch used (KEY + scope + cwd). The orchestrator
       // learns what happened from the single harness tick and can still
       // queue_review/queue_dispatch to override.
       if (autoDispatchOn) {
         const verdict = result.domainEvents.find((e) => e.name === "orch:verdict" && e.data?.verdict === "FAIL");
         const completed = result.domainEvents.find(
-          (e) => e.name === "orch:item-completed" && e.data?.outcome === "reviewing",
+          (e) => e.name === "orch:item-completed" && e.data?.outcome === "ai-review",
         );
         const tasks: Array<Promise<{ part: string; ok: boolean }>> = [];
         if (verdict) {
@@ -350,7 +350,7 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
             }
             flagForReview(
               {
-                summary: `${item.title || key} — agent review PASSED${scopeHead ? ` (${scopeHead}…)` : ""}.`,
+                summary: `${item.title || key} — agent review PASSED, awaiting your approval (human-review). Accept with queue_update status: done${scopeHead ? ` (${scopeHead}…)` : ""}.`,
                 risk,
                 blast_radius: `The reviewed work lands in the repo at ${item.cwd ?? "?"} — if wrong, ${item.title || key} is affected.`,
                 review_targets: targets.length ? targets : [item.cwd ?? "", `the reviewed work (queue item ${key})`],

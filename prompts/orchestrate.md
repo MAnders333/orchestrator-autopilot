@@ -29,7 +29,7 @@ config IS the boundary.
 3. **Reconcile** — move done workers to Reviewing, surface blocked workers to the user. **Fleet-health check (P5):** if a worker is marked FAILED with no result (crash, timeout, runner death), check its session log + git state BEFORE re-dispatching — the work may have landed or be recoverable (today's pattern: 6+ workers lost uncommitted work to the 30-min cap; several were recoverable from session JSONL). If recoverable, dispatch a FINISHER that applies the recovered state + commits FIRST (never a full redo).
 4. **Fill free slots (auto-dispatch)** — if a slot is free and Approved has an unblocked item, dispatch it immediately (no approval round-trip — the queue IS the approval). If the Approved buffer is low (<2 ready items) and Backlog has candidates, propose the next batch for queue-add. If both are empty, run intake.
 5. **Route done work** — when a worker reports done, send its output to `reviewer` (see Review). Do NOT mark done-for-user-review until review passes.
-6. **Write state** — queue mutations happen via the `queue_*` tools (`queue_add`, `queue_update`, `queue_dispatch`) — there is NO manual state-file editing. The extension records dispatch (approved→active + run id) and completions (active→reviewing/failed) itself.
+6. **Write state** — queue mutations happen via the `queue_*` tools (`queue_add`, `queue_update`, `queue_dispatch`) — there is NO manual state-file editing. The extension records dispatch (approved→active + run id) and completions (active→ai-review/failed) itself.
 
 ## Autopilot ticks (extension-driven loop pings)
 
@@ -86,20 +86,25 @@ reading or writing files.
 **Statuses** (each item moves through these):
 
 ```
-proposal → approved → active → reviewing → done
+proposal → approved → active → ai-review → human-review → done
           ↘ blocked (defer: parked/serialized/decision — no approval)
               ↘ rejected        ↘ failed   ↗ (review-FAIL re-dispatch)
                   ↘ failed ←(recovery re-dispatch)→ active
-                     done → approved (human re-open: issues found in review)
+                     done → approved (human re-open: issues found after approval)
 ```
 
 - `proposal` — intake candidate, not yet approved
 - `approved` — user-approved, waiting for a slot; `blocked` = approved-but-waiting (`blocker` reason: parked/serialized/merge/decision)
 - `active` — dispatched, worker running (`runId` attached)
-- `reviewing` — worker done, reviewer running/pending
+- `ai-review` — worker done, AI reviewer running/pending
+- `human-review` — AI review PASSED; **your** approval pending (NOT done yet)
 - `failed` — worker failed / review cap hit
-- `done` — reviewed + delivered
+- `done` — human-approved + delivered
 - `rejected` — user dropped it
+
+An item is only `done` after the **human** approves it. `ai-review` is the machine
+review; `human-review` is the tracked stage where the flagged work sits awaiting
+your decision. There is no path from `ai-review` straight to `done`.
 
 **Item fields:** key · status · blocker · title · scope · evidence ·
 value · urgency · risk · runId · **notes** (free-form — no schema constraints on
@@ -116,9 +121,11 @@ series belongs to which repo/workstream: read the **queue-id-series** skill.
 |---|---|
 | `proposal→approved`, `proposal→rejected` | orchestrator (approval) — `queue_update` |
 | `approved→active` | orchestrator decides + calls `queue_dispatch(key, task)` — the tool spawns the worker AND records runId atomically |
-| `active→reviewing` / `active→failed` | **extension — automatic** from the completion event; do NOT set by hand |
-| `reviewing→done` / `reviewing→failed` | orchestrator (review verdict) — `queue_update` |
-| `reviewing→active`, `failed→active` | orchestrator (re-dispatch / recovery) — `queue_dispatch` |
+| `active→ai-review` / `active→failed` | **extension — automatic** from the completion event; do NOT set by hand |
+| `ai-review→human-review` / `ai-review→failed` | orchestrator (AI review verdict PASS → human-review; cap → failed) — `queue_update` |
+| `ai-review→active`, `human-review→active`, `failed→active` | orchestrator (re-dispatch / recovery) — `queue_dispatch` |
+| `human-review→done` | **YOU** — approve the flagged work (the human review gate) — `queue_update` |
+| `human-review→rejected` | orchestrator — drop — `queue_update` |
 
 **Tools:**
 - `queue_list` — read path: filter by status and/or last-change timestamp (`since`), sort, compact view (heavy fields via `includeNotes`)
@@ -234,7 +241,7 @@ const { runId } = await queue_dispatch({
 });
 
 // 2. The dispatch tool recorded the Active entry itself (status active, runId).
-//    Completion (active → reviewing/failed) is applied by the extension event.
+//    Completion (active → ai-review/failed) is applied by the extension event.
 //    (No inspector.open — opening a Herdr pane triggers 1Password auth via
 //    the work-mode secret resolution. Visibility = status view: fleet.)
 ```
@@ -265,7 +272,9 @@ the MANUAL cases + overrides:
   automatically with the same fields (KEY + scope + cwd). `queue_review` is
   the OVERRIDE: high-risk items, a custom review focus, or steering.
 - **Auto re-dispatch on review FAIL** (with the findings, up to the cap) and
-  the verdict auto-transitions (PASS → done, cap → failed) are the engine's.
+  the verdict auto-transitions (PASS → human-review, cap → failed) are the engine's.
+  The AI PASS moves the item to `human-review` — it is NOT done; your approval
+  (`human-review → done`) completes it.
 - **You keep**: approval (proposal → approved — write scope + cwd here),
   high-risk checkpoints, `queue_review`/`queue_dispatch` overrides,
   `flag_for_review` (the human handover after a PASS), steering, and intake
@@ -278,18 +287,21 @@ the MANUAL cases + overrides:
 
 ## Review (when a worker reports done) — agent review before human handoff
 
-When a worker reports done (the queue item flipped active→reviewing), **load the
+When a worker reports done (the queue item flipped active→ai-review), **load the
 `orchestrator-operations` skill and follow it** (review-loop judgment + completion
-standards sections): the cap-5 review loop, `queue_review` dispatch, re-dispatch
-on FAIL with accumulated findings, cap handling at 5, the `flag_for_review` human
-handover (the ONLY time flag_for_review is called — after agent review passes),
-and the structured worker completion card.
+standards sections): the cap-5 AI review loop, `queue_review` dispatch, re-dispatch
+on FAIL with accumulated findings, cap handling at 5, and the `flag_for_review` human
+handover (the ONLY time flag_for_review is called — after the AI review passes). The
+AI review PASS moves the item to `human-review` (your approval, NOT done); you accept
+with `queue_update(key, { status: "done" })`.
 
 **Hard rules that must stay active even before loading the skill:**
-- Do NOT mark done-for-user-review until the reviewer passes. The completion event only
-  flips the queue item to reviewing — routing through review is YOUR job.
+- Two review stages: the **AI review** (`ai-review`) then the **human review**
+  (`human-review`). The AI PASS moves the item to `human-review` — it is NOT done;
+  only your approval (`human-review → done`) completes it. The completion event only
+  flips the queue item to `ai-review` — routing through review is YOUR job.
 - Do NOT skip the review step; do NOT silently mark failed/done past the cap.
-- The completion signal is deterministic (the extension flips active→reviewing/failed);
+- The completion signal is deterministic (the extension flips active→ai-review/failed);
   the review VERDICT is your judgment — read the reviewer's output yourself.
 - **Direct deliverables still get the flag**: work you produce in-session (not
   a queue item) has no pipeline — after handing the user any user-facing

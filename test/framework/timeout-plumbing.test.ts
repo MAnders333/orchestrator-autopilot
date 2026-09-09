@@ -150,7 +150,7 @@ describe("timeout plumbing — the requested budget reaches the child on every l
   test("queue_review: explicit param wins, else the item's recorded budget rides to the reviewer", async () => {
     const dir = freshDir();
     const { backend, calls } = capturingBackend("rev-run-1");
-    seedStore(dir, { status: "reviewing", timeoutMs: REQUESTED });
+    seedStore(dir, { status: "ai-review", timeoutMs: REQUESTED });
     await queueReview(opsCtx(dir, backend), { key: "K-1" });
     expect(calls[0].opts.timeoutMs).toBe(REQUESTED);
     await queueReview(opsCtx(dir, backend), { key: "K-1", task: "re-review" }).catch(() => {}); // already has reviewerRunId — skipped
@@ -159,7 +159,7 @@ describe("timeout plumbing — the requested budget reaches the child on every l
     // explicit override lane (fresh store, no recorded budget)
     const dir2 = freshDir();
     const b2 = capturingBackend("rev-run-2");
-    seedStore(dir2, { status: "reviewing" });
+    seedStore(dir2, { status: "ai-review" });
     await queueReview(opsCtx(dir2, b2.backend), { key: "K-1", timeoutMs: 5000 });
     expect(b2.calls[0].opts.timeoutMs).toBe(5000);
     rmSync(dir2, { recursive: true, force: true });
@@ -188,7 +188,7 @@ describe("timeout plumbing — the requested budget reaches the child on every l
   test("autoReview passes the item's budget — the SAME fields the dispatch used", async () => {
     const dir = freshDir();
     const { backend, calls } = capturingBackend("review-auto-1");
-    seedStore(dir, { status: "reviewing", timeoutMs: REQUESTED });
+    seedStore(dir, { status: "ai-review", timeoutMs: REQUESTED });
     const runId = await autoReview(dir, backend, "orchestrator-reviewer", "K-1");
     expect(runId).toBe("review-auto-1");
     expect(calls[0].opts.agent).toBe("orchestrator-reviewer");

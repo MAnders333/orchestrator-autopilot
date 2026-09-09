@@ -229,7 +229,7 @@ export async function queueDispatch(ctx: QueueOpsCtx, params: Record<string, unk
     if (!item) return { text: `queue_dispatch: no item '${key}'`, details: {} };
     if (item.status === "approved") {
       // approved = dispatchable (the fold); a blocked item is NOT approved
-    } else if (item.status !== "reviewing" && item.status !== "failed") {
+    } else if (item.status !== "ai-review" && item.status !== "failed") {
       return { text: `queue_dispatch: '${key}' is ${item.status}, not dispatchable`, details: {} };
     }
     const cwd = (params.cwd as string | undefined) ?? ctx.sessionCwd ?? process.cwd();
@@ -277,7 +277,7 @@ export async function queueReview(ctx: QueueOpsCtx, params: Record<string, unkno
     const key = params.key as string;
     const item = store.items[key];
     if (!item) return { text: `queue_review: no item '${key}'`, details: {} };
-    if (item.status !== "reviewing") {
+    if (item.status !== "ai-review") {
       return { text: `queue_review: '${key}' is ${item.status}, not reviewing`, details: {} };
     }
     if (item.reviewerRunId) {
@@ -312,9 +312,9 @@ export async function queueSteer(ctx: QueueOpsCtx, params: Record<string, unknow
     const key = params.key as string;
     const item = store.items[key];
     if (!item) return { text: `queue_steer: no item '${key}'`, details: {} };
-    const runId = item.status === "active" ? item.runId : item.status === "reviewing" ? item.reviewerRunId : null;
+    const runId = item.status === "active" ? item.runId : item.status === "ai-review" ? item.reviewerRunId : null;
     if (!runId) {
-      return { text: `queue_steer: '${key}' has no running run (status ${item.status}) — only active workers / reviewing reviewers are steerable`, details: {} };
+      return { text: `queue_steer: '${key}' has no running run (status ${item.status}) — only active workers / ai-review reviewers are steerable`, details: {} };
     }
     const mode = params.mode === "follow_up" ? "follow_up" : "steer";
     const { id, ack } = await ctx.backend.steer(runId, params.message as string, mode, params.ackTimeoutMs as number | undefined);

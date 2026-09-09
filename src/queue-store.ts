@@ -2,21 +2,21 @@
 // machine-readable, with free-form text fields (notes/description carry the
 // schema-free content). state.md becomes a RENDER of this store.
 //
-// Statuses: proposal → approved → active → reviewing → done
+// Statuses: proposal → approved → active → ai-review → human-review → done
 //                 ↘ rejected        ↘ failed   ↗ (re-dispatch)
 //                     ↘ failed ←(recovery)→ active
 //
 // Ownership split: approval/dispatch/review verdicts are orchestrator
-// judgment (via queue_* tools); active→reviewing/failed are extension events
+// judgment (via queue_* tools); active→ai-review/failed are extension events
 // (async-complete). Only the two event transitions happen automatically.
 
 import { readFileSync, writeFileSync, existsSync, renameSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-export type QueueStatus = "proposal" | "approved" | "blocked" | "active" | "reviewing" | "failed" | "done" | "rejected";
+export type QueueStatus = "proposal" | "approved" | "blocked" | "active" | "ai-review" | "human-review" | "failed" | "done" | "rejected";
 export type BlockerReason = "parked" | "serialized" | "merge" | "decision" | null;
 
-const STATUSES: QueueStatus[] = ["proposal", "approved", "blocked", "active", "reviewing", "failed", "done", "rejected"];
+const STATUSES: QueueStatus[] = ["proposal", "approved", "blocked", "active", "ai-review", "human-review", "failed", "done", "rejected"];
 
 export function isValidStatus(s: unknown): s is QueueStatus {
   return typeof s === "string" && (STATUSES as string[]).includes(s);
@@ -75,10 +75,11 @@ const ALLOWED: Record<QueueStatus, QueueStatus[]> = {
   proposal: ["approved", "rejected", "blocked"],
   approved: ["blocked", "active", "rejected"],
   blocked: ["approved", "rejected"],   // unblock (approved) or drop (rejected)
-  active: ["reviewing", "failed"],      // event-driven (extension)
-  reviewing: ["done", "failed", "active"], // active = review-FAIL re-dispatch
-  failed: ["active", "done"],             // recovery re-dispatch; done = verified-complete despite the failure record
-  done: ["approved"],                     // human re-open: the user found issues in their review
+  active: ["ai-review", "failed"],          // event-driven (extension): worker done → AI review
+  "ai-review": ["human-review", "failed", "active"], // PASS→human-review; FAIL→active re-dispatch; cap→failed
+  "human-review": ["done", "active", "rejected"],   // you approve→done; find issues→active re-dispatch; drop→rejected
+  failed: ["active", "done"],               // recovery re-dispatch; done = verified-complete despite the failure record
+  done: ["approved"],                       // human re-open: the user found issues after approval
   rejected: [],
 };
 
@@ -103,6 +104,13 @@ export function loadStore(stateDir: string): QueueStore | null {
       // Backfill schema drift: older stores lack reviewerRunId/attempts (and
       // the legacy runId may be a bare short token). Normalize on read so
       // downstream code can rely on the fields existing.
+      // MIGRATION: the pre-two-stage-review store used status "reviewing" for
+      // the AI-review stage (renamed to "ai-review"; "human-review" is new).
+      // Rewrite in memory so reads treat them as the current stage; persisted
+      // on the next save.
+      for (const it of Object.values(raw.items)) {
+        if (it.status === "reviewing") it.status = "ai-review";
+      }
       for (const it of Object.values(raw.items)) {
         if (it.reviewerRunId === undefined) it.reviewerRunId = null;
         if (it.timeoutMs === undefined) it.timeoutMs = null;
@@ -164,7 +172,7 @@ export function ensureMigrated(stateDir: string): void {
 }
 
 export function queueLengths(store: QueueStore): QueueLengths {
-  const out: QueueLengths = { proposal: 0, approved: 0, blocked: 0, active: 0, reviewing: 0, failed: 0, done: 0, rejected: 0 };
+  const out: QueueLengths = { proposal: 0, approved: 0, blocked: 0, active: 0, "ai-review": 0, "human-review": 0, failed: 0, done: 0, rejected: 0 };
   for (const it of Object.values(store.items)) {
     if (isValidStatus(it.status)) out[it.status]++;
     // corrupt statuses (missing/invalid) are not counted here — they surface
@@ -213,6 +221,7 @@ export function queryItems(store: QueueStore, q: QueueQuery = {}): Array<Partial
       blocker: i.blocker,
       title: i.title,
       runId: i.runId,
+      reviewerRunId: i.reviewerRunId, // the reviewer-in-flight fact — an ai-review item with a reviewerRunId is ALREADY dispatched (do NOT queue_review it)
       updatedAt: i.updatedAt,
     };
     if (q.includeNotes) {
@@ -323,10 +332,10 @@ export function itemByRunId(store: QueueStore, runId: string): QueueItem | null 
   return null;
 }
 
-/** Find a `reviewing` item whose REVIEWER run matches (queue_review attribution). */
+/** Find an `ai-review` item whose REVIEWER run matches (queue_review attribution). */
 export function itemByReviewerRunId(store: QueueStore, runId: string): QueueItem | null {
   for (const it of Object.values(store.items)) {
-    if (it.status === "reviewing" && it.reviewerRunId && runIdMatches(runId, it.reviewerRunId)) return it;
+    if (it.status === "ai-review" && it.reviewerRunId && runIdMatches(runId, it.reviewerRunId)) return it;
   }
   return null;
 }
@@ -372,10 +381,11 @@ export function updateItem(store: QueueStore, key: string, patch: UpdatePatch, n
   }
   const from = item.status;
   const to = clean.status;
-  // done/failed are terminal-ish: the run that produced them is over — clear
-  // stale run refs (a done item must not keep pointing at a dead worker; the
-  // FAIL flip already nulls them; this covers the manual/orchestrator paths).
-  if (to === "done" || to === "failed") {
+  // done/human-review/failed are terminal-ish for their runs: the AI review
+  // is over at human-review, so clear stale run refs (a done item must not
+  // keep pointing at a dead worker; the FAIL flip already nulls them; this
+  // covers the manual/orchestrator paths).
+  if (to === "done" || to === "human-review" || to === "failed") {
     clean.runId = null;
     clean.reviewerRunId = null;
   }
@@ -424,7 +434,7 @@ export function migrateFromMd(md: string): QueueStore {
     if (name.startsWith("Active")) return "active";
     if (name.startsWith("Approved")) return "approved";
     if (name.startsWith("Backlog")) return "proposal";
-    if (name.startsWith("Reviewing")) return "reviewing";
+    if (name.startsWith("Reviewing")) return "ai-review";
     if (name.startsWith("Completed")) return "done";
     if (name.startsWith("Failed")) return "failed";
     return null;

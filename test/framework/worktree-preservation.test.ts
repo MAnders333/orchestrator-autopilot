@@ -185,7 +185,7 @@ describe("worktree preservation — module (success-path mechanics)", () => {
 
     // reviewing items are NOT re-scanned (their capture happened at the flip)
     const s3 = loadStore(stateDir)!;
-    s3.items["A-ACT"].status = "reviewing";
+    s3.items["A-ACT"].status = "ai-review";
     saveStore(stateDir, s3);
     const tip2 = commitOnBranch(repo, `pi-parallel-run-active-1-0`, "w2.txt", "post-flip work");
     expect(preserveActiveItems(stateDir)).toEqual([]);

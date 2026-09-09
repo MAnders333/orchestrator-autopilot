@@ -14,17 +14,17 @@ export const CONTRACTS = {
     "Pass explicit `series` only when starting a NEW workstream; explicit `key` for semantic suffixes (must be unique). Hand-numbering collides — do not hand-pick numbers.",
   queue_update:
     "Update a queue item: status (validated transitions: proposal→approved/rejected/blocked (defer a candidate without approving), approved→active/rejected, " +
-    "active→reviewing/failed, reviewing→done/failed/active, failed→active (recovery re-dispatch) | done (verified-complete despite the failure record), done→approved (human re-open — you found issues in your review)); " +
+    "active→ai-review/failed, ai-review→human-review/failed/active, human-review→done/active/rejected, failed→active (recovery re-dispatch) | done (verified-complete despite the failure record), done→approved (human re-open — you found issues after approval)); " +
     "approved REQUIRES a complete scope + cwd; blocked REQUIRES a blocker reason (parked/serialized/merge/decision). " +
-    "active→reviewing/failed are event-driven — do NOT set them by hand.",
+    "active→ai-review/failed are event-driven — do NOT set them by hand.",
   queue_dispatch:
     "Dispatch a queue item: spawns the worker (same executor as the subagent tool; fresh context, worktree isolation) AND records " +
     "approved→active with the run id — atomically. Call with the key of an approved item and the scoped worker prompt. " +
     "High-risk items: still surface the final checkpoint BEFORE calling this. Returns the run id.",
   queue_review:
-    "Dispatch the reviewer for a `reviewing` item: spawns the reviewer subagent (read-only, no worktree) via the same executor, records the " +
+    "Dispatch the reviewer for an `ai-review` item: spawns the reviewer subagent (read-only, no worktree) via the same executor, records the " +
     "reviewerRunId on the item, and emits orch:reviewer-dispatched. When the reviewer completes, the verdict line ('Verdict: PASS/FAIL') " +
-    "is parsed and the item auto-transitions (PASS → done, FAIL → active re-dispatch, cap → failed) — see the queue model. Returns the run id.",
+    "is parsed and the item auto-transitions (PASS → human-review awaiting your approval, FAIL → active re-dispatch, cap → failed) — see the queue model. Returns the run id.",
   queue_steer:
     "Steer a RUNNING worker or reviewer (dispatched via queue_dispatch/queue_review). Writes a steer request to the subagent control " +
     "channel and VERIFIES the child's acknowledgment. Headless children do not support steering (supported:false capability or silent " +

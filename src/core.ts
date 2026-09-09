@@ -97,7 +97,7 @@ export class Autopilot {
 
   /**
    * subagent:async-complete → attribute the run to the store item and flip
-   * active→reviewing/failed. Does NOT tick — the adapter fetches the
+   * active→ai-review/failed. Does NOT tick — the adapter fetches the
    * AUTHORITATIVE fleet count (pi-subagents fleet status — the same source the
    * orchestrator's `subagent status` reads) and then sweeps, so the tick's
    * FLEET number can never contradict the orchestrator's own view.
@@ -110,7 +110,7 @@ export class Autopilot {
     this.logEvent("complete", { runId: topRunId, agent: ev.agent, success: ev.success, status: ev.status });
 
     const candidates = collectRunIds(ev);
-    const outcome: "failed" | "reviewing" = ev.success === false || ev.timedOut ? "failed" : "reviewing";
+    const outcome: "failed" | "ai-review" = ev.success === false || ev.timedOut ? "failed" : "ai-review";
 
     let flipped = false;
     let flippedKey = "";
@@ -151,15 +151,17 @@ export class Autopilot {
         const verdict = parseVerdict(ev, this.cfg.reviewerAgents);
         const withinQuiet = now - this.lastReviewTickAt < this.cfg.quietPeriodMs;
         if (verdict === "PASS") {
-          updateItem(store, matched.key, { status: "done" });
+          // AI review passed → the item enters HUMAN review (your approval),
+          // not done. The harness auto-flags it; YOU make it done.
+          updateItem(store, matched.key, { status: "human-review" });
           saveStore(this.cfg.stateDir, store);
           domainEvents.push({ name: "orch:verdict", data: { key: matched.key, verdict: "PASS", attempts: matched.attempts ?? 0 } });
-          this.logEvent("flip", { key: matched.key, outcome: "done", source: "verdict-pass" });
+          this.logEvent("flip", { key: matched.key, outcome: "human-review", source: "verdict-pass" });
           if (!withinQuiet) this.lastReviewTickAt = now;
           return {
             tick: withinQuiet ? null : {
               reason: "review",
-              message: `[orch-tick: review] ${matched.key} PASSED review — the harness AUTO-FLAGGED it for your review (built from the item). Add specific review targets (files/commits) via flag_for_review only if you have better ones. Not a user request; respond ≤2 lines.`,
+              message: `[orch-tick: review] ${matched.key} PASSED AI review and is in HUMAN review, awaiting you — the harness auto-flagged it (with targets). Approve it (queue_update status: done), re-dispatch (active), or drop (rejected). Not a user request; respond ≤2 lines.`,
               facts: { key: matched.key, verdict: "PASS" },
             },
                         domainEvents,
@@ -206,12 +208,12 @@ export class Autopilot {
           };
         }
         // no parseable verdict → manual path
-        const reviewing = Object.values(store.items).filter((i) => i.status === "reviewing").map((i) => i.key);
+        const aiReviewing = Object.values(store.items).filter((i) => i.status === "ai-review").map((i) => i.key);
         return {
           tick: {
             reason: "review",
-            message: `[orch-tick: review] Reviewer for ${matched.key} completed but the verdict line was not parseable — read its output and move the item to done / re-dispatch / failed yourself. In reviewing: ${reviewing.join(", ") || "none"}. Not a user request; respond ≤2 lines.`,
-            facts: { key: matched.key, reviewing },
+            message: `[orch-tick: review] Reviewer for ${matched.key} completed but the verdict line was not parseable — read its output and move the item to human-review / re-dispatch / failed yourself. In ai-review: ${aiReviewing.join(", ") || "none"}. Not a user request; respond ≤2 lines.`,
+            facts: { key: matched.key, aiReview: aiReviewing },
           },
                     domainEvents,
           flipped: false,
@@ -220,7 +222,7 @@ export class Autopilot {
         };
       }
       // reviewer completed but no item attributed (plain subagent review) → generic review tick
-      const reviewing = Object.values(store.items).filter((i) => i.status === "reviewing").map((i) => i.key);
+      const aiReviewing = Object.values(store.items).filter((i) => i.status === "ai-review").map((i) => i.key);
       const generic = this.reviewTick(now);
       return {
         tick: generic,
@@ -289,7 +291,7 @@ export class Autopilot {
 
   /**
    * Zombie reconciliation — the deterministic safety net for LOST completion
-   * events. The active→reviewing/failed flip is event-driven
+   * events. The active→ai-review/failed flip is event-driven
    * (subagent:async-complete on the spawning session's in-process bus), so a
    * run that ends while no session is listening (timeout overnight, crash,
    * restart) leaves its item active FOREVER — observed live (EVAL-EXPT-M3:
@@ -337,22 +339,20 @@ export class Autopilot {
   reviewTick(now = this.now(), why: "reviewer-completed" | "stuck" = "reviewer-completed"): Tick | null {
     const store = loadStore(this.cfg.stateDir);
     if (!store) return null;
-    const reviewing = Object.values(store.items).filter((i) => i.status === "reviewing");
-    if (!reviewing.length) return null;
+    const aiReview = Object.values(store.items).filter((i) => i.status === "ai-review");
+    const humanReview = Object.values(store.items).filter((i) => i.status === "human-review");
+    if (!aiReview.length && !humanReview.length) return null;
     if (now - this.lastReviewTickAt < this.cfg.quietPeriodMs) return null;
     this.lastReviewTickAt = now;
-    const keys = reviewing.map((i) => i.key);
-    // The message must reflect WHY it fired: a reviewer-completion event
-    // (read the verdicts) vs the periodic stuck-review nudge (reviewers may
-    // STILL be running — never claim completion for those).
+    const aiKeys = aiReview.map((i) => i.key);
+    const humanKeys = humanReview.map((i) => i.key);
     const message = why === "stuck"
-      ? `[orch-tick: review] Items in reviewing: ${keys.join(", ") || "none"} — check each: if its reviewer finished, read the verdict (done / re-dispatch); if the reviewer is still running, leave it (its completion will notify); if it died, re-dispatch. Not a user request; respond ≤2 lines.`
-      : `[orch-tick: review] Items in reviewing: ${keys.join(", ") || "none"}. A reviewer completed — read its verdict and move each to done ` +
-        `(queue_update status: done) or re-dispatch (queue_dispatch) / mark failed. Not a user request; respond ≤2 lines.`;
+      ? `[orch-tick: review] AI-review in flight: ${aiKeys.join(", ") || "none"} — check each: if its reviewer finished, read the verdict (human-review / re-dispatch); if the reviewer is still running, leave it (its completion will notify); if it died, re-dispatch. Awaiting YOUR approval: ${humanKeys.join(", ") || "none"} — queue_update status: done to accept, active to re-dispatch with findings. Not a user request; respond ≤2 lines.`
+      : `[orch-tick: review] A reviewer completed. AI-review items: ${aiKeys.join(", ") || "none"}. Awaiting YOUR approval (human-review): ${humanKeys.join(", ") || "none"} — queue_update status: done to accept / active to re-dispatch / rejected to drop. Not a user request; respond ≤2 lines.`;
     return {
       reason: "review",
       message,
-      facts: { reviewing: keys, count: keys.length, why },
+      facts: { aiReview: aiKeys, humanReview: humanKeys, count: aiKeys.length + humanKeys.length, why },
     };
   }
 
@@ -522,7 +522,7 @@ export function storeToSnapshot(store: QueueStore): QueueState {
   const approved = items
     .filter((i) => i.status === "approved")
     .map((i) => ({ key: i.key, title: i.title, line: "", lineIndex: 0 }));
-  const reviewingWithReviewer = items.filter((i) => i.status === "reviewing" && i.reviewerRunId);
+  const reviewingWithReviewer = items.filter((i) => i.status === "ai-review" && i.reviewerRunId);
   const occupied = active.length + reviewingWithReviewer.length;
   const ready = approved.length; // approved = dispatchable (the fold)
   const proposalsPending = items.filter((i) => i.status === "proposal").length;

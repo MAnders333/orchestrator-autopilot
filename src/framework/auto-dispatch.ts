@@ -11,7 +11,7 @@
 //  B. autoRedispatch — on a review FAIL, re-dispatch with the original scope
 //     PLUS the reviewer's findings (up to the cap). The cap still surfaces.
 //
-//  C. autoReview — when a worker completes (active → reviewing), dispatch the
+//  C. autoReview — when a worker completes (active → ai-review), dispatch the
 //     reviewer automatically with the SAME fields the dispatch used: KEY +
 //     scope + cwd (to locate the work). The approval gate guarantees scope +
 //     cwd on every approved item, so both automations just take them off the
@@ -167,7 +167,7 @@ export function reviewTask(item: QueueItem): string {
 }
 
 /**
- * C — auto-dispatch the reviewer for a completed item (active → reviewing).
+ * C — auto-dispatch the reviewer for a completed item (active → ai-review).
  * Mirrors queueReview but builds the task from the item (no orchestrator
  * round-trip). Returns true when a reviewer was spawned.
  */
@@ -180,7 +180,7 @@ export async function autoReview(
   try {
     const store = loadStore(stateDir);
     const item = store?.items[key];
-    if (!item || item.status !== "reviewing" || item.reviewerRunId) return null;
+    if (!item || item.status !== "ai-review" || item.reviewerRunId) return null;
     if (!(item.scope ?? "").trim() || !item.cwd) return null; // safety net — the approval gate guarantees these
     const runId = await backend.spawn(reviewTask(item), {
       agent: reviewerAgent,

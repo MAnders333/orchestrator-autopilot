@@ -62,13 +62,18 @@ describe("queue-store transitions", () => {
     expect(validTransition("proposal", "approved")).toBe(true);
     expect(validTransition("proposal", "rejected")).toBe(true);
     expect(validTransition("approved", "active")).toBe(true);
-    expect(validTransition("active", "reviewing")).toBe(true);
+    expect(validTransition("active", "ai-review")).toBe(true);
     expect(validTransition("active", "failed")).toBe(true);
-    expect(validTransition("reviewing", "done")).toBe(true);
-    expect(validTransition("reviewing", "active")).toBe(true); // re-dispatch
-    expect(validTransition("failed", "active")).toBe(true);    // recovery
-    expect(validTransition("done", "active")).toBe(false);     // terminal
-    expect(validTransition("approved", "done")).toBe(false);   // no skipping
+    expect(validTransition("ai-review", "human-review")).toBe(true); // AI PASS → human review
+    expect(validTransition("ai-review", "active")).toBe(true);       // re-dispatch (FAIL)
+    expect(validTransition("ai-review", "failed")).toBe(true);       // cap
+    expect(validTransition("human-review", "done")).toBe(true);      // you approve
+    expect(validTransition("human-review", "active")).toBe(true);    // you find issues → re-dispatch
+    expect(validTransition("human-review", "rejected")).toBe(true);  // you drop
+    expect(validTransition("failed", "active")).toBe(true);          // recovery
+    expect(validTransition("done", "active")).toBe(false);           // terminal
+    expect(validTransition("approved", "done")).toBe(false);         // no skipping
+    expect(validTransition("ai-review", "done")).toBe(false);        // done only via human-review
   });
 
   test("updateItem throws on illegal transition", () => {
@@ -122,7 +127,7 @@ describe("queue-store queries", () => {
     const s = store();
     const items = queryItems(s, { status: "approved" });
     expect(items.map((i) => i.key)).toEqual(["B4-AGENTIC-JUDGE-TIMEOUT"]); // A9 is blocked, not approved
-    expect(queueLengths(s)).toEqual({ proposal: 0, approved: 1, blocked: 1, active: 1, reviewing: 0, failed: 0, done: 0, rejected: 0 });
+    expect(queueLengths(s)).toEqual({ proposal: 0, approved: 1, blocked: 1, active: 1, "ai-review": 0, "human-review": 0, failed: 0, done: 0, rejected: 0 });
   });
 
   test("since filter (last change) + updatedAt desc sort", () => {
@@ -140,6 +145,16 @@ describe("queue-store queries", () => {
     const full = queryItems(s, { status: "approved", sort: "key", includeNotes: true })[0];
     expect(full.notes).toBe("n"); // B4's free-form note
     expect(full.scope).toBeTruthy();
+  });
+
+  test("compact view carries the reviewer-in-flight fact (an ai-review item with a reviewerRunId is ALREADY dispatched)", () => {
+    const s = store();
+    s.items["R1"] = { key: "R1", status: "ai-review", blocker: null, title: "r1", scope: "x", cwd: "/tmp", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: "2144abcd-1234", attempts: 0, notes: "", createdAt: "a", updatedAt: "b" };
+    const compact = queryItems(s, { status: "ai-review" })[0];
+    // the run-id-omitting projection was the double-dispatch driver: the
+    // orchestrator could not tell auto-dispatched reviews from pending ones
+    expect(compact.reviewerRunId).toBe("2144abcd-1234");
+    expect(compact.runId).toBeNull(); // the worker's run is over
   });
 
   test("itemByRunId matches by prefix", () => {
@@ -160,7 +175,7 @@ describe("queue-store run attribution", () => {
   test("itemByRunId finds active items; itemByReviewerRunId only reviewing items", () => {
     const store = newStore();
     addItem(store, { key: "W1", status: "active", blocker: null, title: "w1", scope: "", evidence: "", value: "", urgency: "", risk: "low", runId: "371d1bb9-aaaa-bbbb", reviewerRunId: null, attempts: 0, notes: "", createdAt: "x", updatedAt: "x" });
-    addItem(store, { key: "R1", status: "reviewing", blocker: null, title: "r1", scope: "", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: "6f559944-cccc", attempts: 0, notes: "", createdAt: "x", updatedAt: "x" });
+    addItem(store, { key: "R1", status: "ai-review", blocker: null, title: "r1", scope: "", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: "6f559944-cccc", attempts: 0, notes: "", createdAt: "x", updatedAt: "x" });
     expect(itemByRunId(store, "371d1bb9-dead-beef")?.key).toBe("W1");
     expect(itemByRunId(store, "6f559944-dead-beef")).toBeNull(); // reviewer run is not a worker run
     expect(itemByReviewerRunId(store, "6f559944-cccc-dddd")?.key).toBe("R1");
@@ -170,7 +185,7 @@ describe("queue-store run attribution", () => {
 describe("queue-store migration", () => {
   test("imports legacy personal-format state.md faithfully", () => {
     const store = migrateFromMd(PERSONAL_MD);
-    expect(queueLengths(store)).toEqual({ proposal: 1, approved: 1, blocked: 2, active: 2, reviewing: 1, failed: 0, done: 1, rejected: 0 });
+    expect(queueLengths(store)).toEqual({ proposal: 1, approved: 1, blocked: 2, active: 2, "ai-review": 1, "human-review": 0, failed: 0, done: 1, rejected: 0 });
     const a9 = store.items["A9-TAGS-SURFACE-REDO"];
     expect(a9).toBeDefined();
     expect(a9.status).toBe("blocked");   // PARKED → the fold
@@ -184,7 +199,7 @@ describe("queue-store migration", () => {
     expect(store.items["G-B2-REVIEW-PULLBACK"].runId).toBe("6f559944");
     expect(store.items["G-ARMD-RERUN-FINISHER"].status).toBe("active"); // failed md status → still active entry
     expect(store.items["C1"].status).toBe("done");
-    expect(store.items["R1"].status).toBe("reviewing");
+    expect(store.items["R1"].status).toBe("ai-review");
     expect(store.items["B1"].status).toBe("proposal");
   });
 
@@ -233,7 +248,7 @@ describe("proposal → blocked (defer without approval)", () => {
     expect(it.status).toBe("blocked");
     expect(it.blocker).toBe("parked");
     // the proposal is resolved from the pending set — intake can re-arm
-    expect(queueLengths(store)).toEqual({ proposal: 0, approved: 0, blocked: 1, active: 0, reviewing: 0, failed: 0, done: 0, rejected: 0 });
+    expect(queueLengths(store)).toEqual({ proposal: 0, approved: 0, blocked: 1, active: 0, "ai-review": 0, "human-review": 0, failed: 0, done: 0, rejected: 0 });
   });
 
   test("blocked REQUIRES a blocker reason — a blocker-less block is rejected", () => {
@@ -244,20 +259,22 @@ describe("proposal → blocked (defer without approval)", () => {
 });
 
 describe("updateItem clears run refs on done/failed (no stale worker refs on terminal states)", () => {
-  test("done/failed null runId + reviewerRunId; other transitions keep them", () => {
+  test("done/failed/human-review null runId + reviewerRunId; in-flight states keep them", () => {
     const store = newStore();
-    // reviewing→done (the P5 verified-complete path)
-    addItem(store, { key: "A1", title: "a", status: "reviewing", runId: "r1", reviewerRunId: "rv1" });
-    updateItem(store, "A1", { status: "done" });
+    // ai-review→human-review (AI PASS) clears the runs — both review stages are over
+    addItem(store, { key: "A1", title: "a", status: "ai-review", runId: "r1", reviewerRunId: "rv1" });
+    updateItem(store, "A1", { status: "human-review" });
     expect(store.items["A1"].runId).toBeNull();
     expect(store.items["A1"].reviewerRunId).toBeNull();
-    // reviewing→failed (cap) clears too
-    addItem(store, { key: "A1b", title: "c", status: "reviewing", runId: "r1b", reviewerRunId: "rv1b" });
+    // human-review→done (your approval) stays terminal-clean
+    expect(updateItem(store, "A1", { status: "done" }).status).toBe("done");
+    // ai-review→failed (cap) clears too
+    addItem(store, { key: "A1b", title: "c", status: "ai-review", runId: "r1b", reviewerRunId: "rv1b" });
     updateItem(store, "A1b", { status: "failed" });
     expect(store.items["A1b"].reviewerRunId).toBeNull();
     // in-flight states keep their refs
     addItem(store, { key: "A2", title: "b", status: "active", runId: "r2", reviewerRunId: "rv2" });
-    updateItem(store, "A2", { status: "reviewing" });
+    updateItem(store, "A2", { status: "ai-review" });
     expect(store.items["A2"].runId).toBe("r2");
   });
 });

@@ -11,9 +11,9 @@
 //   queue_dispatch — spawn the worker (same executor as subagent) AND record
 //                    approved→active + runId atomically (worktree isolation
 //                    enforced: dirty-tree pre-flight + blocked direct spawns)
-//   queue_review   — spawn the reviewer for a `reviewing` item
+//   queue_review   — spawn the reviewer for an `ai-review` item
 //   queue_steer    — steer a running worker/reviewer via the control channel
-// Completion (active→reviewing/failed) is event-inferred from
+// Completion (active→ai-review/failed) is event-inferred from
 // subagent:async-complete. state.md is retired: it exists only as a one-time
 // migration input (imported into queue.json on first activation).
 //
@@ -355,7 +355,7 @@ export default function (pi: ExtensionAPI) {
     label: "Queue list",
     description: CONTRACTS.queue_list,
     parameters: Type.Object({
-      status: Type.Optional(Type.Union([Type.String({ description: "status filter (proposal|approved|active|reviewing|failed|done)" }), Type.Array(Type.String())])),
+      status: Type.Optional(Type.Union([Type.String({ description: "status filter (proposal|approved|active|ai-review|human-review|failed|done)" }), Type.Array(Type.String())])),
       since: Type.Optional(Type.String({ description: "ISO timestamp — only items with updatedAt >= since" })),
       sort: Type.Optional(Type.String({ description: "updatedAt|createdAt|key (default updatedAt desc)" })),
       limit: Type.Optional(Type.Number({ description: "max items (default 50)" })),
@@ -436,7 +436,7 @@ export default function (pi: ExtensionAPI) {
     label: "Queue review",
     description: CONTRACTS.queue_review,
     parameters: Type.Object({
-      key: Type.String({ description: "queue key of a `reviewing` item" }),
+      key: Type.String({ description: "queue key of an `ai-review` item" }),
       task: Type.Optional(Type.String({ description: "optional reviewer prompt; the verdict contract is injected if omitted" })),
       timeoutMs: Type.Optional(Type.Number()),
     }),
