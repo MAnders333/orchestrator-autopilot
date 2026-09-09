@@ -253,9 +253,11 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     // knows is running — a transient undercount (status RPC lagging a
     // just-started parent) must not let the harness OVER-SPAWN into phantom
     // free slots. Auto-dispatch fires on every free-slot window now (not just
-    // worker-done), so this guard matters more. Zombie reconciliation
-    // deliberately uses the RAW RPC count: only an authoritative 0 may trigger
-    // the net (undefined = RPC failed = skip — never a fake 0).
+    // worker-done), so this guard matters more. Zombie reconciliation uses the
+    // BACKEND's corrected count (fleetStatus now unions the RPC with the
+    // in-flight async-run inventory, so a 0 really means nothing is running
+    // anywhere this backend spawns; the undefined guard still covers an RPC
+    // failure — never a fake 0).
     const storeOccupied = (() => {
       const s = loadStore(opts.stateDir);
       return s ? storeToSnapshot(s).occupied : 0;
@@ -277,7 +279,7 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       // preservation capture above already ran, so even a timed-out worker's
       // last commits were journalled while its branch still existed.
       try {
-        const zombies = autopilot.zombieReconcile(fleet?.totalActive); // undefined (RPC failed) must NOT act as a fake 0
+        const zombies = autopilot.zombieReconcile(fleet?.totalActive); // the corrected count (RPC + async-inventory union) — only a genuine 0 may trigger the net
         if (zombies.flippedKeys.length) {
           harnessTick([`zombie reconciliation flipped ${zombies.flippedKeys.join(", ")} to failed (no live run — verify partial work on pi-parallel-* branches before re-dispatch)`], fleet?.totalActive);
           // DECISION TICK per flip — the canonical one-line move record, in

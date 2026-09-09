@@ -346,8 +346,11 @@ export class Autopilot {
     const snapshot = this.readQueueSnapshot(now);
     // Occupied = ALL subagents dispatched from the orchestrator session —
     // workers, reviewers, scouts, plain subagent calls (the general case).
-    //   - fleet.totalActive (pi-subagents status) is the AUTHORITATIVE count:
-    //     it sees every run the session spawned, whatever its role.
+    //   - fleet.totalActive is the AUTHORITATIVE count (the backend's
+    //     FLEET-vs-INVENTORY parity union: the pi-subagents status RPC + the
+    //     in-flight async-run inventory — the same source `subagent status`
+    //     reads). It sees every run this backend spawns, whatever its role,
+    //     including parents the session-gated RPC alone would undercount.
     //   - FLEET-vs-INVENTORY PARITY (AUTOPILOT-6): the fleet count is the
     //     FLOOR, never a replacement for what the engine's OWN view (event
     //     ledger + store-derived) knows is running — a transient fleet
@@ -397,7 +400,9 @@ export class Autopilot {
    * restart) leaves its item active FOREVER — observed live (EVAL-EXPT-M3:
    * 8h timeout, still active the next day). The AUTHORITATIVE counter-evidence
    * is fleetStatus: when it reports zero active runs, NOTHING is running
-   * anywhere this backend spawned — any `active` item idle past the grace
+   * anywhere this backend spawned (the backend count now unions the RPC with
+   * the in-flight async inventory — an undercounting RPC can no longer fake a
+   * 0, AUTOPILOT-6) — any `active` item idle past the grace
    * window is a zombie by definition. Flip it to failed with the evidence in
    * notes; the orchestrator then re-dispatches deliberately (verifying
    * pi-parallel-* branches for partial work first) instead of a dead run

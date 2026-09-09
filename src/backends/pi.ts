@@ -10,6 +10,14 @@
 // action routes workflow-mode detached runs to the foreground path ('no live
 // foreground child') — an upstream routing gap.
 //
+// FLEET-vs-INVENTORY PARITY (AUTOPILOT-6): the RPC `status → fleet` count is
+// gated on the caller's CURRENT session id — a workflow-parent run started in
+// an earlier session or surviving a runtime restart is invisible to it (the
+// observed "FLEET 0/3 while items ran" bug). fleetStatus() therefore unions
+// the RPC count with the in-flight async runs on disk (countInFlightAsyncRuns
+// scans the same async-subagent-runs root asyncDirFor resolves) so no tick or
+// zombie sweep can ever see a fake idle fleet from an undercounting RPC.
+//
 // Ack protocol (verified in pi-subagents src): the child's prompt-runtime
 // acknowledges each request via writeSteerAckAt → steerAckPathFromDir:
 //   control/steer-acks/<index>/<base64url(requestId)>.json
@@ -25,6 +33,24 @@ import type { SubagentBackend, PiLike, CompletionEvent } from "./types.ts";
 
 const RPC_REQUEST = "subagents:rpc:v1:request";
 const RPC_REPLY = (id: string) => `subagents:rpc:v1:reply:${id}`;
+
+/** Test seam for the pi backend's async-run inventory root (the same injection
+ *  the opencode backend's runsDir offers): fleetStatus() unions the RPC fleet
+ *  with the in-flight async runs found on disk, so tests point the scan at a
+ *  temp dir instead of the LIVE pi-subagents state. */
+export interface PiBackendDeps {
+  asyncDirRoot?: string;
+}
+
+function defaultAsyncRunRoot(): string {
+  // AUTOPILOT_PI_ASYNC_ROOT: explicit override of the async-run inventory root
+  // (env precedent: AUTOPILOT_STATE_DIR / PI_CODING_AGENT_DIR; tests point the
+  // fleetStatus inventory scan at an isolated temp root so a LIVE pi-subagents
+  // session on the machine never merges into the mocked-host assertions).
+  if (process.env.AUTOPILOT_PI_ASYNC_ROOT) return process.env.AUTOPILOT_PI_ASYNC_ROOT;
+  const scope = `pi-subagents-uid-${process.getuid?.() ?? ""}`;
+  return join(tmpdir(), scope, "async-subagent-runs");
+}
 
 /** The pi child session's LAST assistant text — the run's final deliverable
  *  (the reviewer's verdict line + the review body). Line-based read of the
@@ -54,7 +80,12 @@ export function readLastAssistantText(sessionFile: string): string | null {
   }
 }
 
-export function createPiBackend(pi: PiLike): SubagentBackend {
+export function createPiBackend(pi: PiLike, deps: PiBackendDeps = {}): SubagentBackend {
+  // The async-run inventory root — the directory asyncDirFor/steerRouteDir
+  // already read (pi-subagents writes every detached run's status.json here).
+  // fleetStatus() scans it for the FLEET-vs-INVENTORY parity union.
+  const asyncRoot = deps.asyncDirRoot ?? defaultAsyncRunRoot();
+
   /** Extract the async workflow id from a spawn RPC reply (structured or text). */
   function extractRunId(reply: unknown): string {
     const d = (reply as { data?: Record<string, unknown> } | null)?.data;
@@ -111,6 +142,40 @@ export function createPiBackend(pi: PiLike): SubagentBackend {
     return existsSync(flat) ? flat : null;
   }
 
+  /**
+   * In-flight async runs on disk — the async portion of the `subagent status
+   * fleet` surface (the "running | workflow" rows) that asyncDirFor already
+   * resolves. pi-subagents gates its RPC fleet on the CALLER's CURRENT session
+   * id, so a workflow-parent run that started in an earlier session (engine
+   * restart, cross-session deferral) is invisible to the RPC while its run dir
+   * still reports queued|running. FLEET-vs-INVENTORY PARITY: fleetStatus() is
+   * the UNION of the RPC count and this scan — the RPC number is the FLOOR,
+   * never a fake 0. Terminal dirs (state moved to complete/failed/...) and
+   * foreign entries never count; unreadable entries are skipped, never
+   * inflated. Mirrors the run-dir identification asyncDirFor uses: status.json
+   * whose runId (when present) matches the dir name.
+   */
+  function countInFlightAsyncRuns(): number {
+    let names: string[];
+    try {
+      names = readdirSync(asyncRoot).filter((n) => !n.startsWith(".")); // skip index dirs (.active-runs …)
+    } catch {
+      return 0; // inventory absent/unreadable — the RPC count stands alone
+    }
+    let inFlight = 0;
+    for (const name of names) {
+      try {
+        const status = JSON.parse(readFileSync(join(asyncRoot, name, "status.json"), "utf8")) as { runId?: string; state?: string } | null;
+        if (!status) continue;
+        if (typeof status.runId === "string" && status.runId !== name) continue; // not this run's dir
+        if (status.state === "queued" || status.state === "running") inFlight += 1;
+      } catch {
+        continue; // junk/foreign entry — an unreadable dir never counts
+      }
+    }
+    return inFlight;
+  }
+
   return {
     async spawn(task, opts) {
       const script = `return runs.run("main", ${JSON.stringify({
@@ -132,7 +197,14 @@ export function createPiBackend(pi: PiLike): SubagentBackend {
       const r = reply as { success?: boolean; data?: { fleet?: { totalActive?: number } } };
       const f = r?.data?.fleet;
       if (r?.success !== true || !f) return null;
-      return { totalActive: f.totalActive ?? 0 };
+      // FLEET-vs-INVENTORY PARITY (AUTOPILOT-6): the RPC fleet counts only the
+      // caller session's live runs (pi-subagents gates its fleet candidates on
+      // the session id). A workflow parent spawned pre-activation / cross-
+      // session / after a runtime restart is invisible to it — observed live:
+      // FLEET 0/3 while those items ran. The inventory in-flight count rescues
+      // them, so ticks, auto-dispatch, AND zombie reconciliation can never
+      // observe a fake idle fleet from an undercounting RPC.
+      return { totalActive: Math.max(f.totalActive ?? 0, countInFlightAsyncRuns()) };
     },
 
     async steer(runId, message, mode, ackTimeoutMs = 4000) {
@@ -247,9 +319,7 @@ export function createPiBackend(pi: PiLike): SubagentBackend {
 
     asyncDirFor(runId) {
       try {
-        const scope = `pi-subagents-uid-${process.getuid?.() ?? ""}`;
-        const root = join(tmpdir(), scope, "async-subagent-runs");
-        const dir = join(root, runId);
+        const dir = join(asyncRoot, runId);
         if (existsSync(join(dir, "status.json"))) {
           // sanity: the status must reference this run
           try {

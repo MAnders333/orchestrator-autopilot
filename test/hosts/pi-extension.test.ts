@@ -121,12 +121,18 @@ describe("pi adapter smoke", () => {
   let ctx: any;
   let sessionCounter = 0;
   let lastSid = "";
+  /** Isolated async-run inventory root for the backend (AUTOPILOT_PI_ASYNC_ROOT)
+   *  — the mocked host suite must never merge a LIVE pi-subagents session's
+   *  runs into its assertions (the fleetStatus union reads this root). */
+  let fleetRoot = "";
 
   beforeEach(async () => {
     fleetAnswer = { success: true, data: { fleet: { totalActive: 0, omitted: 0 } } };
     dir = mkdtempSync(join(tmpdir(), "autopilot-smoke-"));
     writeFileSync(join(dir, "state.md"), LEGACY_MD);
     process.env.AUTOPILOT_STATE_DIR = dir;
+    fleetRoot = mkdtempSync(join(tmpdir(), "autopilot-fleet-"));
+    process.env.AUTOPILOT_PI_ASYNC_ROOT = fleetRoot;
     pi = mockPi();
     ctx = { ui: { notify: () => {} }, cwd: dir };
     mod = await import(process.env.AUTOPILOT_EXTENSION_PATH ?? "file://" + join(import.meta.dir, "../../src/hosts/pi-extension.ts"));
@@ -138,7 +144,9 @@ describe("pi adapter smoke", () => {
     for (const h of pi._handlers["session_shutdown"] ?? []) h({});
     delete process.env.AUTOPILOT_STATE_DIR;
     delete process.env.PI_CODING_AGENT_DIR;
+    delete process.env.AUTOPILOT_PI_ASYNC_ROOT;
     rmSync(dir, { recursive: true, force: true });
+    rmSync(fleetRoot, { recursive: true, force: true });
   });
 
   /** Lazy clean fixture repo — only dispatch tests pay the git-init cost. */
@@ -642,9 +650,7 @@ describe("pi adapter smoke", () => {
   });
 
   test("queue_steer writes a control-channel steer request and VERIFIES the child ack", async () => {
-    // fake pi-subagents async dir for the run
-    const scope = `pi-subagents-uid-${process.getuid?.() ?? ""}`;
-    const fakeAsyncDir = join(tmpdir(), scope, "async-subagent-runs", "d67a18c6-c2be-4e7d-be25-5d07a2931601");
+    const fakeAsyncDir = join(fleetRoot, "d67a18c6-c2be-4e7d-be25-5d07a2931601"); // isolated test async root (AUTOPILOT_PI_ASYNC_ROOT)
     const routeDir = join(fakeAsyncDir, "control", "workflow-foreground", "wf1", "control");
     mkdirSync(join(routeDir, "steer-targets", "0"), { recursive: true });
     mkdirSync(join(routeDir, "steer-acks", "0"), { recursive: true });
@@ -677,8 +683,7 @@ describe("pi adapter smoke", () => {
   });
 
   test("queue_steer REFUSES when the child publishes supported:false (headless worker)", async () => {
-    const scope = `pi-subagents-uid-${process.getuid?.() ?? ""}`;
-    const fakeAsyncDir = join(tmpdir(), scope, "async-subagent-runs", "d67a18c6-c2be-4e7d-be25-5d07a2931601");
+    const fakeAsyncDir = join(fleetRoot, "d67a18c6-c2be-4e7d-be25-5d07a2931601"); // isolated test async root (AUTOPILOT_PI_ASYNC_ROOT)
     const routeDir = join(fakeAsyncDir, "control", "workflow-foreground", "wf1", "control");
     mkdirSync(join(routeDir, "steer-capabilities"), { recursive: true });
     writeFileSync(join(fakeAsyncDir, "status.json"), JSON.stringify({ runId: "d67a18c6-c2be-4e7d-be25-5d07a2931601", mode: "workflow" }));
@@ -698,8 +703,7 @@ describe("pi adapter smoke", () => {
   });
 
   test("queue_steer reports the child's explicit rejection (ack state failed)", async () => {
-    const scope = `pi-subagents-uid-${process.getuid?.() ?? ""}`;
-    const fakeAsyncDir = join(tmpdir(), scope, "async-subagent-runs", "d67a18c6-c2be-4e7d-be25-5d07a2931601");
+    const fakeAsyncDir = join(fleetRoot, "d67a18c6-c2be-4e7d-be25-5d07a2931601"); // isolated test async root (AUTOPILOT_PI_ASYNC_ROOT)
     const routeDir = join(fakeAsyncDir, "control", "workflow-foreground", "wf1", "control");
     mkdirSync(join(routeDir, "steer-targets", "0"), { recursive: true });
     mkdirSync(join(routeDir, "steer-acks", "0"), { recursive: true });
@@ -727,8 +731,7 @@ describe("pi adapter smoke", () => {
   });
 
   test("queue_steer reports silent no-ack (headless child) instead of claiming delivery", async () => {
-    const scope = `pi-subagents-uid-${process.getuid?.() ?? ""}`;
-    const fakeAsyncDir = join(tmpdir(), scope, "async-subagent-runs", "d67a18c6-c2be-4e7d-be25-5d07a2931601");
+    const fakeAsyncDir = join(fleetRoot, "d67a18c6-c2be-4e7d-be25-5d07a2931601"); // isolated test async root (AUTOPILOT_PI_ASYNC_ROOT)
     const routeDir = join(fakeAsyncDir, "control", "workflow-foreground", "wf1", "control");
     mkdirSync(join(routeDir, "steer-targets", "0"), { recursive: true });
     mkdirSync(join(routeDir, "steer-acks", "0"), { recursive: true });

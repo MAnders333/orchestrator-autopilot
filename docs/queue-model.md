@@ -105,6 +105,16 @@ Reason vocabulary: ticks arrive as `[orch-tick: <reason>]` — `dispatch` /
     replaces it). Telemetry records each re-derivation as `tick-refresh`
     (timestamped at delivery; the gap from the generation `tick` line is the
     deferral window).
+  - **FLEET-vs-inventory parity (AUTOPILOT-6)**: the backend's fleetStatus()
+    is the UNION of its RPC fleet count and its in-flight async-run inventory
+    scan (pi-subagents' RPC fleet is gated on the caller's session id — a
+    workflow parent spawned pre-activation / cross-session / after a runtime
+    restart is invisible to it, the observed "FLEET 0/3 while items ran"). The
+    union means a tick's FLEET matches `subagent status fleet`, auto-dispatch
+    cannot over-spawn into phantom free slots, and zombie reconciliation
+    cannot flip a LIVE parent on an undercount-to-0 (a genuine 0 requires the
+    RPC AND the inventory to both report idle). Tests isolate the inventory
+    scan via AUTOPILOT_PI_ASYNC_ROOT / the backend's asyncDirRoot seam.
 - **intake** — approved count < `queueLowThreshold` (2) → "run a full intake
   scan, propose the next batch".
   - **Intake suppression**: while ANY proposal is pending (the user is
