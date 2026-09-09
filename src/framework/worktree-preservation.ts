@@ -282,3 +282,27 @@ export function prunePreservedRefs(stateDir: string): string[] {
   }
   return deleted;
 }
+
+/** The pointer-rich review-target list for a human-review handover: cwd first,
+ *  then each journaled branch@tip (with its view/diff commands), the
+ *  changed-file deliverable paths (branch-scoped), and a best-effort web link.
+ *  Shared by the auto-flag (PASS handover) and the decision panel — one
+ *  source for "where do I navigate to review this". */
+export function humanReviewTargetsFor(stateDir: string, key: string, item: { cwd?: string | null }): string[] {
+  const targets: string[] = [];
+  if (item.cwd) targets.push(item.cwd);
+  try {
+    for (const p of reviewPointersFor(stateDir, key)) {
+      targets.push(`branch ${p.branch} @ ${p.tipSha.slice(0, 8)} — diff vs main: git diff main...${p.tipSha.slice(0, 8)}`);
+      const files = item.cwd ? deliverablePathsFor(item.cwd, p.tipSha) : null;
+      if (files?.length) {
+        targets.push(...files.map((f) => `${f} — on branch (view: git show ${p.tipSha.slice(0, 8)}:${f})`));
+      }
+      const web = item.cwd ? webUrlForCommit(item.cwd, p.tipSha) : null;
+      if (web) targets.push(web);
+    }
+  } catch {
+    // pointer enrichment must never break the handover / panel
+  }
+  return targets.length ? targets : [item.cwd ?? "", `the reviewed work (queue item ${key})`];
+}

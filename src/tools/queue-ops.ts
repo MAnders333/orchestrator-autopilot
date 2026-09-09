@@ -73,7 +73,7 @@ export async function queueList(ctx: QueueOpsCtx, params: Record<string, unknown
  *  a cwd (the repo the work lands in). Enforced here so the approval-time
  *  requirement is real, not skill guidance. Blocked items are exempt (they are
  *  waiting by design, not dispatchable). */
-function approvalReady(scope: string | null | undefined, cwd: string | null | undefined): boolean {
+export function approvalReady(scope: string | null | undefined, cwd: string | null | undefined): boolean {
   return Boolean((scope ?? "").trim() && cwd);
 }
 
