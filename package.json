@@ -1,16 +1,24 @@
 {
   "name": "orchestrator-autopilot",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
-  "description": "Deterministic orchestrator autopilot — keeps a subagent worker fleet at capacity. One queue store + lifecycle + tools; each host loads only its own adapter.",
-  "keywords": ["pi-package"],
+  "description": "Deterministic orchestrator autopilot \u2014 keeps a subagent worker fleet at capacity. One queue store + lifecycle + tools; each host loads only its own adapter.",
+  "keywords": [
+    "pi-package"
+  ],
   "scripts": {
     "test": "bun test"
   },
   "pi": {
-    "extensions": ["./src/hosts/pi-extension.ts"],
-    "skills": ["./skills"],
-    "prompts": ["./prompts"]
+    "extensions": [
+      "./src/hosts/pi-extension.ts"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "prompts": [
+      "./prompts"
+    ]
   },
   "exports": {
     ".": "./src/hosts/opencode-entry.ts"
@@ -21,5 +29,12 @@
   "peerDependencies": {
     "typebox": "*"
   },
-  "files": ["src", "skills", "prompts", "docs", "README.md", "LICENSE"]
+  "files": [
+    "src",
+    "skills",
+    "prompts",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ]
 }
