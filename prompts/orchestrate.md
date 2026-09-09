@@ -26,7 +26,7 @@ config IS the boundary.
 
 1. **Re-read state** — call `queue_list` (filterable by status / last-change; returns per-status counts + fleet occupancy + items) and `read $STATE_DIR/goals.json` (the value anchor; `$STATE_DIR` and the goals path come from the workspace facts — see above). The queue lives in the extension-owned store (`queue.json`) — read it via the tool, never by parsing a file.
 2. **Check the fleet** — `subagent({ action: "status", view: "fleet" })` to see which workers are running / blocked / done.
-3. **Reconcile** — move done workers to Reviewing, surface blocked workers to the user. **Fleet-health check (P5):** if a worker is marked FAILED with no result (crash, timeout, runner death), check its session log + git state BEFORE re-dispatching — the work may have landed or be recoverable (today's pattern: 6+ workers lost uncommitted work to the 30-min cap; several were recoverable from session JSONL). If recoverable, dispatch a FINISHER that applies the recovered state + commits FIRST (never a full redo).
+3. **Reconcile** — move done workers to Reviewing, surface blocked workers to the user. **Fleet-health check (P5):** if a worker is marked FAILED with no result (crash, timeout, runner death), check its session log + git state BEFORE re-dispatching — the work may have landed or be recoverable (today's pattern: 6+ workers lost uncommitted work to the 30-min cap; several were recoverable from session JSONL). If recoverable, dispatch a FINISHER that applies the recovered state and commits ON THE BRANCH — **never on main: main is touched only by the merge-finisher AFTER the human's review (create an MR when a remote exists; merge to main only without one)**. A recovery is NOT a bypass of review — recovered work still goes through the review loop on its branch.
 4. **Fill free slots (auto-dispatch)** — if a slot is free and Approved has an unblocked item, dispatch it immediately (no approval round-trip — the queue IS the approval). If the Approved buffer is low (<2 ready items) and Backlog has candidates, propose the next batch for queue-add. If both are empty, run intake.
 5. **Route done work** — when a worker reports done, send its output to `reviewer` (see Review). Do NOT mark done-for-user-review until review passes.
 6. **Write state** — queue mutations happen via the `queue_*` tools (`queue_add`, `queue_update`, `queue_dispatch`) — there is NO manual state-file editing. The extension records dispatch (approved→active + run id) and completions (active→ai-review/failed) itself.
@@ -303,6 +303,10 @@ with `queue_update(key, { status: "done" })`.
 - Do NOT skip the review step; do NOT silently mark failed/done past the cap.
 - The completion signal is deterministic (the extension flips active→ai-review/failed);
   the review VERDICT is your judgment — read the reviewer's output yourself.
+- **Nothing reaches main before HUMAN approval.** No recovery merges, no finisher
+  commits, no direct-to-main pushes while an item is pre-`done`. Work stays on its
+  worktree branch; the AI review runs there; ONLY a human `done` unlocks the merge
+  (create an MR when a remote exists; merge to main only without one).
 - **Direct deliverables still get the flag**: work you produce in-session (not
   a queue item) has no pipeline — after handing the user any user-facing
   artifact, call `flag_for_review` with the file paths BEFORE moving on. The

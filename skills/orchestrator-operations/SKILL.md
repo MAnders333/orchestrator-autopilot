@@ -68,10 +68,17 @@ only your own backend's notes.
   NEGATIVE — the worker's work may exist on its parallel worktree branch
   (`pi-parallel-<runid>-0`), unmerged. Verify `git log --all` + the
   remote-tracking branches before letting the re-dispatch run: if the work is
-  there, stop the redo worker, MERGE it to main (a finisher-style merge), and
-  mark the item done — never re-implement recoverable work. Marking done from
-  an active/failed item needs NO fake review state: stop the redo worker →
-  `active→failed` (the worker stopped = failed) → `failed→done`
+  there, stop the redo worker and keep the work ON ITS BRANCH — never
+  re-implement recoverable work and NEVER merge/commit it to main: **main is
+  touched ONLY by the merge-finisher AFTER the human's approval** (create an
+  MR when a remote exists; merge to main only without one). Recoverable work
+  goes through the NORMAL review loop: the re-dispatch/checked version is
+  handed to review on the branch, the AI review runs there, and only a human
+  `done` unlocks the merge. Treating a delivery-channel failure (file not
+  persisted) as a recovery-finisher case is a PROCEDURAL VIOLATION — recovery
+  commits go to the branch, not main. Marking done from an active/failed item
+  needs NO fake review state: stop the redo worker → `active→failed` (the
+  worker stopped = failed) → `failed→done`
   ("verified-complete despite the failure record") — both transitions are
   legal, no `active→ai-review` detour needed.
 - On **cap** (5 FAILs): the framework marked it failed — surface the options:
