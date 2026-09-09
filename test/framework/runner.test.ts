@@ -69,7 +69,7 @@ function load(f: Fixture) { return JSON.parse(readFileSync(join(f.dir, "queue.js
 function save(f: Fixture, s: unknown) { writeFileSync(join(f.dir, "queue.json"), JSON.stringify(s)); }
 
 describe("framework runner (shared tick machinery)", () => {
-  test("onActivate with a ready item → dispatch tick delivered through the gate", () => {
+  test("forced sweep (timer) with a ready item → dispatch tick delivered through the gate", () => {
     const f = setup();
     seed(f, "A1");
     f.runner.onTimer();
