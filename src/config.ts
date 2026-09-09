@@ -280,12 +280,11 @@ export function autopilotModeMessage(mode: "on" | "off", workspace?: { stateDir:
 
 /** Resolve the state dir ONCE, in the framework — no per-host copies. Chain:
  *  AUTOPILOT_STATE_DIR env → the host's orchestrate command STATE_DIR line
- *  (when a commandFile is given; config-carried) → PROFILE-SCOPED
- *  ($PI_CODING_AGENT_DIR/orchestrator — the environment IS the profile root;
- *  no mode-name knowledge) → LEGACY compat: the old mode-name heuristic
- *  (~/.local/state/orchestrator[-personal]) only when that dir already
- *  EXISTS (existing environments keep their queues; never re-derive from
- *  a name) → the documented default. */
+ *  (when a commandFile is given; config-carried) → PROFILE-SCOPED:
+ *  ~/.local/state/orchestrator/<basename of the agent dir>. The profile
+ *  folder's NAME (not its semantics) namespaces the state — machine-scoped
+ *  (~/.local/state), never inside the profile dir itself (agent dirs may be
+ *  managed repos), no mode-name knowledge. The framework is profile-blind. */
 export function resolveStateDir(commandFile?: string): string {
   if (process.env.AUTOPILOT_STATE_DIR) return process.env.AUTOPILOT_STATE_DIR;
   if (commandFile) {
@@ -295,22 +294,15 @@ export function resolveStateDir(commandFile?: string): string {
         if (parsed) return parsed;
       }
     } catch {
-      // fall through to the profile-based + legacy resolution
+      // fall through to the profile-scoped resolution
     }
   }
   const agentDir = process.env.PI_CODING_AGENT_DIR ?? "";
-  if (agentDir) {
-    const profileScoped = join(agentDir, "orchestrator");
-    if (existsSync(profileScoped)) return profileScoped;
-    // LEGACY compat (deprecated): the old mode-NAME heuristic — only while
-    // that dir already exists, so existing environments keep their queues.
-    const legacy = join(homedir(), agentDir.includes("personal")
-      ? ".local/state/orchestrator-personal"
-      : ".local/state/orchestrator");
-    if (existsSync(legacy)) return legacy;
-    return profileScoped; // new profile — deterministic, no name knowledge
-  }
-  return join(homedir(), ".local/state/orchestrator");
+  if (!agentDir) return join(homedir(), ".local/state/orchestrator");
+  // The profile dir's basename namespaces the state (personal, work, …) — a
+  // folder name, not a mode name: no semantics, purely deterministic scoping.
+  const profile = (agentDir.split("/").filter(Boolean).pop() ?? "").replace(/[^A-Za-z0-9_-]/g, "") || "default";
+  return join(homedir(), ".local/state/orchestrator", profile);
 }
 
 export function autopilotConfigPath(stateDir: string): string {

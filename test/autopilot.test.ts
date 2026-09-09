@@ -301,42 +301,38 @@ describe("core.Autopilot (store-first)", () => {
     expect(tick?.facts.readyKeys).toEqual(["B1"]);
   });
 
-  test("resolveStateDir: profile-scoped when the profile dir exists; legacy dirs keep their queues", () => {
+  test("resolveStateDir: basename-scoped — deterministic per profile, no mode-name semantics", () => {
     delete process.env.AUTOPILOT_STATE_DIR;
-    // profile dir EXISTS → wins even though a legacy dir also exists
-    const agentDir = join(dir, "profile-a");
-    mkdirSync(join(agentDir, "orchestrator"), { recursive: true });
-    mkdirSync(join(homedir(), ".local/state/orchestrator-nonexistent-probe"), { recursive: true }); // ensure legacy probe shape exists for OTHER names only
     const saved = process.env.PI_CODING_AGENT_DIR;
-    process.env.PI_CODING_AGENT_DIR = agentDir;
+    process.env.PI_CODING_AGENT_DIR = "/Users/x/.pi/personal";
     try {
-      expect(resolveStateDir(undefined)).toBe(join(agentDir, "orchestrator"));
+      expect(resolveStateDir(undefined)).toBe(join(homedir(), ".local/state/orchestrator/personal"));
+      process.env.PI_CODING_AGENT_DIR = "/Users/x/.pi/work";
+      expect(resolveStateDir(undefined)).toBe(join(homedir(), ".local/state/orchestrator/work"));
+      // existence-independent: a BRAND-NEW profile resolves to its scoped path
+      process.env.PI_CODING_AGENT_DIR = "/Users/x/.pi/brand-new";
+      expect(resolveStateDir(undefined)).toBe(join(homedir(), ".local/state/orchestrator/brand-new"));
+      // sanitization: weird basename → clean; degenerate → "default"
+      process.env.PI_CODING_AGENT_DIR = "/Users/x/.pi/my profile!";
+      expect(resolveStateDir(undefined)).toBe(join(homedir(), ".local/state/orchestrator/myprofile"));
+      process.env.PI_CODING_AGENT_DIR = "/";
+      expect(resolveStateDir(undefined)).toBe(join(homedir(), ".local/state/orchestrator/default")); // degenerate root
     } finally {
       process.env.PI_CODING_AGENT_DIR = saved;
-      rmSync(join(homedir(), ".local/state/orchestrator-nonexistent-probe"), { recursive: true, force: true });
     }
   });
 
-  test("resolveStateDir: legacy compat — mode-name dir used only while it exists; new profiles are deterministic", () => {
+  test("resolveStateDir: commandFile STATE_DIR line still wins (opencode config-carried)", () => {
     delete process.env.AUTOPILOT_STATE_DIR;
-    const agentDir = join(dir, "profile-personal"); // no profile-scoped dir, but the NAME hits the personal legacy branch
-    const saved = process.env.PI_CODING_AGENT_DIR;
-    process.env.PI_CODING_AGENT_DIR = agentDir;
-    try {
-      // legacy personal dir exists on this machine → compat keeps it
-      const legacyPersonal = join(homedir(), ".local/state/orchestrator-personal");
-      if (existsSync(legacyPersonal)) {
-        expect(resolveStateDir(undefined)).toBe(legacyPersonal);
-      }
-      // an agentDir that matches NO legacy dir (name has no 'personal') falls
-      // back to the shared legacy default when it exists — the compat rule
-      const legacyDefault = join(homedir(), ".local/state/orchestrator");
-      if (existsSync(legacyDefault) && !agentDir.includes("personal")) {
-        expect(resolveStateDir(undefined)).toBe(legacyDefault);
-      }
-    } finally {
-      process.env.PI_CODING_AGENT_DIR = saved;
-    }
+    delete process.env.PI_CODING_AGENT_DIR;
+    const fakeAgentDir = join(dir, "fake-mode");
+    const fakeState = join(dir, "resolved-state");
+    mkdirSync(join(fakeAgentDir, "prompts"), { recursive: true });
+    writeFileSync(
+      join(fakeAgentDir, "prompts", "orchestrate.md"),
+      `# Orchestrator Mode\n\n- \`STATE_DIR\`: \`${fakeState}/\`\n`,
+    );
+    expect(resolveStateDir(join(fakeAgentDir, "prompts/orchestrate.md"))).toBe(fakeState);
   });
 
   test("workspace config roundtrip: intake sources + goals file survive loadAutopilotConfig", () => {
