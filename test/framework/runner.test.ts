@@ -281,6 +281,22 @@ describe("framework runner (shared tick machinery)", () => {
     // the item is NOT done — it is explicitly awaiting the human, not auto-complete
     expect(load(f).items["H1"].status).toBe("human-review");
   });
+
+  test("zombie flips deliver the one-line DECISION tick (source: zombie) through the shared gate", async () => {
+    const f = setup();
+    seed(f, "Z1", { status: "active", runId: "deadfeed" });
+    const st = load(f);
+    st.items["Z1"].updatedAt = new Date(Date.now() - 45 * 60_000).toISOString(); // 45m idle > 30m grace
+    save(f, st);
+    f.runner.onTimer();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(load(f).items["Z1"].status).toBe("failed"); // the flip applied
+    const decision = f.delivered.find((m) => m.includes("[orch-tick: decision]"));
+    expect(decision).toBeTruthy(); // the orchestrator learns the move, not by surprise
+    expect(decision).toContain("Z1 failed: active → failed (zombie)");
+    // the consolidated harness line (verify-branch guidance) still rides along
+    expect(f.delivered.some((m) => m.includes("[orch-tick: harness]") && m.includes("zombie reconciliation flipped Z1"))).toBe(true);
+  });
 });
 
 describe("auto-review (C) through the runner", () => {

@@ -43,6 +43,11 @@ export interface DecisionPanelOptions {
   done: () => void;
   /** Called after every decision — hosts refresh their pending badge here. */
   onChanged?: () => void;
+  /** The decision-tick sink (pi: the same custom-role sendMessage channel the
+   *  runner's ticks use). Called once per APPLIED status move, BEFORE the
+   *  panel refreshes/closes — the orchestrator learns the move at
+   *  application time. */
+  deliver?: (message: string) => void;
 }
 
 /** The pending-count badge (setWidget above the editor). Fed from queue
@@ -142,6 +147,11 @@ export class DecisionPanel implements Component, Focusable {
     const item = this.items[this.sel];
     if (!item) return;
     const r = applyPanelDecision(this.opts.stateDir, item.key, action, payload);
+    // DECISION TICK first: every applied status move rides the custom-role
+    // channel (same as ticks) BEFORE the panel refreshes/closes — the
+    // orchestrator learns the move at application time, fresh by
+    // construction (non-moves — refine/redispatch findings — carry no tick).
+    if (r.ok && r.tick) this.opts.deliver?.(r.tick);
     this.lastResult = { text: r.text, isError: !r.ok };
     this.refresh();
     if (this.items.length) this.sel = Math.min(this.sel, Math.max(0, this.items.length - 1));
@@ -459,7 +469,13 @@ export class DecisionPanel implements Component, Focusable {
  *  notifies instead of throwing. */
 export function registerDecisionPanel(
   pi: ExtensionAPI,
-  deps: { stateDir: () => string },
+  deps: {
+    stateDir: () => string;
+    /** The decision-tick deliver sink (pi: the runner's custom-role sendMessage
+     *  channel — the same channel capacity ticks use). Optional: without it
+     *  the panel still applies + refreshes the badge, only the tick is skipped. */
+    deliver?: (message: string) => void;
+  },
 ): void {
   if (typeof pi.registerCommand !== "function") return;
   // Hold the most recent command ctx for badge refreshes (panel decisions +
@@ -488,6 +504,7 @@ export function registerDecisionPanel(
                 done();
               },
               onChanged: refresh,
+              deliver: deps.deliver,
             }),
           {
             overlay: true,

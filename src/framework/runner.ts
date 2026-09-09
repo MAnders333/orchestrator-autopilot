@@ -18,6 +18,7 @@ import { loadStore, itemByRunId } from "../queue-store.ts";
 import { flagForReview } from "./flag-review.ts";
 import { createTickRouter, type TickHostState } from "./tick-router.ts";
 import { autoDispatchEligible, autoRedispatch, autoReview } from "./auto-dispatch.ts";
+import { decisionTick } from "./panels.ts";
 import { humanReviewTargetsFor, preserveActiveItems, prunePreservedRefs, preserveRunWorktree } from "./worktree-preservation.ts";
 
 export interface RunnerOptions {
@@ -220,6 +221,20 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
         const zombies = autopilot.zombieReconcile(fleet?.totalActive ?? 0);
         if (zombies.flippedKeys.length) {
           harnessTick([`zombie reconciliation flipped ${zombies.flippedKeys.join(", ")} to failed (no live run — verify partial work on pi-parallel-* branches before re-dispatch)`], fleet?.totalActive);
+          // DECISION TICK per flip — the canonical one-line move record, in
+          // addition to the consolidated harness line above (which keeps the
+          // verify-branch guidance). Router-gated like every other harness
+          // tick: a busy deferral holds it for the settle; a permanent drop
+          // is covered by the harness line — never lost, never a surprise.
+          for (const key of zombies.flippedKeys) {
+            const decision = decisionTick({ key, action: "failed", from: "active", to: "failed", note: "zombie" });
+            if (!decision) continue;
+            const sendResult = router.send(decision, { bypassCooldown: true });
+            // REVIEW/COMPLETE are already ticked (review ticks on verdict
+            // routing; the harness tick on worker completion/auto-actions) —
+            // zombie is the one harness flip that only got the batch line.
+            if (sendResult === "deferred") queueDeferred(decision, "tick");
+          }
         }
       } catch {
         // never let the safety net break the sweep

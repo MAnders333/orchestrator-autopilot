@@ -157,6 +157,25 @@ export default function (pi: ExtensionAPI) {
   // src/framework/runner.ts — identical in both hosts. The pi host supplies
   // its gate state + the sendMessage delivery; runSweep/onCompletion etc.
   // wire the triggers.
+  // The custom-role tick channel — ONE sendMessage implementation shared by
+  // the runner's ticks AND the decision panel's decision ticks (same
+  // customType orchestrator-autopilot, triggerTurn followUp): the orchestrator
+  // sees panel decisions exactly like capacity ticks, no second mechanism.
+  // pi.sendMessage is declared `: void` (not a Promise) — the runtime
+  // sometimes returns a thenable and sometimes undefined. Never assume.
+  // RETURN the thenable: the runner watches it — an ASYNC rejection (the
+  // settled-vs-teardown race where the triggered prompt() throws "already
+  // processing" after sendMessage resolved) re-defers the tick instead of
+  // silently dropping it. A SYNC throw propagates → the router maps it to
+  // "deferred" + the runner holds it (existing path).
+  const deliverTick = (message: string): void | Promise<void> => {
+    const sent = pi.sendMessage(
+      { customType: TICK_TYPE, content: message, display: true },
+      { triggerTurn: true, deliverAs: "followUp" },
+    );
+    return sent && typeof (sent as Promise<void>).catch === "function" ? (sent as Promise<void>) : undefined;
+  };
+
   const runner = createFrameworkRunner({
     stateDir,
     autopilot: ensureAutopilot(),
@@ -167,20 +186,7 @@ export default function (pi: ExtensionAPI) {
       busy: () => agentBusy,
       compacting: () => compacting,
     },
-    deliver: (message) => {
-      // pi.sendMessage is declared `: void` (not a Promise) — the runtime
-      // sometimes returns a thenable and sometimes undefined. Never assume.
-      // RETURN the thenable: the runner watches it — an ASYNC rejection (the
-      // settled-vs-teardown race where the triggered prompt() throws "already
-      // processing" after sendMessage resolved) re-defers the tick instead of
-      // silently dropping it. A SYNC throw propagates → the router maps it to
-      // "deferred" + the runner holds + flushes at the settle (existing path).
-      const sent = pi.sendMessage(
-        { customType: TICK_TYPE, content: message, display: true },
-        { triggerTurn: true, deliverAs: "followUp" },
-      );
-      return sent && typeof (sent as Promise<void>).catch === "function" ? (sent as Promise<void>) : undefined;
-    },
+    deliver: deliverTick,
     deliverUserMessage: (message, options) => {
       try {
         const sent = pi.sendUserMessage(message, { deliverAs: "followUp", ...(options ?? {}) });
@@ -567,7 +573,7 @@ export default function (pi: ExtensionAPI) {
   // if the TUI surface is unavailable the command notifies instead of
   // throwing, and queue_list remains the fallback read.
   try {
-    registerDecisionPanel(pi, { stateDir: () => stateDir });
+    registerDecisionPanel(pi, { stateDir: () => stateDir, deliver: deliverTick });
   } catch {
     // a broken panel must never affect pi — the command simply won't exist
   }

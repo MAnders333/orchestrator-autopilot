@@ -83,4 +83,13 @@ item there, the harness auto-flags it for you, and your
   the harness auto-flags the item (`flag_for_review`); nothing reaches `done`
   without your call. The orchestrator keeps: approval, high-risk checkpoints,
   `queue_review` overrides, and the `flag_for_review` handover.
+- **decision** — a status MOVE applied by a panel decision or by a
+  harness-applied flip (e.g. zombie reconciliation): ONE line,
+  `[orch-tick: decision] <key> <action>: <from> → <to>` (with a note for the
+  annotated cases — `approved: proposal → approved (dispatchable)`,
+  `deferred: proposal → blocked (decision)`, `failed: active → failed (zombie)`)
+  so the orchestrator never learns of a move by surprise. The tick is generated
+  AT APPLICATION TIME from the `orch:human-decision` event data — fresh by
+  construction, never a stale snapshot. Non-moves (refine scope edits,
+  re-dispatch findings) record words and are events only — no tick.
 - **blocked** items never trigger ticks (they are waiting by design).

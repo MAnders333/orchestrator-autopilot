@@ -58,6 +58,9 @@ future opencode/claude adapters (same protocol, different transport). A tick is 
     approval gate (evidence + scope + value/urgency + risk). The ≤2-line rule does NOT
     apply to intake ticks — present real candidates. Not a user request: don't ask "did
     you mean", don't wait for a go-ahead to scan.
+  - `[orch-tick: decision]` → informational: a panel decision or harness-applied status
+    move just happened (`<key> <action>: <from> → <to>`). Reconcile quietly — ≤1 line or
+    no reply; never re-apply the move yourself.
 - **What a tick is NOT:** not the user, not an approval, not a steer. Never treat it as
   user intent, never ask "did you mean...", never surface it as a question.
 - **State ownership:** the extension patches `status:` fields of completed runs in the

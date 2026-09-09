@@ -9,8 +9,10 @@
 // (ALLOWED + the approval gate). Hosts (pi TUI overlay, opencode TUI route)
 // are thin renderers over this doc and decision result.
 //
-// Deterministic transitions (approve/reject/defer) are applied directly and
-// emit `orch:human-decision` so the orchestrator stays coherent. Anything
+// Deterministic transitions (approve/reject/defer) are applied directly,
+// emit `orch:human-decision` (reused by the decision-tick builder below), and
+// result in a one-line `[orch-tick: decision] <key> <action>: <from> → <to>`
+// so the orchestrator always knows the move — fresh at application time. Anything
 // needing judgment (refine scope edits, re-dispatch with findings) records
 // the human's words on the item and emits the event — the harness/orchestrator
 // consumes it via the normal dispatch path, nothing is auto-sent to a worker
@@ -220,6 +222,10 @@ export interface HumanDecisionEvent {
     /** set when the decision renamed a provisional key (approve) — the event
      *  carries the FINAL key so consumers dispatch the live item. */
     renamedFrom?: string;
+    /** Short annotation the decision tick appends to the target — e.g.
+     *  "dispatchable" (approve a proposal) or the defer blocker
+     *  ("decision", "parked"). */
+    note?: string;
   };
 }
 
@@ -227,10 +233,39 @@ export interface PanelDecisionResult {
   ok: boolean;
   text: string;
   event?: HumanDecisionEvent;
+  /** The one-line decision tick (`[orch-tick: decision] <key> <action>:
+   *  <from> → <to>`), built AT APPLICATION TIME from the event data — fresh
+   *  by construction, never a stale snapshot. Present only for real status
+   *  moves (approve/reject/defer): refine/redispatch record words, they
+   *  don't flip a status, so they carry no tick. */
+  tick?: string;
+}
+
+/** The past-tense verbs the decision tick shows per action. */
+const DECISION_VERB: Record<PanelActionId, string> = {
+  approve: "approved",
+  reject: "rejected",
+  defer: "deferred",
+  refine: "refined",
+  redispatch: "re-dispatched",
+};
+
+/** Build the one-line decision tick: `[orch-tick: decision] <key> <action>:
+ *  <from> → <to>[ (<note>)]`. SHARED by the panel hosts (from the returned
+ *  orch:human-decision event) and harness-applied moves (zombie flips pass
+ *  their own verb + note — e.g. action "failed", note "zombie"). Returns null
+ *  when no status moved (from === to or no target): a non-move is an event,
+ *  not a tick. One line, by construction. */
+export function decisionTick(input: { key: string; action: string; from: string; to: string | null; note?: string }): string | null {
+  if (input.to === null || input.from === input.to) return null;
+  const to = input.note ? `${input.to} (${input.note})` : input.to;
+  return `[orch-tick: decision] ${input.key} ${input.action}: ${input.from} → ${to}`;
 }
 
 function result(text: string, event?: HumanDecisionEvent): PanelDecisionResult {
-  return event ? { ok: true, text: `${text} (human decision recorded)`, event } : { ok: false, text };
+  if (!event) return { ok: false, text };
+  const tick = decisionTick({ key: event.data.key, action: DECISION_VERB[event.data.action], from: event.data.from, to: event.data.to, note: event.data.note });
+  return { ok: true, text: `${text} (human decision recorded)`, event, ...(tick ? { tick } : {}) };
 }
 
 /** Apply one panel action. Deterministic transitions are applied directly and
@@ -258,9 +293,9 @@ export function applyPanelDecision(stateDir: string, key: string, action: PanelA
         saveStore(stateDir, store);
         if (renamedTo) {
           const text = `approved '${key}' → renamed to '${renamedTo}' (provisional handle → real series)`;
-          return result(text, { name: "orch:human-decision", data: { ...base, key: renamedTo, renamedFrom: key, to: "approved" } });
+          return result(text, { name: "orch:human-decision", data: { ...base, key: renamedTo, renamedFrom: key, to: "approved", note: "dispatchable" } });
         }
-        return result(`approved '${key}' (proposal → approved, dispatchable)`, { name: "orch:human-decision", data: { ...base, to: "approved" } });
+        return result(`approved '${key}' (proposal → approved, dispatchable)`, { name: "orch:human-decision", data: { ...base, to: "approved", note: "dispatchable" } });
       }
       if (item.status === "human-review") {
         updateItem(store, key, { status: "done" });
@@ -283,7 +318,7 @@ export function applyPanelDecision(stateDir: string, key: string, action: PanelA
       const blocker = payload?.blocker && (["parked", "serialized", "merge", "decision"] as const).includes(payload.blocker as never) ? payload.blocker : "decision";
       updateItem(store, key, { status: "blocked", blocker: blocker as never });
       saveStore(stateDir, store);
-      return result(`deferred '${key}' (blocked: ${blocker})`, { name: "orch:human-decision", data: { ...base, to: "blocked" } });
+      return result(`deferred '${key}' (blocked: ${blocker})`, { name: "orch:human-decision", data: { ...base, to: "blocked", note: blocker } });
     }
 
     case "refine": {

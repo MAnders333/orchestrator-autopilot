@@ -10,6 +10,12 @@
 // resolveStateDir against the opencode config's command/orchestrate.md, so
 // the TUI panel reads the SAME queue as the server host.
 //
+// DECISION TICKS: the client-side TUI cannot push a custom-role message
+// directly (no server channel from the TUI process). Panel actions therefore
+// toast + ride the shared orch:human-decision event; when the server-plugin
+// tick channel is wired to the panel (separate server-plugin task), the same
+// applyPanelDecision decision tick will ride it.
+//
 // Distribution: `exports["./tui"]` (target-only module — the server entry
 // stays at `exports["."]`). Enable via tui.json: "plugin": ["orchestrator-autopilot"].
 // -------------------------------------------------------------------------

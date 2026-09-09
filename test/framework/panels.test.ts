@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { newStore, saveStore, type QueueItem } from "../../src/queue-store.ts";
-import { applyPanelDecision, buildPanelDoc, PANEL_ACTIONS, actionsForStatus } from "../../src/framework/panels.ts";
+import { applyPanelDecision, buildPanelDoc, decisionTick, PANEL_ACTIONS, actionsForStatus } from "../../src/framework/panels.ts";
 
 let n = 0;
 function item(p: Partial<QueueItem> & { key: string; status: QueueItem["status"] }): QueueItem {
@@ -250,7 +250,6 @@ describe("applyPanelDecision — validated store mutations", () => {
     ]);
     for (const k of ["A1", "B1", "D1"]) expect(applyPanelDecision(dir, k, "approve").ok).toBe(false);
   });
-
   test("refine accepts the repo (cwd) — scope and/or cwd are persisted, identity held until approval", () => {
     const { dir, read } = dirWith([item({ key: "Q1", status: "proposal", provisionalKey: true, scope: "the task", cwd: null })]);
     // cwd-only refine (scope already good from intake)
@@ -291,5 +290,38 @@ describe("applyPanelDecision — validated store mutations", () => {
     expect(after["B-2"].notes).toContain("renamed from Q1");
     // the event carries the FINAL key so consumers dispatch the live item
     expect(r.event?.data).toMatchObject({ key: "B-2", renamedFrom: "Q1", action: "approve", to: "approved" });
+  });
+});
+
+describe("decision tick — the one-line move record (the orchestrator never surprised)", () => {
+  test("tick text per move action (approve/reject/defer), built at application time", () => {
+    const { dir } = dirWith([
+      item({ key: "P1", status: "proposal", scope: "task", cwd: "/tmp/repo" }),
+      item({ key: "P2", status: "proposal", scope: "task", cwd: "/tmp/repo" }),
+      item({ key: "P3", status: "proposal" }),
+      item({ key: "P4", status: "proposal" }),
+      item({ key: "H1", status: "human-review", scope: "work", cwd: "/tmp/repo" }),
+    ]);
+    expect(applyPanelDecision(dir, "P1", "approve").tick).toBe("[orch-tick: decision] P1 approved: proposal → approved (dispatchable)");
+    expect(applyPanelDecision(dir, "P2", "defer").tick).toBe("[orch-tick: decision] P2 deferred: proposal → blocked (decision)");
+    expect(applyPanelDecision(dir, "P4", "defer", { blocker: "parked" }).tick).toBe("[orch-tick: decision] P4 deferred: proposal → blocked (parked)");
+    expect(applyPanelDecision(dir, "P3", "reject").tick).toBe("[orch-tick: decision] P3 rejected: proposal → rejected");
+    expect(applyPanelDecision(dir, "H1", "approve").tick).toBe("[orch-tick: decision] H1 approved: human-review → done");
+    // every move tick is ONE line, by construction
+    expect(decisionTick({ key: "P9", action: "approved", from: "proposal", to: "approved", note: "dispatchable" })?.split("\n").length).toBe(1);
+  });
+
+  test("non-moves (refine scope, re-dispatch findings) carry NO tick — they record words, not status flips", () => {
+    const { dir } = dirWith([
+      item({ key: "P1", status: "proposal", scope: "old", cwd: "/tmp/repo" }),
+      item({ key: "H1", status: "human-review", scope: "work", cwd: "/tmp/repo" }),
+    ]);
+    expect(applyPanelDecision(dir, "P1", "refine", { scope: "new" }).tick).toBeUndefined();
+    expect(applyPanelDecision(dir, "H1", "redispatch", { findings: "merge missing on main" }).tick).toBeUndefined();
+    // the builder itself returns null for any non-move (from === to)
+    expect(decisionTick({ key: "H1", action: "re-dispatched", from: "human-review", to: "human-review" })).toBeNull();
+    expect(decisionTick({ key: "P1", action: "approved", from: "proposal", to: null })).toBeNull();
+    // harness-applied moves use their own verb + note (zombie reconciliation)
+    expect(decisionTick({ key: "Z1", action: "failed", from: "active", to: "failed", note: "zombie" })).toBe("[orch-tick: decision] Z1 failed: active → failed (zombie)");
   });
 });

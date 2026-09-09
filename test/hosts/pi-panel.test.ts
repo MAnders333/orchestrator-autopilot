@@ -309,3 +309,34 @@ describe("refreshPanelBadge — the push nudge", () => {
     expect(widget["orch-panel-badge"]).toBeUndefined();
   });
 });
+
+describe("DecisionPanel deliver sink — the decision tick rides the custom-role channel", () => {
+  test("every applied status move delivers its one-line tick BEFORE the panel refreshes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "orch-pi-panel-tick-"));
+    const store = newStore();
+    store.items["P1"] = item({ key: "P1", status: "proposal", scope: "task", cwd: "/tmp/repo" });
+    store.items["H1"] = item({ key: "H1", status: "human-review", scope: "work", cwd: "/tmp/repo" });
+    saveStore(dir, store);
+    const delivered: string[] = [];
+    let refreshed = 0;
+    const panel = new DecisionPanel({
+      stateDir: dir,
+      initial: "proposals",
+      theme: theme as never,
+      tui: { requestRender: () => {} },
+      done: () => {},
+      deliver: (m) => delivered.push(m),
+      onChanged: () => { refreshed += 1; },
+    });
+    panel.handleInput("a"); // approve P1
+    expect(delivered).toEqual(["[orch-tick: decision] P1 approved: proposal → approved (dispatchable)"]);
+    expect(refreshed).toBe(1); // the tick lands BEFORE the panel refreshes (deliver runs first in apply)
+
+    // non-moves (redispatch findings) deliver NOTHING — they record words, not a flip
+    panel.handleInput("t"); // → human-review view (H1)
+    panel.handleInput("x");
+    for (const ch of "merge") panel.handleInput(ch);
+    panel.handleInput("\r");
+    expect(delivered.length).toBe(1); // still only the approve tick
+  });
+});
