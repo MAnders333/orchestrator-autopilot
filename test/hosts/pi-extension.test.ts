@@ -422,6 +422,51 @@ describe("pi adapter smoke", () => {
     expect(pi._sent.some((m) => m.kind === "user" && m.args?.[0] === "/orchestrate")).toBe(false);
   });
 
+  test("STATE-DIR PROBE at ACTIVATION (AUTOPILOT-3): a phantom store → ONE error notify + ONE telemetry line, activation still proceeds (fail-open)", async () => {
+    // Remove the legacy state.md: nothing can migrate, so a missing queue.json
+    // is the phantom signature (a projection pointing at a dir with no store).
+    rmSync(join(dir, "state.md"), { force: true });
+    const notes: Array<[string, string]> = [];
+    ctx = { ui: { notify: (m: string, k: string) => notes.push([m, k]) }, cwd: dir };
+    await runAutopilotCmd("on");
+    // fail-open: the toggle still engaged (an empty store is operable)
+    expect(isAutopilotOn(dir, lastSid)).toBe(true);
+    const probeNotify = notes.find(([m]) => m.startsWith("State-dir probe"));
+    expect(probeNotify).toBeTruthy();
+    expect(probeNotify![0]).toContain("queue.json is missing");
+    expect(notes.filter(([, k]) => k === "error").length).toBe(1); // ONE notify
+    const lines = readFileSync(join(dir, "autopilot.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    const probes = lines.filter((l) => l.type === "state-dir-probe");
+    expect(probes).toHaveLength(1); // ONE telemetry log
+    expect(probes[0].hook).toBe("autopilot-on");
+    expect(probes[0].findings.some((f: string) => f.includes("EMPTY store"))).toBe(true);
+  });
+
+  test("STATE-DIR PROBE at SESSION START (AUTOPILOT-3): host-parity mismatch vs the orchestrate.md projection → ONE notify + ONE telemetry line", async () => {
+    const agentDir = join(dir, "fake-agent");
+    mkdirSync(join(agentDir, "prompts"), { recursive: true });
+    const projected = join(dir, "somewhere-else"); // the projection's own state dir
+    writeFileSync(
+      join(agentDir, "prompts", "orchestrate.md"),
+      `# Orchestrator Mode\n\n## Workspace (fake mode — not synced)\n\n- \`STATE_DIR\`: \`${projected}/\`\n`,
+    );
+    process.env.PI_CODING_AGENT_DIR = agentDir; // env AUTOPILOT_STATE_DIR still points at dir → divergence
+    const notes: Array<[string, string]> = [];
+    emit("session_start", { reason: "new" }, {
+      mode: "tui",
+      sessionManager: { getSessionId: () => "parity-sid" },
+      ui: { notify: (m: string, k: string) => notes.push([m, k]) },
+    });
+    const probeNotify = notes.find(([m]) => m.startsWith("State-dir probe"));
+    expect(probeNotify).toBeTruthy();
+    expect(probeNotify![0]).toContain("HOST PARITY MISMATCH");
+    const lines = readFileSync(join(dir, "autopilot.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    const startProbes = lines.filter((l) => l.type === "state-dir-probe" && l.hook === "session_start");
+    expect(startProbes).toHaveLength(1); // ONE telemetry log
+    expect(startProbes[0].findings.some((f: string) => f.includes("HOST PARITY MISMATCH"))).toBe(true);
+    delete process.env.PI_CODING_AGENT_DIR;
+  });
+
   test("autopilot on → migrates legacy state.md into queue.json + injects /orchestrate", async () => {
     await runAutopilotCmd("on");
     expect(existsSync(join(dir, "queue.json"))).toBe(true);

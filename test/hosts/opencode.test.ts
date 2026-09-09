@@ -100,6 +100,28 @@ describe("opencode host framework (hermetic, fake oc)", () => {
     rmSync(f.root, { recursive: true, force: true });
   });
 
+  test("STARTUP PROBE (AUTOPILOT-3): a vanished store warns via onProbeWarning at framework construction", () => {
+    const f = setup();
+    rmSync(join(f.stateDir, "queue.json")); // the store disappears (pre-migration projection / drift signature)
+    const warnings: Array<{ ok: boolean; findings: string[] }> = [];
+    const fw = createOpenCodeFramework({
+      stateDir: f.stateDir,
+      runsDir: f.runsDir,
+      ocBin: f.ocBin,
+      sweepIntervalMs: 0,
+      delivery: delivery(f),
+      commandFile: join(f.root, "command/orchestrate.md"),
+      onProbeWarning: (r) => warnings.push(r),
+    });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].ok).toBe(false);
+    expect(warnings[0].findings.some((x) => x.includes("EMPTY store"))).toBe(true);
+    // the harness itself still constructed (fail-open)
+    expect(Object.keys(fw.tools).length).toBe(6);
+    fw.dispose();
+    rmSync(f.root, { recursive: true, force: true });
+  });
+
   test("queue_add + queue_list mutate the store", async () => {
     const f = setup();
     const fw = createOpenCodeFramework({ stateDir: f.stateDir, runsDir: f.runsDir, ocBin: f.ocBin, sweepIntervalMs: 0, delivery: delivery(f) });

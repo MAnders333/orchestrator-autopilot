@@ -85,6 +85,18 @@ describe("DecisionPanel renders width-safely from queue state", () => {
     expect(Math.max(...lineWidths(panel.render(60)))).toBeLessThanOrEqual(60); // hint wraps, no overflow
   });
 
+  test("stale PROVISIONAL proposals get the ⚠ tag in the item row (provisional-linger)", () => {
+    const ago = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+    const { panel } = setup([
+      item({ key: "Q-3", status: "proposal", provisionalKey: true, title: "stale provisional", scope: "", createdAt: ago(12) }),
+      item({ key: "P1", status: "proposal", title: "normal proposal", scope: "", createdAt: ago(12) }),
+    ]);
+    const shown = panel.render(80).join("\n");
+    expect(shown).toContain("Q-3");
+    expect(shown).toContain("⚠ provisional");
+    expect(shown).not.toContain("P1 ⚠"); // the non-provisional item is never tagged
+  });
+
   test("empty view says all clear; no crash at render", () => {
     const { panel } = setup([item({ key: "A1", status: "approved" })]);
     const lines = panel.render(80);

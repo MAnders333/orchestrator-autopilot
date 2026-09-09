@@ -172,7 +172,7 @@ function renderPanelContent(api: TuiApi, ctl: PanelController): JSX.Element {
     for (const [i, it] of visible.entries()) {
       const selected = start + i === ctl.sel;
       const risk = it.risk === "high" ? " [high]" : it.risk === "medium" ? " [medium]" : "";
-      lines.push(`${selected ? "▸" : " "} ${it.key}${risk}`);
+      lines.push(`${selected ? "▸" : " "} ${it.key}${risk}${it.staleProvisionalDays ? ` ⚠ provisional ${it.staleProvisionalDays}d` : ""}`);
       lines.push(`    ${it.summary}`);
       if (it.targets[0]) lines.push(`    ↳ ${it.targets[0].label}`);
       // Destined-series hint (proposals view): provisional Q-<n> handles are

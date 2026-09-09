@@ -1,7 +1,7 @@
 import { tool, type Plugin } from "@opencode-ai/plugin";
 import { join } from "node:path";
 import { createOpenCodeBackend, defaultRunsDir, buildOpenCodeCompletionEvent } from "../backends/opencode.ts";
-import { isAutopilotOn, resolveStateDir, autopilotCommand, autopilotModeMessage, loadAutopilotConfig, type AutopilotConfig } from "../config.ts";
+import { isAutopilotOn, resolveStateDir, autopilotCommand, autopilotModeMessage, loadAutopilotConfig, type AutopilotConfig, probeStateDir, logStateDirProbe, type StateDirProbeResult } from "../config.ts";
 import { createScheduleManager, scheduledOffDue } from "../framework/scheduled-off.ts";
 import { CONTRACTS } from "../tools/contracts.ts";
 import { Autopilot } from "../core.ts";
@@ -52,6 +52,10 @@ export interface OpenCodeToolDef {
 
 export interface OpenCodeFrameworkOptions {
   stateDir: string;
+  /** The orchestrate.md command file this host resolved FROM — the state-dir
+   *  probe's host-parity input (the orchestrator reads its projected state dir
+   *  from this same file). Omit when no projection exists. */
+  commandFile?: string;
   runsDir?: string;
   ocBin?: string;
   config?: Partial<AutopilotConfig>;
@@ -59,6 +63,11 @@ export interface OpenCodeFrameworkOptions {
   delivery?: TickDelivery;
   /** Domain-event sink (orch:reviewer-dispatched, orch:verdict, ...). */
   onDomainEvent?: (e: { name: string; data?: Record<string, unknown> }) => void;
+  /** STATE-DIR PROBE (AUTOPILOT-3) warning hook — called once at framework
+   *  startup when the resolved dir is unhealthy (missing store, promised-but-
+   *  absent config, host-parity mismatch). The plugin logs it loudly; a host
+   *  with a UI can additionally notify. */
+  onProbeWarning?: (r: StateDirProbeResult) => void;
   sweepIntervalMs?: number; // 0 disables the timer (default 10 min, like the pi extension)
 }
 
@@ -85,6 +94,22 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
   const cfg = loadAutopilotConfig(stateDir);
   ensureMigrated(stateDir); // legacy state.md → queue.json (host-agnostic; a no-op without one)
   const autopilot = new Autopilot({ stateDir, ...opts.config });
+
+  // STATE-DIR PROBE (AUTOPILOT-3) at STARTUP (plugin load = this host's
+  // session start): verify the resolved dir is REAL before anyone operates on
+  // a phantom/empty store (observed three ways: pre-migration projections →
+  // empty-queue phantoms; a missing config → unreadable workspace facts;
+  // drifted env/fallback vs the orchestrator's projection). ONE telemetry
+  // log; NEVER throws — findings are reported (console = the opencode server's
+  // log; a host with a UI can notify via onProbeWarning), the harness keeps
+  // running fail-open.
+  const probe = probeStateDir({ stateDir, commandFile: opts.commandFile });
+  if (!probe.ok) {
+    logStateDirProbe(stateDir, probe, { hook: "opencode-startup" });
+    for (const f of probe.findings) console.warn(`[orchestrator-autopilot] state-dir probe: ${f}`);
+    opts.onProbeWarning?.(probe);
+  }
+
 
   const storeOrNew = () => loadStoreOrNew(stateDir);
 
@@ -330,8 +355,10 @@ export function createTickDelivery(client: PromptClient, log: (line: string) => 
 
 export const OrchestratorAutopilot: Plugin = async (ctx) => {
   const delivery = createTickDelivery(ctx.client as unknown as PromptClient);
+  const commandFile = process.env.OPENCODE_CONFIG_DIR ? join(process.env.OPENCODE_CONFIG_DIR, "command/orchestrate.md") : undefined;
   const fw = createOpenCodeFramework({
-    stateDir: resolveStateDir(process.env.OPENCODE_CONFIG_DIR ? join(process.env.OPENCODE_CONFIG_DIR, "command/orchestrate.md") : undefined),
+    stateDir: resolveStateDir(commandFile),
+    commandFile,
     delivery,
   });
 
@@ -359,6 +386,17 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
         }
         const r = autopilotCommand(action, String(args.value ?? "").trim() || undefined, { stateDir, sessionId: sid ?? "" });
         if (!r.ok) return r.message;
+        if (r.mode === "on") {
+          // STATE-DIR PROBE (AUTOPILOT-3) at ACTIVATION: the ON message points
+          // the orchestrator at this state dir for workspace facts — verify it
+          // is REAL before the harness relies on it. Fail-open: ONE telemetry
+          // log; findings ride the tool return (the opencode notify channel).
+          const probe = probeStateDir({ stateDir, commandFile });
+          if (!probe.ok) {
+            logStateDirProbe(stateDir, probe, { hook: "autopilot-on" });
+            return `STATE-DIR PROBE: ${probe.findings.join(" | ")}\n\n${r.message}`;
+          }
+        }
         if (r.scheduledOffAt !== undefined && sid) {
           schedules.schedule(sid, r.scheduledOffAt); // arm/replace the in-process timer
         } else if ((r.mode === "on" || r.mode === "off") && sid) {

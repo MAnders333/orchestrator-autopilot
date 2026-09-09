@@ -133,6 +133,25 @@ describe("opencode TUI plugin registration + state-dir resolution", () => {
     expect(text.toLowerCase()).toContain("does not rename");
   });
 
+  test("route render tags stale provisional Q proposals (provisional-linger, AUTOPILOT-3)", async () => {
+    const { testRender } = await import("@opentui/solid");
+    const ago = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+    seedState(stateDir, [
+      item({ key: "Q-3", status: "proposal", provisionalKey: true, scope: "provisional brainstorm", createdAt: ago(12) }),
+      item({ key: "P1", status: "proposal", scope: "normal proposal", createdAt: ago(12) }),
+    ]);
+    const f = makeFake(configDir);
+    await tui(f.api, {}, {});
+    const route = f.routes.find((r) => r.name === "orchestrator-panel");
+    const setup = await testRender(() => route.render({ params: {} }), { width: 60, height: 24 });
+    await setup.renderOnce();
+    await setup.flush();
+    const text = [setup.externalOutput.takeText(), setup.captureCharFrame()].join("\n");
+    expect(text).toContain("Q-3");
+    expect(text).toContain("⚠ provisional");
+    expect(text).not.toContain("P1 ⚠"); // the non-provisional item is never tagged
+  });
+
   test("resolves the state dir from the opencode config's orchestrate command (config-carried)", () => {
     // same resolution the server plugin uses — env override → command STATE_DIR
     expect(tuiStateDir(configDir)).toBe(stateDir);

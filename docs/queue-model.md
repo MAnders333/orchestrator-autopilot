@@ -303,3 +303,34 @@ Recovery bookkeeping lives on the item (`recoveries`, `recoveryNotBefore`,
 `recoveryEscalated`); provider health lives in `recovery-state.json`
 (`providerFailures`, cooldown). Neither is operator-editable — the harness
 owns them, like `attempts`/`failCause`.
+
+## Startup/activation state-dir probe (AUTOPILOT-3)
+
+Before the harness relies on the resolved state dir, the extension verifies it
+at activation (`/autopilot on` / the opencode autopilot tool) and at session
+start (pi host):
+
+- the resolved state dir **exists** and contains **`queue.json`** (the store) —
+  otherwise every read is a phantom/empty queue;
+- **`autopilot.config.json`** exists *when workspace facts are promised* (the
+  orchestrate command's `Workspace facts` block) — a promised-but-missing
+  config makes the workspace facts unreadable;
+- **host parity**: the extension's resolved dir (env → command `STATE_DIR` →
+  profile fallback) must match the `STATE_DIR` line of the orchestrate.md
+  projection the orchestrator reads. A mismatch (env override / fallback vs a
+  stale or missing projection) is reported as a hard warning.
+
+Findings are **one telemetry line** (`state-dir-probe` in `autopilot.jsonl`)
+plus **one notify** — never a throw, never a block (fail-open: a spurious
+warning costs a notify; silently operating on the wrong/empty queue compounds).
+The probe exists to make future drift loud at activation instead of silent.
+
+## Provisional-linger surface
+
+A cwd-less proposal gets a **provisional `Q-<n>` handle** (the default series);
+its key is renamed into the repo's real series only at approval. A provisional
+stuck in `proposal` past `provisionalLingerDays` (default **3**, set in
+`autopilot.config.json`) looks like a real series key and gets mistaken for
+one. The decision panel tags such items (`⚠ provisional Nd`) and raises the
+count in the section header, and `/autopilot status` names them — resolve or
+reject them so no one mistakes a provisional handle for dispatched work.

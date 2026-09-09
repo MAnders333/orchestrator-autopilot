@@ -570,7 +570,10 @@ export class DecisionPanel implements Component, Focusable {
         const selected = i === selInWindow;
         const head = `${selected ? "▸ " : "  "}${it.key}`;
         const risk = it.risk === "high" ? th.fg("warning", ` [${it.risk}]`) : it.risk === "medium" ? th.fg("muted", ` [${it.risk}]`) : "";
-        lines.push(t((selected ? th.fg("accent", th.bold(head)) : th.fg("text", head)) + risk));
+        // Provisional-linger surface (AUTOPILOT-3): an old Q-<n> provisional
+        // handle looks like a real key — tag it so it is never mistaken for one.
+        const stale = it.staleProvisionalDays ? th.fg("warning", ` ⚠ provisional ${it.staleProvisionalDays}d`) : "";
+        lines.push(t((selected ? th.fg("accent", th.bold(head)) : th.fg("text", head)) + risk + stale));
         lines.push(...wrap(t(it.summary), 4));
         for (const target of it.targets.slice(0, 2)) {
           lines.push(...wrap(th.fg("dim", `   ↳ ${target.label}`), 4));

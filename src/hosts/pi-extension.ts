@@ -43,7 +43,7 @@ const LIB_DIR = (() => {
 })();
 // jiti resolves .ts imports at runtime; createRequire keeps this ESM-safe.
 const { Autopilot } = require(`${LIB_DIR}/core.ts`) as typeof import("./core.ts");
-const { loadAutopilotConfig, isAutopilotOn, appendTelemetry, autopilotCommand, autopilotModeMessage, resolveStateDir, writeSessionAutopilotState } = require(`${LIB_DIR}/config.ts`) as typeof import("./config.ts");
+const { loadAutopilotConfig, isAutopilotOn, appendTelemetry, autopilotCommand, autopilotModeMessage, resolveStateDir, writeSessionAutopilotState, probeStateDir, logStateDirProbe } = require(`${LIB_DIR}/config.ts`) as typeof import("./config.ts");
 const { loadStoreOrNew, ensureMigrated, queueLengths } = require(`${LIB_DIR}/queue-store.ts`) as typeof import("./queue-store.ts");
 const { createSubagentBackend, defaultRunsDir } = require(`${LIB_DIR}/backends/index.ts`) as typeof import("./backends/index.ts");
 const { queueList, queueAdd, queueUpdate, queueDispatch, queueReview, queueSteer, repoCheck } = require(`${LIB_DIR}/tools/queue-ops.ts`) as typeof import("./tools/queue-ops.ts");
@@ -70,16 +70,19 @@ try {
 
 const TICK_TYPE = "orchestrator-autopilot";
 
-let stateDir = resolveStateDir(
-  process.env.PI_CODING_AGENT_DIR ? join(process.env.PI_CODING_AGENT_DIR, "prompts/orchestrate.md") : undefined,
-);
+/** The orchestrate.md command file this host resolves FROM (the pi agent-dir
+ *  prompts copy — the SAME file the /orchestrate command loads). Shared by
+ *  resolveStateDir + the state-dir probe (host-parity input). */
+function commandFilePath(): string | undefined {
+  return process.env.PI_CODING_AGENT_DIR ? join(process.env.PI_CODING_AGENT_DIR, "prompts/orchestrate.md") : undefined;
+}
+
+let stateDir = resolveStateDir(commandFilePath());
 
 export default function (pi: ExtensionAPI) {
   // Re-resolve per load (the test harness re-imports + mutates env between
   // cases; the real runtime loads the extension once). Production: called once.
-  stateDir = resolveStateDir(
-    process.env.PI_CODING_AGENT_DIR ? join(process.env.PI_CODING_AGENT_DIR, "prompts/orchestrate.md") : undefined,
-  );
+  stateDir = resolveStateDir(commandFilePath());
 
   let autopilot: InstanceType<typeof Autopilot> | null = null;
   let agentBusy = false;          // orchestrator (main agent) mid-turn
@@ -307,6 +310,27 @@ export default function (pi: ExtensionAPI) {
     // explicitly runs /autopilot on to engage the harness; that is the only
     // activation path (it injects /orchestrate + the run-your-loop directive).
     if (sessionId) writeSessionAutopilotState(stateDir, sessionId, "off");
+    // STATE-DIR PROBE (AUTOPILOT-3) at session start: catch silent state-dir /
+    // config split-brain BEFORE the session operates on a phantom/empty store
+    // (a stale orchestrate.md projection, a missing config, a host-parity
+    // divergence — all observed). Interactive TUI sessions only (children are
+    // headless json runners with no UI) and only when THIS host has an
+    // orchestrate.md projection to check against (an env-only harness session
+    // has no orchestrator reading any state dir yet — its first activation
+    // runs the full probe). ONE telemetry log + ONE notify, NEVER a throw or
+    // a block. NOTE: this probe ships in the extension — a live session
+    // predating the update may need a restart to pick it up.
+    if (interactive && commandFilePath()) {
+      const probe = probeStateDir({ stateDir, commandFile: commandFilePath() });
+      if (!probe.ok) {
+        logStateDirProbe(stateDir, probe, { hook: "session_start" });
+        try {
+          ctx?.ui?.notify?.(`State-dir probe: ${probe.findings.join(" | ")}`, "error");
+        } catch {
+          // best-effort — the probe must never affect the session
+        }
+      }
+    }
   });
 
   // -- periodic capacity sweep (deterministic safety net) --------------------
@@ -526,6 +550,22 @@ export default function (pi: ExtensionAPI) {
         } else if (r.mode === "on") {
           schedules.cancel(sessionId); // explicit toggle cancels a pending schedule
           ensureMigrated(stateDir); // import legacy state.md into queue.json once
+          // STATE-DIR PROBE (AUTOPILOT-3) at ACTIVATION: the ON message points
+          // the orchestrator at this state dir for workspace facts — verify it
+          // is REAL (dir + queue.json + promised autopilot.config.json + host
+          // parity vs the orchestrate.md projection) BEFORE relying on it.
+          // Fail-open: ONE telemetry log + ONE notify; activation proceeds even
+          // with findings (a warning costs a notify; blocking would strand the
+          // user mid-activation). Never throws.
+          const probe = probeStateDir({ stateDir, commandFile: commandFilePath() });
+          if (!probe.ok) {
+            logStateDirProbe(stateDir, probe, { hook: "autopilot-on" });
+            try {
+              ctx.ui.notify(`State-dir probe: ${probe.findings.join(" | ")}`, "error");
+            } catch {
+              // best-effort — the activation itself is already committed
+            }
+          }
           // STARTUP DOES NOT NUDGE: /orchestrate loads the mode; the ON
           // message (autopilotModeMessage) carries the run-your-loop now
           // directive. The first tick can never race the injection because

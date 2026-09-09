@@ -97,6 +97,25 @@ describe("buildPanelDoc — the feed from queue state", () => {
     expect(hr.sections[0].items[0].seriesHint).toBeUndefined();
   });
 
+  test("proposals view TAGS stale PROVISIONAL Q proposals (provisional-linger, AUTOPILOT-3)", () => {
+    const ago = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+    const { dir } = dirWith([
+      item({ key: "Q-3", status: "proposal", provisionalKey: true, title: "cwd-less brainstorm", createdAt: ago(12) }),
+      item({ key: "P1", status: "proposal", title: "normal proposal", createdAt: ago(12) }), // no provisional marker
+      item({ key: "Q-4", status: "proposal", provisionalKey: true, title: "fresh provisional", createdAt: ago(1) }),
+    ]);
+    const doc = buildPanelDoc(dir, "proposals");
+    const q3 = doc.sections[0].items.find((i) => i.key === "Q-3")!;
+    const p1 = doc.sections[0].items.find((i) => i.key === "P1")!;
+    const q4 = doc.sections[0].items.find((i) => i.key === "Q-4")!;
+    expect(q3.staleProvisionalDays).toBeGreaterThanOrEqual(10); // past the 3d default
+    expect(q4.staleProvisionalDays).toBeUndefined(); // within the threshold
+    expect(p1.staleProvisionalDays).toBeUndefined(); // key shape alone is not enough
+    expect(doc.sections[0].title).toContain("stale provisional");
+    // human-review feed carries none of this (proposals only)
+    expect(buildPanelDoc(dir, "human-review").sections[0].title).not.toContain("stale provisional");
+  });
+
   test("human-review view shows ONLY human-review items with navigation targets", () => {
     const { dir } = dirWith([
       item({ key: "H1", status: "human-review", title: "findings doc", scope: "Produce the findings report", cwd: "/tmp/repo", notes: "wrote docs/findings.md" }),

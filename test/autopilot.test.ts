@@ -21,6 +21,10 @@ import {
   resolveStateDir,
   autopilotModeMessage,
   autopilotConfigPath,
+  probeStateDir,
+  logStateDirProbe,
+  staleProvisionalProposals,
+  workspaceFactsPromised,
 } from "../src/config.ts";
 import { isUnisolatedWorkerSpawn } from "../src/framework/auto-dispatch.ts";
 import {
@@ -744,5 +748,162 @@ describe("isUnisolatedWorkerSpawn — the B26 rule as a shared predicate", () =>
     expect(isUnisolatedWorkerSpawn({ agent: "other", worktree: false }, agents)).toBe(false);
     expect(isUnisolatedWorkerSpawn({ action: "status", agent: "worker" }, agents)).toBe(false);
     expect(isUnisolatedWorkerSpawn({}, agents)).toBe(false);
+  });
+});
+
+describe("AUTOPILOT-3 state-dir probe (probeStateDir + logStateDirProbe)", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "autopilot-probe-"));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("a healthy resolved dir passes silently (no findings)", () => {
+    writeStore(dir, [item({ key: "A1", status: "approved", title: "a1" })]);
+    const r = probeStateDir({ stateDir: dir });
+    expect(r.ok).toBe(true);
+    expect(r.findings).toEqual([]);
+  });
+
+  test("missing dir OR missing queue.json → findings (the phantom/empty-store signatures)", () => {
+    const missing = probeStateDir({ stateDir: join(dir, "nope") });
+    expect(missing.ok).toBe(false);
+    expect(missing.findings.some((f) => f.includes("PHANTOM"))).toBe(true);
+    // dir with NO queue.json (migration never ran / projection points at an empty dir)
+    const empty = probeStateDir({ stateDir: dir });
+    expect(empty.ok).toBe(false);
+    expect(empty.findings.some((f) => f.includes("EMPTY store"))).toBe(true);
+  });
+
+  test("autopilot.config.json checked when workspace facts are promised (command-file inference + explicit flag)", () => {
+    writeStore(dir, [item({ key: "A1", status: "approved", title: "a1" })]);
+    const cmd = join(dir, "orchestrate.md");
+    writeFileSync(cmd, `# Orchestrator Mode\n\n## Workspace facts (config)\n\n- \`STATE_DIR\`: \`${dir}/\`\n`);
+    const r = probeStateDir({ stateDir: dir, commandFile: cmd });
+    expect(r.ok).toBe(false);
+    expect(r.findings.some((f) => f.includes("autopilot.config.json is missing"))).toBe(true);
+    // an explicit promise works without a command file
+    const r2 = probeStateDir({ stateDir: dir, expectWorkspaceConfig: true });
+    expect(r2.findings.some((f) => f.includes("autopilot.config.json is missing"))).toBe(true);
+    // no promise → the check is skipped (fresh/default setups stay quiet)
+    expect(probeStateDir({ stateDir: dir }).ok).toBe(true);
+    // facts readable → the same probe passes
+    writeFileSync(join(dir, "autopilot.config.json"), JSON.stringify({ workspace: { notes: "x" } }));
+    expect(probeStateDir({ stateDir: dir, commandFile: cmd }).ok).toBe(true);
+  });
+
+  test("host parity: extension resolution vs the orchestrate.md STATE_DIR projection", () => {
+    writeStore(dir, [item({ key: "A1", status: "approved", title: "a1" })]); // the ENV-resolved store
+    const projected = join(dir, "projected");
+    writeStore(projected, [item({ key: "P1", status: "proposal", title: "p1" })]); // where the projection points
+    const cmd = join(dir, "orchestrate.md");
+    writeFileSync(cmd, `- \`STATE_DIR\`: \`${projected}/\`\n`);
+    const r = probeStateDir({ stateDir: dir, commandFile: cmd });
+    expect(r.findings.some((f) => f.includes("HOST PARITY MISMATCH"))).toBe(true);
+    // the projection agreeing with the extension → silent
+    const cmd2 = join(dir, "orchestrate-ok.md");
+    writeFileSync(cmd2, `- \`STATE_DIR\`: \`${dir}/\`\n`);
+    expect(probeStateDir({ stateDir: dir, commandFile: cmd2 }).ok).toBe(true);
+  });
+
+  test("a command file WITHOUT a STATE_DIR line is flagged (the orchestrator has no projected dir)", () => {
+    writeStore(dir, [item({ key: "A1", status: "approved", title: "a1" })]);
+    const cmd = join(dir, "orchestrate.md");
+    writeFileSync(cmd, "# Orchestrator Mode\nno state dir line\n");
+    const r = probeStateDir({ stateDir: dir, commandFile: cmd });
+    expect(r.findings.some((f) => f.includes("no STATE_DIR line"))).toBe(true);
+  });
+
+  test("probe NEVER throws — unreadable/missing command files degrade to findings or silence", () => {
+    writeStore(dir, [item({ key: "A1", status: "approved", title: "a1" })]);
+    // an absent command file: no projection claims to check → silent
+    expect(probeStateDir({ stateDir: dir, commandFile: join(dir, "missing.md") }).ok).toBe(true);
+    // a DIRECTORY passed as the command file → internal read throws → swallowed
+    expect(() => probeStateDir({ stateDir: dir, commandFile: dir })).not.toThrow();
+  });
+
+  test("logStateDirProbe writes ONE telemetry line only when findings exist", () => {
+    const logPath = join(dir, "autopilot.jsonl");
+    logStateDirProbe(dir, probeStateDir({ stateDir: join(dir, "missing") }), { hook: "session_start" });
+    const lines = readFileSync(logPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines).toHaveLength(1);
+    expect(lines[0].type).toBe("state-dir-probe");
+    expect(lines[0].hook).toBe("session_start");
+    expect(Array.isArray(lines[0].findings)).toBe(true);
+    // a healthy report appends nothing
+    const before = readFileSync(logPath, "utf8");
+    logStateDirProbe(dir, { ok: true, findings: [] });
+    expect(readFileSync(logPath, "utf8")).toBe(before);
+  });
+
+  test("workspaceFactsPromised reads only the Workspace-facts marker / config pointer", () => {
+    const cmd = join(dir, "orchestrate.md");
+    writeFileSync(cmd, "## Workspace facts (config)\nthe promise lives here\n");
+    expect(workspaceFactsPromised(cmd)).toBe(true);
+    writeFileSync(cmd, "read autopilot.config.json before scanning\n");
+    expect(workspaceFactsPromised(cmd)).toBe(true);
+    writeFileSync(cmd, "## Workspace\n- `STATE_DIR`: `/tmp/x`\n");
+    expect(workspaceFactsPromised(cmd)).toBe(false); // a bare projection promises no facts
+    expect(workspaceFactsPromised(join(dir, "missing.md"))).toBe(false);
+  });
+});
+
+describe("AUTOPILOT-3 provisional-linger (staleProvisionalProposals + status surface)", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "autopilot-linger-"));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const ago = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+
+  test("flags ONLY Q-<n> PROVISIONAL proposals older than the threshold, oldest first", () => {
+    writeStore(dir, [
+      item({ key: "Q-9", status: "proposal", provisionalKey: true, title: "old provisional", createdAt: ago(8) }),
+      item({ key: "Q-10", status: "proposal", provisionalKey: true, title: "middle provisional", createdAt: ago(4) }),
+      item({ key: "Q-11", status: "proposal", provisionalKey: true, title: "fresh provisional", createdAt: ago(1) }),
+      item({ key: "B-1", status: "proposal", title: "real series proposal", createdAt: ago(8) }), // no provisional marker
+      item({ key: "Q-20", status: "approved", provisionalKey: true, title: "already approved", createdAt: ago(8) }), // not a proposal
+      item({ key: "Q-30", status: "proposal", title: "explicit Q key", createdAt: ago(8) }), // key shape alone is NOT enough
+    ]);
+    const stale = staleProvisionalProposals(dir); // default threshold 3
+    expect(stale.map((s) => s.key)).toEqual(["Q-9", "Q-10"]);
+    expect(stale[0].days).toBeGreaterThanOrEqual(8);
+    expect(stale[1].days).toBeGreaterThanOrEqual(4);
+  });
+
+  test("thresholdDays + now are honored (hermetic age math)", () => {
+    writeStore(dir, [item({ key: "Q-1", status: "proposal", provisionalKey: true, title: "pending", createdAt: ago(8) })]);
+    expect(staleProvisionalProposals(dir)).toHaveLength(1); // 3d default
+    expect(staleProvisionalProposals(dir, { thresholdDays: 10 })).toHaveLength(0); // 8d < 10d
+    // the `now` clock is injected: 2d BEFORE the item was created → not stale yet
+    expect(staleProvisionalProposals(dir, { now: Date.parse(ago(10)), thresholdDays: 3 })).toHaveLength(0);
+    // 9d AFTER the item was created relative to a future clock → 17d old → stale
+    expect(staleProvisionalProposals(dir, { now: Date.parse(ago(-9)), thresholdDays: 3 })).toHaveLength(1);
+  });
+
+  test("never throws on a missing/corrupt store", () => {
+    const r = staleProvisionalProposals(join(dir, "missing"));
+    expect(r).toEqual([]);
+    expect(() => staleProvisionalProposals(dir)).not.toThrow(); // isEmpty → []
+  });
+
+  test("provisionalLingerDays loads from config (default 3; file wins)", () => {
+    expect(loadAutopilotConfig(dir).provisionalLingerDays).toBe(3);
+    saveAutopilotConfig(dir, { provisionalLingerDays: 30 });
+    expect(loadAutopilotConfig(dir).provisionalLingerDays).toBe(30);
+    saveAutopilotConfig(dir, { provisionalLingerDays: 0 });
+    expect(loadAutopilotConfig(dir).provisionalLingerDays).toBe(3); // invalid → default
+  });
+
+  test("/autopilot status NAMES lingering provisionals (nobody mistakes them for real keys)", () => {
+    writeStore(dir, [
+      item({ key: "Q-9", status: "proposal", provisionalKey: true, title: "old provisional", createdAt: ago(8) }),
+      item({ key: "B-4", status: "approved", title: "real work", createdAt: ago(8) }),
+    ]);
+    const r = autopilotCommand("status", undefined, { stateDir: dir, sessionId: "s1" });
+    expect(r.message).toContain("Q-9 (8d)");
+    expect(r.message).toContain("NOT a real key");
+    expect(r.message).not.toContain("B-4"); // a real series key is never named
   });
 });

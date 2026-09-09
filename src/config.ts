@@ -21,6 +21,7 @@ import {
   scheduleScheduledOff,
 } from "./session-store.ts";
 import { parseDurationMs } from "./framework/scheduled-off.ts";
+import { loadStore } from "./queue-store.ts";
 
 // Re-exports: the state helpers' public home stays config.ts for callers
 // (hosts, tests) that predate the leaf extraction.
@@ -73,6 +74,132 @@ export function parseStateDirFromCommand(commandFile: string): string | null {
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// State-dir startup/activation probe (AUTOPILOT-3)
+// ---------------------------------------------------------------------------
+// The SILENT split-brain bug class: the extension resolves a state dir
+// (env → host command STATE_DIR → profile fallback) that is stale, missing,
+// or diverged from the orchestrator's own projection, then operates on a
+// phantom/empty store with NO signal — observed three times (opencode
+// projections pointing at pre-migration paths → empty-queue phantoms; a
+// missing autopilot.config.json → unreadable workspace facts; legacy
+// digit-less keys latching weird series prefixes). This probe verifies the
+// RESOLVED dir before anyone relies on it: the dir exists, queue.json (the
+// store) is there, autopilot.config.json is there when workspace facts are
+// promised, and the extension's resolution agrees with the orchestrate.md
+// projection (host parity). It NEVER throws — findings are reported (ONE
+// telemetry log + ONE host notify); the harness keeps running fail-open (a
+// spurious warning costs a notify; silent wrong-queue operation compounds).
+
+export interface StateDirProbeOptions {
+  stateDir: string;
+  /** The orchestrate.md command file the host resolved FROM — the host-parity
+   *  input (the orchestrator reads ITS projected state dir from this SAME
+   *  file's Workspace block). Omit when the host has no projection. */
+  commandFile?: string;
+  /** Verify autopilot.config.json too. Default: inferred from the command
+   *  file — its Workspace-facts promise (the ON message points the orchestrator
+   *  at the config; a promised-but-missing config makes the workspace facts
+   *  unreadable). No command file / no promise → check skipped. */
+  expectWorkspaceConfig?: boolean;
+}
+
+export interface StateDirProbeResult {
+  ok: boolean;
+  /** Human-readable findings; empty when ok. */
+  findings: string[];
+}
+
+/** Does the orchestrate command PROMISE workspace facts (an autopilot.config.json
+ *  with a workspace section)? True when the projection carries the Workspace
+ *  facts block. Never throws — an unreadable file promises nothing. */
+export function workspaceFactsPromised(commandFile: string): boolean {
+  try {
+    const content = readFileSync(commandFile, "utf8");
+    return /\bWorkspace facts\b/i.test(content) || /autopilot\.config\.json/.test(content);
+  } catch {
+    return false;
+  }
+}
+
+/** The framework-level state-dir probe (AUTOPILOT-3). Called at activation
+ *  (/autopilot on) and at session start; reports findings, NEVER throws. */
+export function probeStateDir(opts: StateDirProbeOptions): StateDirProbeResult {
+  const findings: string[] = [];
+  const { stateDir } = opts;
+  try {
+    if (!existsSync(stateDir)) {
+      findings.push(`state dir does not exist: ${stateDir} — the harness would operate on a PHANTOM store (nothing is ever read here)`);
+    }
+    const queuePath = join(stateDir, "queue.json");
+    if (!existsSync(queuePath)) {
+      findings.push(`queue.json is missing at ${stateDir} — every queue read would be an EMPTY store. The real queue may live elsewhere (stale STATE_DIR projection?)`);
+    }
+    const configExpected = opts.expectWorkspaceConfig ?? (opts.commandFile ? workspaceFactsPromised(opts.commandFile) : false);
+    if (configExpected && !existsSync(join(stateDir, "autopilot.config.json"))) {
+      findings.push(`autopilot.config.json is missing at ${stateDir} — workspace facts were promised (intake sources / goals file / notes) but the orchestrator cannot read them`);
+    }
+    // HOST PARITY: what the EXTENSION resolved vs what the ORCHESTRATOR's own
+    // projection says. Normally identical (one resolution chain); a mismatch
+    // means env/fallback took over while the orchestrator still reads ITS
+    // file — the extension queues into A while the orchestrator reads B.
+    if (opts.commandFile) {
+      if (existsSync(opts.commandFile)) {
+        const projected = parseStateDirFromCommand(opts.commandFile);
+        if (projected && projected !== stateDir) {
+          findings.push(`HOST PARITY MISMATCH — the extension resolves ${stateDir} but the orchestrate.md projection reads ${projected}; the orchestrator operates on a DIFFERENT store`);
+        } else if (projected === null) {
+          findings.push(`orchestrate.md has no STATE_DIR line — the orchestrator has no projected state dir; the extension uses ${stateDir}. Fix the Workspace block or they diverge silently`);
+        }
+      }
+    }
+  } catch {
+    findings.push(`state-dir probe could not read ${stateDir} (permissions?) — verify the directory is accessible`);
+  }
+  return { ok: findings.length === 0, findings };
+}
+
+/** Report a probe ONCE: ONE telemetry line (type `state-dir-probe`) when there
+ *  are findings, nothing when healthy. The host delivers the single notify
+ *  itself (its UI is host-specific). Never throws. */
+export function logStateDirProbe(stateDir: string, r: StateDirProbeResult, extra: Record<string, unknown> = {}): void {
+  if (r.ok) return;
+  appendTelemetry(stateDir, JSON.stringify({ t: new Date().toISOString(), type: "state-dir-probe", stateDir, ...extra, findings: r.findings }));
+}
+
+/** PROVISIONAL-LINGER check (AUTOPILOT-3): Q-<n> PROVISIONAL proposals older
+ *  than `thresholdDays` that never reached approval. A provisional handle is
+ *  the default-Q series key allocated to a cwd-less proposal; it keeps its
+ *  Q-<n> name until the approved transition renames it into the repo's real
+ *  series — so a stale one looks like a REAL series key (e.g. a genuine Q
+ *  workstream) and gets mistaken for one. Returns each lingering key with its
+ *  age in whole days (oldest first). NEVER throws. */
+export function staleProvisionalProposals(
+  stateDir: string,
+  opts: { thresholdDays?: number; now?: number } = {},
+): Array<{ key: string; days: number }> {
+  const thresholdDays = opts.thresholdDays ?? 3;
+  const now = opts.now ?? Date.now();
+  const out: Array<{ key: string; days: number }> = [];
+  try {
+    const store = loadStore(stateDir);
+    if (!store) return out;
+    for (const it of Object.values(store.items)) {
+      if (it.status !== "proposal") continue;
+      if (it.provisionalKey !== true) continue; // explicit keys / deliberate series are never provisional
+      if (!/^Q-\d/.test(it.key)) continue;
+      const t = Date.parse(it.createdAt || it.updatedAt || "");
+      if (Number.isNaN(t)) continue;
+      const days = Math.floor(Math.max(0, now - t) / 86_400_000);
+      if (days >= thresholdDays) out.push({ key: it.key, days });
+    }
+  } catch {
+    // best-effort read — never throws
+  }
+  out.sort((a, b) => b.days - a.days);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +285,12 @@ export interface AutopilotConfigFile {
   /** SHIPPING POLICY (KEY: AUTO-SHIP-ON-DONE) — the per-repo merge-finisher
    *  gate. See ShippingConfig. */
   shipping?: ShippingConfig;
+  /** Provisional-linger threshold (default 3 days): a Q-<n> PROVISIONAL
+   *  proposal (a cwd-less candidate allocated in the default Q series, renamed
+   *  into its real series only at approval) pending for longer than this is
+   *  surfaced in the decision panel + /autopilot status so nobody mistakes a
+   *  provisional handle for a real queue key. */
+  provisionalLingerDays?: number;
 }
 
 /** The intake source vocabulary is deliberately OPEN: `type` is the label the
@@ -274,9 +407,16 @@ export function autopilotCommand(
       const cfg = loadAutopilotConfig(stateDir);
       const pending = sessionId ? readScheduledOffAt(stateDir, sessionId) : null;
       const suffix = pending !== null ? ` Scheduled OFF at ${new Date(pending).toISOString()}.` : "";
+      // Provisional-linger surface (AUTOPILOT-3): old Q-<n> provisional
+      // proposals look like real queue keys — name them here so nobody
+      // mistakes a provisional handle for dispatched/reviewed work.
+      const stale = staleProvisionalProposals(stateDir, { thresholdDays: cfg.provisionalLingerDays });
+      const linger = stale.length
+        ? ` NOTE: provisional ${stale.map((s) => `${s.key} (${s.days}d)`).join(", ")} pending — resolve or reject it in the panel; a provisional Q-<n> is NOT a real key.`
+        : "";
       return {
         ok: true,
-        message: `Autopilot ${on ? "ON" : "OFF"} (this session${sessionId ? ` ${sessionId.slice(0, 8)}` : ""}) — capacity ${cfg.maxSlots} workers, queue-low < ${cfg.queueLowThreshold} ready.${suffix}`,
+        message: `Autopilot ${on ? "ON" : "OFF"} (this session${sessionId ? ` ${sessionId.slice(0, 8)}` : ""}) — capacity ${cfg.maxSlots} workers, queue-low < ${cfg.queueLowThreshold} ready.${suffix}${linger}`,
       };
     }
     case "capacity": {
@@ -371,6 +511,7 @@ export function loadAutopilotConfig(stateDir: string, env: NodeJS.ProcessEnv = p
   const zombieGraceMinutes = env.AUTOPILOT_ZOMBIE_GRACE_MINUTES
     ? Number(env.AUTOPILOT_ZOMBIE_GRACE_MINUTES)
     : file.zombieGraceMinutes ?? 30;
+  const provisionalLingerDays = file.provisionalLingerDays ?? 3;
   return {
     maxSlots: Number.isFinite(maxSlots) && maxSlots >= 1 ? maxSlots : 3,
     queueLowThreshold: Number.isFinite(queueLowThreshold) && queueLowThreshold >= 1 ? queueLowThreshold : 2,
@@ -379,6 +520,7 @@ export function loadAutopilotConfig(stateDir: string, env: NodeJS.ProcessEnv = p
     reviewCap: Number.isFinite(reviewCap) && reviewCap >= 1 ? reviewCap : 5,
     sweepIntervalMs: Number.isFinite(sweepIntervalMs) && sweepIntervalMs >= 0 ? sweepIntervalMs : 600_000,
     zombieGraceMinutes: Number.isFinite(zombieGraceMinutes) && zombieGraceMinutes >= 0 ? zombieGraceMinutes : 30,
+    provisionalLingerDays: Number.isFinite(provisionalLingerDays) && provisionalLingerDays >= 1 ? provisionalLingerDays : 3,
     ...(file.workspace ? { workspace: file.workspace } : {}),
     ...(file.shipping ? { shipping: file.shipping } : {}),
   };

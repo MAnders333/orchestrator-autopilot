@@ -22,6 +22,7 @@
 import { loadStoreOrNew, saveStore, updateItem, resolveSeries, type QueueItem } from "../queue-store.ts";
 import { approvalReady, renameProvisionalKey } from "../tools/queue-ops.ts";
 import { humanReviewTargetsFor } from "./worktree-preservation.ts";
+import { loadAutopilotConfig, staleProvisionalProposals } from "../config.ts";
 
 export type PanelKind = "proposals" | "human-review";
 
@@ -74,6 +75,10 @@ export interface PanelItem {
    *  no hint. Hosts render it so the human sees the rename coming.
    *  Absent (undefined) on the human-review view — keys there are final. */
   seriesHint?: string | null;
+  /** PROVISIONAL-LINGER (AUTOPILOT-3): age in whole days when this is a
+   *  Q-<n> PROVISIONAL proposal past the linger threshold — a provisional
+   *  handle must not be mistaken for a real key. Absent otherwise. */
+  staleProvisionalDays?: number;
   /** The FULL untruncated scope (the worker prompt). Truncation is a RENDER
    *  choice — hosts show this verbatim in detail/expand views. */
   fullScope: string;
@@ -173,8 +178,16 @@ export function buildPanelDoc(stateDir: string, kind: PanelKind): PanelDocument 
 
   const document: PanelDocument = { kind, generatedAt: new Date().toISOString(), sections: [] };
   if (kind === "proposals") {
+    // Provisional-linger surface (AUTOPILOT-3): old Q-<n> provisional handles
+    // look like real keys — the proposals feed tags them so no one mistakes a
+    // provisional (cwd-less, unrenamed) candidate for dispatched work.
+    const stale = new Map(
+      staleProvisionalProposals(stateDir, { thresholdDays: loadAutopilotConfig(stateDir).provisionalLingerDays }).map((s) => [s.key, s.days]),
+    );
     document.sections.push({
-      title: "Proposals — awaiting your call (approve / reject / defer / refine)",
+      title:
+        `Proposals — awaiting your call (approve / reject / defer / refine)` +
+        (stale.size ? ` · ⚠ ${stale.size} stale provisional (Q-<n>) — resolve/reject, NOT real keys` : ""),
       items: items.map((i) => ({
         key: i.key,
         title: i.title,
@@ -188,6 +201,7 @@ export function buildPanelDoc(stateDir: string, kind: PanelKind): PanelDocument 
         targets: [{ label: i.cwd ?? "no repo yet — refine to set cwd" }],
         seriesHint: seriesHintFor(stateDir, i),
         actions: actionsForStatus(i.status),
+        staleProvisionalDays: stale.get(i.key),
         fullScope: i.scope ?? "",
         fullNotes: i.notes ?? "",
         fullTargets: [{ label: i.cwd ?? "no repo yet — refine to set cwd" }],
