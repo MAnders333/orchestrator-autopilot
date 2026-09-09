@@ -31,6 +31,20 @@ export interface PanelTarget {
   hint?: string;
 }
 
+/** Full item metadata for the detail view — nothing here is a render;
+ *  hosts decide how much of it to draw (and how much to truncate). */
+export interface PanelItemMeta {
+  createdAt: string;
+  updatedAt: string;
+  evidence: string;
+  value: string;
+  urgency: string;
+  risk: string;
+  blocker: string | null;
+  runId: string | null;
+  reviewerRunId: string | null;
+}
+
 export interface PanelItem {
   key: string;
   title: string;
@@ -50,6 +64,16 @@ export interface PanelItem {
    *  RENAMED into the repo's real series (registry → history → slug). Shown
    *  so an approval-time rename is never a surprise. */
   seriesHint?: string;
+  /** The FULL untruncated scope (the worker prompt). Truncation is a RENDER
+   *  choice — hosts show this verbatim in detail/expand views. */
+  fullScope: string;
+  /** The FULL untruncated free-form notes. */
+  fullNotes: string;
+  /** EVERY navigation target — no caps here; `targets` stays the host's
+   *  convenience projection, hosts choose how many to draw. */
+  fullTargets: PanelTarget[];
+  /** Full item metadata (timestamps + the free-form triage fields). */
+  meta: PanelItemMeta;
 }
 
 export interface PanelSection {
@@ -110,6 +134,22 @@ export function seriesHintFor(stateDir: string, item: QueueItem): string | null 
   return null;
 }
 
+/** Project the FULL item metadata for the detail view — free-form text is
+ *  carried verbatim (evidence/value/urgency/risk/notes are schema-free). */
+function metaFor(i: QueueItem): PanelItemMeta {
+  return {
+    createdAt: i.createdAt,
+    updatedAt: i.updatedAt,
+    evidence: i.evidence ?? "",
+    value: i.value ?? "",
+    urgency: i.urgency ?? "",
+    risk: i.risk ?? "",
+    blocker: i.blocker ?? null,
+    runId: i.runId ?? null,
+    reviewerRunId: i.reviewerRunId ?? null,
+  };
+}
+
 /** Build the panel document for one view, fed directly from queue state. */
 export function buildPanelDoc(stateDir: string, kind: PanelKind): PanelDocument {
   const store = loadStoreOrNew(stateDir);
@@ -133,23 +173,34 @@ export function buildPanelDoc(stateDir: string, kind: PanelKind): PanelDocument 
           targets: [{ label: i.cwd ?? "no repo yet — refine to set cwd" }],
           actions: actionsForStatus(i.status),
           ...(hint ? { seriesHint: hint } : {}),
+          fullScope: i.scope ?? "",
+          fullNotes: i.notes ?? "",
+          fullTargets: [{ label: i.cwd ?? "no repo yet — refine to set cwd" }],
+          meta: metaFor(i),
         };
       }),
     });
   } else {
     document.sections.push({
       title: "Human review — approved work awaiting YOU (approve / re-dispatch with findings / reject)",
-      items: items.map((i) => ({
-        key: i.key,
-        title: i.title,
-        status: i.status,
-        risk: i.risk,
-        cwd: i.cwd,
-        updatedAt: i.updatedAt,
-        summary: `${scopeHead(i.scope) || i.title}${i.notes ? ` — ${scopeHead(i.notes, 120)}` : ""}`,
-        targets: toTargets(humanReviewTargetsFor(stateDir, i.key, i)),
-        actions: actionsForStatus(i.status),
-      })),
+      items: items.map((i) => {
+        const allTargets = toTargets(humanReviewTargetsFor(stateDir, i.key, i));
+        return {
+          key: i.key,
+          title: i.title,
+          status: i.status,
+          risk: i.risk,
+          cwd: i.cwd,
+          updatedAt: i.updatedAt,
+          summary: `${scopeHead(i.scope) || i.title}${i.notes ? ` — ${scopeHead(i.notes, 120)}` : ""}`,
+          targets: allTargets,
+          actions: actionsForStatus(i.status),
+          fullScope: i.scope ?? "",
+          fullNotes: i.notes ?? "",
+          fullTargets: allTargets,
+          meta: metaFor(i),
+        };
+      }),
     });
   }
   return document;

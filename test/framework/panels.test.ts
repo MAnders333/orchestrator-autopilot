@@ -43,7 +43,7 @@ function dirWith(seed: QueueItem[]): { dir: string; read: () => { items: Record<
 describe("buildPanelDoc — the feed from queue state", () => {
   test("proposals view shows ONLY proposal items, oldest first, with the right actions", () => {
     const { dir } = dirWith([
-      item({ key: "P1", status: "proposal", title: "fix parser", scope: "Rewrite the parser\nsecond line", cwd: "/tmp/repo", updatedAt: "2026-09-01T09:00:00.000Z" }),
+      item({ key: "P1", status: "proposal", title: "fix parser", scope: "Rewrite the parser\nsecond line", cwd: "/tmp/repo", evidence: "fixed 12 files", value: "H", urgency: "M", risk: "high", notes: "context note", createdAt: "2026-09-01T07:00:00.000Z", updatedAt: "2026-09-01T09:00:00.000Z" }),
       item({ key: "P2", status: "proposal", title: "add docs", scope: "Write the docs", cwd: "/tmp/repo", updatedAt: "2026-09-01T08:00:00.000Z" }),
       item({ key: "A1", status: "approved", title: "approved one" }),
       item({ key: "H1", status: "human-review", title: "in human review" }),
@@ -55,9 +55,24 @@ describe("buildPanelDoc — the feed from queue state", () => {
     expect(keys).not.toContain("A1");
     expect(keys).not.toContain("H1");
     const p1 = doc.sections[0].items.find((i) => i.key === "P1")!;
-    expect(p1.summary).toBe("Rewrite the parser"); // scope head
+    expect(p1.summary).toBe("Rewrite the parser"); // scope head — the LIST projection
     expect(p1.actions).toEqual(["approve", "reject", "defer", "refine"]);
     expect(p1.targets[0].label).toBe("/tmp/repo");
+    // additive detail projection: FULL untruncated fields + meta (truncation is a RENDER choice)
+    expect(p1.fullScope).toBe("Rewrite the parser\nsecond line");
+    expect(p1.fullNotes).toBe("context note");
+    expect(p1.fullTargets.map((t) => t.label)).toEqual(["/tmp/repo"]);
+    expect(p1.meta).toMatchObject({
+      createdAt: "2026-09-01T07:00:00.000Z",
+      updatedAt: "2026-09-01T09:00:00.000Z",
+      evidence: "fixed 12 files",
+      value: "H",
+      urgency: "M",
+      risk: "high",
+      blocker: null,
+      runId: null,
+      reviewerRunId: null,
+    });
   });
 
   test("proposals view carries the destined-series hint — real keys stay put, provisional Q-<n> is called out", () => {
@@ -98,6 +113,31 @@ describe("buildPanelDoc — the feed from queue state", () => {
     expect(h1.targets.length).toBeGreaterThanOrEqual(1);
     expect(h1.targets[0].label).toBe("/tmp/repo");
     expect(h1.summary).toContain("findings.md");
+    // additive projections: full notes + the same full target list
+    expect(h1.fullNotes).toBe("wrote docs/findings.md");
+    expect(h1.fullScope).toBe("Produce the findings report");
+    expect(h1.fullTargets).toEqual(h1.targets);
+  });
+
+  test("human-review fullTargets carry EVERY journaled branch@sha (no cap at the core)", () => {
+    const { dir } = dirWith([item({ key: "H1", status: "human-review", title: "work", scope: "task", cwd: "/tmp/repo" })]);
+    writeFileSync(
+      join(dir, "handoffs.jsonl"),
+      [
+        JSON.stringify({ runId: "r1", key: "H1", branch: "pi-parallel-r1-a", tipSha: "11111111", ts: "2026-09-01T10:00:00.000Z" }),
+        JSON.stringify({ runId: "r1", key: "H1", branch: "pi-parallel-r1-b", tipSha: "22222222", ts: "2026-09-01T10:00:01.000Z" }),
+        JSON.stringify({ runId: "r1", key: "H1", branch: "pi-parallel-r1-c", tipSha: "33333333", ts: "2026-09-01T10:00:02.000Z" }),
+      ].join("\n") + "\n",
+    );
+    const h1 = buildPanelDoc(dir, "human-review").sections[0].items[0];
+    // cwd + one target per journaled branch = 4 — nothing capped
+    expect(h1.fullTargets.length).toBe(4);
+    expect(h1.fullTargets.map((t) => t.label)).toEqual([
+      "/tmp/repo",
+      "branch pi-parallel-r1-a @ 11111111 — diff vs main: git diff main...11111111",
+      "branch pi-parallel-r1-b @ 22222222 — diff vs main: git diff main...22222222",
+      "branch pi-parallel-r1-c @ 33333333 — diff vs main: git diff main...33333333",
+    ]);
   });
 
   test("actionsForStatus + PANEL_ACTIONS labels are stable (hosts render from them)", () => {

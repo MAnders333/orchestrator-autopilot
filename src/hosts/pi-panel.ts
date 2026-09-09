@@ -9,12 +9,15 @@
 // queue. The panel is pure UI over the shared core; if pi-tui is unavailable
 // the command fails closed and the regular tick JSON remains the fallback.
 //
-// Keymap (footer-printed): ↑/↓ select · t/tab toggle view · enter/a approve ·
-// r reject · d defer · e refine (input) · x re-dispatch (input) · esc/q close
+// Keymap (footer-printed): ↑/↓ select · m expand (full item) · t/tab toggle view ·
+// enter/a approve · r reject · d defer · e refine (text field) · x re-dispatch (text field)
+// · esc/q close. The refine/re-dispatch field is a real multi-line editor: enter
+// submits, shift+enter inserts a newline, esc cancels.
 // -------------------------------------------------------------------------
 
 import {
-  Input,
+  Editor,
+  type EditorTheme,
   Key,
   matchesKey,
   truncateToWidth,
@@ -22,6 +25,7 @@ import {
   wrapTextWithAnsi,
   type Component,
   type Focusable,
+  type TUI,
 } from "@earendil-works/pi-tui";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { applyPanelDecision, buildPanelDoc, type PanelActionId, type PanelItem, type PanelKind } from "../framework/panels.ts";
@@ -76,19 +80,46 @@ export class DecisionPanel implements Component, Focusable {
   private sel = 0;
   private counts = { proposals: 0, "human-review": 0 };
   private lastResult: { text: string; isError: boolean } | null = null;
-  /** null = nav mode; "refine" | "redispatch" = text-input mode. */
+  /** null = nav mode; "refine" | "redispatch" = text-input mode (a real,
+   *  focused multi-line editor field with a visible caret). */
   private inputFor: "refine" | "redispatch" | null = null;
-  private input = new Input({ placeholder: "type here" });
+  private editor: Editor;
+  /** null = nav/list mode; an index into `items` = that item's full-detail view. */
+  private detailFor: number | null = null;
   private cached?: { width: number; lines: string[] };
 
   constructor(private opts: DecisionPanelOptions) {
     this.kind = opts.initial ?? "proposals";
-    this.input.onSubmit = (value) => this.confirmInput(value);
-    this.input.onEscape = () => {
-      this.inputFor = null;
-      this.opts.tui.requestRender();
-    };
+    // The editor is the shared pi-tui Editor (multi-line, undo, paste, visible
+    // caret). It connects to the overlay via a minimal TUI shim — render only
+    // needs the terminal row count, and input is driven by the panel's own
+    // handleInput (same IME/paste path as before).
+    this.editor = new Editor(this.editorTui(), this.editorTheme(), {});
+    this.editor.onSubmit = (value) => this.confirmInput(value);
     this.refresh();
+  }
+
+  /** The pi-tui Editor needs a TUI only for rows (render sizing) + re-render
+   *  requests; both are delegated to the panel's overlay shim. */
+  private editorTui(): TUI {
+    return { requestRender: () => this.opts.tui.requestRender(), terminal: { rows: 30 } } as TUI;
+  }
+
+  /** Editor theme from the host theme (border + selection colors). The
+   *  select-list half is only used by autocomplete, which the panel never
+   *  enables — a plausible theme keeps the editor self-contained. */
+  private editorTheme(): EditorTheme {
+    const t = this.opts.theme;
+    return {
+      borderColor: (s: string) => t.fg("border", s),
+      selectList: {
+        selectedPrefix: (s: string) => t.fg("accent", s),
+        selectedText: (s: string) => t.fg("text", s),
+        description: (s: string) => t.fg("dim", s),
+        scrollInfo: (s: string) => t.fg("dim", s),
+        noMatch: (s: string) => t.fg("error", s),
+      },
+    };
   }
 
   // -- state ----------------------------------------------------------------
@@ -129,8 +160,27 @@ export class DecisionPanel implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.inputFor) {
-      this.input.handleInput(data);
+      // Text-input mode: everything goes to the editor EXCEPT escape, which
+      // cancels the input (esc is not a printable — the editor ignores it).
+      if (matchesKey(data, Key.escape)) {
+        this.inputFor = null;
+        this.opts.tui.requestRender();
+        return;
+      }
+      this.editor.handleInput(data);
       this.opts.tui.requestRender();
+      return;
+    }
+
+    if (this.detailFor !== null) {
+      // Detail mode: m/esc collapse back to the list; q still closes the panel.
+      if (matchesKey(data, Key.escape) || matchesKey(data, "m")) {
+        this.detailFor = null;
+        this.cached = undefined;
+        this.opts.tui.requestRender();
+      } else if (matchesKey(data, "q")) {
+        this.opts.done();
+      }
       return;
     }
 
@@ -178,7 +228,8 @@ export class DecisionPanel implements Component, Focusable {
       if (item && item.actions.includes("refine")) {
         this.inputFor = "refine";
         // prefill the FULL scope (the worker prompt), not the truncated summary
-        this.input.setValue(loadStoreOrNew(this.opts.stateDir).items[item.key]?.scope ?? "");
+        this.editor.setText(item.fullScope);
+        this.cached = undefined;
         this.opts.tui.requestRender();
       }
       return;
@@ -187,7 +238,17 @@ export class DecisionPanel implements Component, Focusable {
       const item = this.items[this.sel];
       if (item && item.actions.includes("redispatch")) {
         this.inputFor = "redispatch";
-        this.input.setValue("");
+        this.editor.setText("");
+        this.cached = undefined;
+        this.opts.tui.requestRender();
+      }
+      return;
+    }
+    if (matchesKey(data, "m")) {
+      // one key expands the selected item to its ENTIRE readable content
+      if (this.items.length) {
+        this.detailFor = this.sel;
+        this.cached = undefined;
         this.opts.tui.requestRender();
       }
     }
@@ -229,6 +290,52 @@ export class DecisionPanel implements Component, Focusable {
       lines.push(...wrap(th.fg("dim", "  Decisions here apply straight to the queue (queue_update semantics);")));
       lines.push(...wrap(th.fg("dim", "  queue_list shows the same state at any time. New proposals land here")));
       lines.push(...wrap(th.fg("dim", "  after an intake sweep; reviewed work lands here after the AI review.")));
+    } else if (this.detailFor !== null) {
+      // EXPANDED detail view — the item's ENTIRE content, wrapped never
+      // truncated: full scope, notes, evidence/value/urgency/risk, timestamps
+      // and EVERY target (no 2-target cap). Wrapping is the only width
+      // handling; nothing here is sliced to a summary.
+      const it = this.items[this.detailFor] ?? this.items[this.sel];
+      const risk = it.risk === "high" ? th.fg("warning", " [high]") : it.risk === "medium" ? th.fg("muted", " [medium]") : "";
+      const wrapAll = (s: string, pad = 2) => wrapTextWithAnsi(s, inner - pad).map((l) => " ".repeat(pad) + l);
+      const section = (name: string) => lines.push(t(th.fg("accent", th.bold(` ${name}`))));
+      lines.push(...wrapAll(`${th.fg("accent", th.bold(`▸ ${it.key} — ${it.title}`))}${risk}`));
+      lines.push("");
+
+      section("Scope");
+      lines.push(...wrapAll(it.fullScope || "(empty)"));
+      lines.push("");
+
+      if (it.fullNotes) {
+        section("Notes");
+        lines.push(...wrapAll(it.fullNotes));
+        lines.push("");
+      }
+
+      section("Meta");
+      const metaLine = (k: string, v: string) => lines.push(...wrapAll(`  ${k}: ${v}`));
+      metaLine("created", it.meta.createdAt);
+      metaLine("updated", it.updatedAt);
+      metaLine("evidence", it.meta.evidence || "—");
+      metaLine("value", it.meta.value || "—");
+      metaLine("urgency", it.meta.urgency || "—");
+      metaLine("risk", it.meta.risk || "—");
+      metaLine("blocker", it.meta.blocker || "—");
+      metaLine("cwd", it.cwd ?? "—");
+      if (it.meta.runId) metaLine("run", it.meta.runId);
+      if (it.meta.reviewerRunId) metaLine("reviewer run", it.meta.reviewerRunId);
+      lines.push("");
+
+      section("Targets");
+      if (it.fullTargets.length) {
+        for (const target of it.fullTargets) lines.push(...wrapAll(`↳ ${target.label}`));
+      } else {
+        lines.push(t("  (none)"));
+      }
+      lines.push("");
+
+      const hints = it.actions.map((a) => `[${PANEL_KEY[a]}] ${PANEL_LABEL[a]}`);
+      lines.push(t(th.fg("dim", ` ${hints.join("  ")}`)));
     } else {
       // scroll window around the selection
       const start = Math.max(0, Math.min(this.sel - 3, this.items.length - WINDOW));
@@ -255,11 +362,16 @@ export class DecisionPanel implements Component, Focusable {
       }
     }
 
-    // Input mode prompt
+    // Input mode — the visible multi-line TEXT FIELD: a prompt label above a
+    // real focused editor with a visible caret (prefilled with the full scope
+    // for refine; empty for findings).
     if (this.inputFor) {
-      const label = this.inputFor === "refine" ? " Refine scope:" : " Re-dispatch findings:";
+      const item = this.items[this.sel];
+      const where = item ? item.key : "?";
+      const label = this.inputFor === "refine" ? ` Refine scope — ${where}:` : ` Re-dispatch findings — ${where}:`;
       lines.push(t(th.fg("accent", th.bold(label))));
-      const inputLines = this.input.render(inner - 2);
+      this.editor.focused = this.focused;
+      const inputLines = this.editor.render(inner - 2);
       lines.push(...inputLines.map((l) => "  " + l));
     }
 
@@ -272,8 +384,10 @@ export class DecisionPanel implements Component, Focusable {
     // Footer
     const footer =
       this.inputFor !== null
-        ? "enter submit · esc cancel input"
-        : `↑↓ select · t/tab view · a approve · r reject · d defer · e refine · x re-dispatch · esc close`;
+        ? "enter submit · shift+enter newline · esc cancel input"
+        : this.detailFor !== null
+          ? "m/esc back to list · q close"
+          : `↑↓ select · m expand · t/tab view · a approve · r reject · d defer · e refine · x re-dispatch · esc close`;
     lines.push(...wrap(th.fg("dim", ` ${footer}`), 1));
 
     // Frame: a FULL boundary box — all four sides, not just top/bottom

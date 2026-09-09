@@ -5,7 +5,7 @@
 // queue_* tools read — the panel can never drift from it).
 
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -154,6 +154,106 @@ describe("DecisionPanel keyboard flow", () => {
     expect(sut.closed).toBe(true);
   });
 });
+describe("DecisionPanel item expansion + the visible refine text field", () => {
+  test("m expands the selected item to its FULL untruncated detail (scope/notes/evidence/meta)", () => {
+    const longScope = "Rewrite the entire parser to a streaming tokenizer\nsecond scope line\n" + "z".repeat(200) + "\ntail line past the first head";
+    const { panel } = setup([
+      item({
+        key: "P1",
+        status: "proposal",
+        title: "rewrite parser",
+        scope: longScope,
+        notes: "first note line\nsecond note line",
+        cwd: "/tmp/repo",
+        evidence: "ran the parser on the corpus",
+        value: "H",
+        urgency: "M",
+        risk: "high",
+        createdAt: "2026-09-01T08:00:00.000Z",
+        updatedAt: "2026-09-01T09:00:00.000Z",
+      }),
+    ]);
+    // the LIST view truncates to the scope head — the tail is invisible
+    const list = panel.render(80).join("\n");
+    expect(list).toContain("Rewrite the entire parser");
+    expect(list).not.toContain("second scope line");
+    expect(list).not.toContain("tail line past the first head");
+
+    panel.handleInput("m");
+    const detail = panel.render(80).join("\n");
+    expect(detail).toContain("second scope line");
+    expect(detail).toContain("tail line past the first head"); // past the 120-char head cap
+    expect(detail).toContain("first note line");
+    expect(detail).toContain("second note line");
+    expect(detail).toContain("ran the parser on the corpus"); // evidence
+    expect(detail).toContain("value: H");
+    expect(detail).toContain("urgency: M");
+    expect(detail).toContain("risk: high");
+    expect(detail).toContain("created: 2026-09-01T08:00:00.000Z");
+    expect(detail).toContain("updated: 2026-09-01T09:00:00.000Z");
+    expect(detail).toContain("↳ /tmp/repo");
+    // the expanded view still renders width-safely (wrapping, never truncating)
+    expect(Math.max(...lineWidths(panel.render(80)))).toBeLessThanOrEqual(80);
+
+    // m collapses back to the list
+    panel.handleInput("m");
+    expect(panel.render(80).join("\n")).not.toContain("second scope line");
+  });
+
+  test("detail shows EVERY navigation target — no 2-target list cap", () => {
+    const dir = mkdtempSync(join(tmpdir(), "orch-pi-panel-"));
+    const store = newStore();
+    store.items["H1"] = item({ key: "H1", status: "human-review", scope: "work", cwd: "/tmp/repo" });
+    saveStore(dir, store);
+    writeFileSync(
+      join(dir, "handoffs.jsonl"),
+      ["a", "b", "c"]
+        .map((b, i) => JSON.stringify({ runId: "r1", key: "H1", branch: `pi-parallel-r1-${b}`, tipSha: `${i + 1}`.repeat(8), ts: `2026-09-01T10:00:0${i}.000Z` }))
+        .join("\n") + "\n",
+    );
+    let closed = false;
+    const panel = new DecisionPanel({ stateDir: dir, initial: "human-review", theme: theme as never, tui: { requestRender: () => {} }, done: () => { closed = true; } });
+    // list view caps at the first two targets
+    const list = panel.render(80).join("\n");
+    expect(list).toContain("pi-parallel-r1-a");
+    expect(list).not.toContain("pi-parallel-r1-b");
+    // expanded view shows branch b AND c (all three + cwd)
+    panel.handleInput("m");
+    const detail = panel.render(80).join("\n");
+    expect(detail).toContain("pi-parallel-r1-a");
+    expect(detail).toContain("pi-parallel-r1-b");
+    expect(detail).toContain("pi-parallel-r1-c");
+    expect(detail).toContain("main...33333333"); // every branch@sha diff command (wrapped, never truncated)
+    expect(closed).toBe(false);
+    panel.handleInput("q");
+    expect(closed).toBe(true);
+  });
+
+  test("refine opens a visible editable text field PREFILLED with the full scope; enter submits into the store", () => {
+    const multiScope = "rewrite the parser\nsecond scope line";
+    const { panel, read } = setup([item({ key: "P1", status: "proposal", scope: multiScope, cwd: "/tmp" })]);
+    panel.handleInput("e");
+    const field = panel.render(80).join("\n");
+    expect(field).toContain("Refine scope — P1:"); // prompt label
+    expect(field).toContain("rewrite the parser"); // the FULL scope visible in the box
+    expect(field).toContain("second scope line"); // multi-line, not the truncated summary
+    expect(field).toContain("enter submit · shift+enter newline · esc cancel input");
+
+    panel.handleInput("!"); // edit live
+    panel.handleInput("\r"); // enter submits (non-conflicting: shift+enter makes newlines)
+    expect(read()["P1"].scope).toBe("rewrite the parser\nsecond scope line!");
+  });
+
+  test("esc cancels the refine field without touching the store", () => {
+    const { panel, read } = setup([item({ key: "P1", status: "proposal", scope: "keep me", cwd: "/tmp" })]);
+    panel.handleInput("e");
+    panel.handleInput("g"); // typed text — discarded on cancel
+    panel.handleInput("\x1b"); // esc cancels
+    expect(read()["P1"].scope).toBe("keep me");
+    expect(panel.render(80).join("\n")).not.toContain("Refine scope — P1:"); // back to nav mode
+  });
+});
+
 describe("refreshPanelBadge — the push nudge", () => {
   test("shows pending counts when either view has items; clears when empty", () => {
     const { dir } = (() => {

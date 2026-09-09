@@ -29,6 +29,17 @@ Research date: 2026-09. Evidence is per-source and cited inline (`[verified]`).
   `applyPanelDecision` (same store the tools read — no drift). Component
   logic tested hermetic (6 tests: width safety, keyboard flow, store
   effects). `@earendil-works/pi-tui@^0.85.1` added as a runtime dep.
+- **Done** (UX, 2026-09-09 feedback) — refine is now a REAL visible text
+  field: pressing `e` opens the pi-tui multi-line `Editor` (prompt label +
+  visible caret) prefilled with the FULL scope, enter submits (shift+enter
+  newline, esc cancels). `m` expands the selected item to its ENTIRE
+  untruncated detail (scope, notes, evidence/value/urgency/risk, created/
+  updated, EVERY target — no 2-target cap). Shared core stays additive:
+  `buildPanelDoc` now also carries `fullScope`/`fullNotes`/`fullTargets`/`meta`
+  so opencode inherits the data (truncation is a render choice, not data
+  loss). +5 hermetic tests (4 pi host: expand/all-targets detail, visible
+  prefilled field + esc cancel; 1 core: no-cap targets); existing core
+  projection tests extended for the new fields.
 - **Done** — opencode TUI: `src/hosts/opencode-tui.ts` — `@opencode-ai/plugin/tui`
   module (`exports["./tui"]`, separate from the server `exports["."]` entry,
   per the target-exclusivity rule). Registers a full-screen panel route
