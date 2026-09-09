@@ -342,7 +342,14 @@ with `queue_update(key, { status: "done" })`.
 - **Nothing reaches main before HUMAN approval.** No recovery merges, no finisher
   commits, no direct-to-main pushes while an item is pre-`done`. Work stays on its
   worktree branch; the AI review runs there; ONLY a human `done` unlocks the merge
-  (create an MR when a remote exists; merge to main only without one).
+  (create an MR when a remote exists; merge to main only without one). `done` is NOT
+  the merge — shipping is a SEPARATE explicit post-approval step (the merge-finisher
+  lane); nothing auto-merges. The rule is now MECHANICAL, not guidance: each runner
+  reconcile pass records every queue-referenced repo's main HEAD, and a main-branch
+  write while an item referencing that repo is still pre-`done` raises a loud
+  `[orch-tick: main-write]` violation + an `orch:main-write-pre-approval` telemetry
+  event (SHA + offending key). On that tick: verify what landed (git log <sha>) and
+  who wrote it; keep recovery on the branch; never re-route around review.
 - **Direct deliverables still get the flag**: work you produce in-session (not
   a queue item) has no pipeline — after handing the user any user-facing
   artifact, call `flag_for_review` with the file paths BEFORE moving on. The

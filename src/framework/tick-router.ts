@@ -7,7 +7,8 @@
 //
 // The MESSAGE is delivered as-is — core.ts's ticks already carry the
 // `[orch-tick: <reason>]` prefix (dispatch | intake | review | failure |
-// budget); hosts must not add another.
+// budget); hosts must not add another. Runner-crafted ticks (decision,
+// harness, main-write) go through the same gate with the same marker.
 
 export interface TickHostState {
   /** A live orchestrator session exists (pi: interactive TUI; opencode: a

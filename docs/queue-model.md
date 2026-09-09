@@ -52,6 +52,34 @@ item there, the harness auto-flags it for you, and your
 `done` is NOT a dead end: if you later find issues, re-open via `done → approved`
 (attempts reset — a fresh agent review loop starts with your findings).
 
+## Shipping (the merge-finisher lane) — `done` is NOT the merge
+
+`done` means **human-approved**, nothing more: it unlocks shipping but does NOT
+ship. Moving work to main is a SEPARATE, EXPLICIT, post-approval step — the
+**merge-finisher** (create an MR when a remote exists; merge to main only
+without one). Nothing auto-merges: the harness never merges, never pushes to
+main, never moves a branch into main — the only main-branch write the
+framework ever welcomes is the merge-finisher's shipping of an item the human
+already marked `done` (or the human's own merge). Work stays on its worktree
+branch through the whole review loop; a recovery re-dispatch re-commits on the
+branch, never on main.
+
+- **Pre-`done` main writes are flagged, mechanically.** The runner's reconcile
+  step records each queue-referenced repo's main HEAD every sweep and compares
+  it against the previous step (a one-`git rev-parse` ref check per repo). A
+  tracked main ref (`main` / `origin/main`) that moved while ≥1 item
+  referencing that repo was NOT human-approved (pre-`done`) emits the
+  `orch:main-write-pre-approval` WARNING telemetry event (data: `repo`, `ref`,
+  `sha` — what landed, `previousSha`, `keys` — the offending pre-done item
+  keys) plus a loud `[orch-tick: main-write]` violation tick. This is
+  telemetry, not a block — the orchestrator still verifies who wrote and what
+  landed — but guidance alone can lose (the live incident that codified the
+  rule), so the guard makes the rule mechanical.
+- **Post-`done` main writes are the legitimate lane.** Once every item
+  referencing a repo is `done` (or `rejected`), a main write advances the
+  guard's recorded baseline silently — the merge-finisher's shipping step is
+  exactly the case that must NOT warn.
+
 ## Worker-time budget governance (timeoutMs)
 
 Every item can carry a requested wall-clock budget (`timeoutMs`, set via
@@ -85,7 +113,10 @@ The governance layer makes that budget **visible and recoverable**:
 
 Reason vocabulary: ticks arrive as `[orch-tick: <reason>]` — `dispatch` /
 `intake` / `review` / `failure` (a run failed; re-dispatch or recover) /
-`budget` (an active run is past ~75% of its wall-clock budget).
+`budget` (an active run is past ~75% of its wall-clock budget) /
+`main-write` (a main-branch write landed while an item referencing that repo
+was not yet human-approved — a MAIN-IMMUTABILITY violation; SHA + offending
+key in the message).
 
 ## Tick behavior (what the orchestrator is nudged to do)
 
@@ -149,4 +180,10 @@ Reason vocabulary: ticks arrive as `[orch-tick: <reason>]` — `dispatch` /
   AT APPLICATION TIME from the `orch:human-decision` event data — fresh by
   construction, never a stale snapshot. Non-moves (refine scope edits,
   re-dispatch findings) record words and are events only — no tick.
+- **main-write** — a MAIN-IMMUTABILITY violation: a tracked main ref
+  (`main` / `origin/main`) of a queue-referenced repo moved between two
+  reconcile steps while ≥1 item referencing that repo was pre-`done` (not
+  human-approved). The orchestrator verifies what landed (`git log <sha>`)
+  and who wrote it, and keeps recovery on the branch — the only legitimate
+  main-write path is the post-approval merge-finisher (see Shipping above).
 - **blocked** items never trigger ticks (they are waiting by design).

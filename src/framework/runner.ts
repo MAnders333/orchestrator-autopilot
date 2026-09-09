@@ -20,6 +20,7 @@ import { createTickRouter, type TickHostState } from "./tick-router.ts";
 import { autoDispatchEligible, autoRedispatch, autoReview } from "./auto-dispatch.ts";
 import { decisionTick } from "./panels.ts";
 import { humanReviewTargetsFor, preserveActiveItems, prunePreservedRefs, preserveRunWorktree } from "./worktree-preservation.ts";
+import { checkMainWrites } from "./main-write-guard.ts";
 
 export interface RunnerOptions {
   stateDir: string;
@@ -243,6 +244,31 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       preserveActiveItems(opts.stateDir);
     } catch {
       // preservation must never break the sweep
+    }
+    // MAIN-IMMUTABILITY GUARD (KEY: MAIN-IMMUTABILITY-GUARD) — the MECHANICAL
+    // enforcement of "nothing merges to main before human approval" (the rule
+    // is codified in the skills/prompts, but guidance alone can lose — a live
+    // incident committed a recovered deliverable to main pre-review). Every
+    // reconcile step records the main HEAD of every queue-referenced repo; a
+    // worker round that moves a tracked main ref while ≥1 item referencing
+    // that repo is pre-done (not human-approved) raises the
+    // orch:main-write-pre-approval WARNING event + a loud tick naming the SHA
+    // + the offending keys. The ONLY legitimate main-write path is the
+    // post-approval merge-finisher (MR when a remote exists, else merge to
+    // main) — nothing auto-merges.
+    try {
+      for (const w of checkMainWrites(opts.stateDir)) {
+        if (opts.emit) {
+          opts.emit([{ name: "orch:main-write-pre-approval", data: { severity: "warning", ...w } }]);
+        }
+        const short = (s: string): string => s.slice(0, 8);
+        const keys = w.keys.join(", ");
+        const message = `[orch-tick: main-write] MAIN-IMMUTABILITY VIOLATION: ${w.ref} moved ${short(w.previousSha)} → ${short(w.sha)} in ${w.repo} while ${keys} ${w.keys.length > 1 ? "are" : "is"} NOT human-approved (pre-done). The ONLY legitimate main-write path is the merge-finisher AFTER the human's done (MR when a remote exists, else merge to main); nothing auto-merges. Verify what landed (git log ${short(w.sha)}); recovery stays on the branch. Not a user request; respond ≤2 lines.`;
+        const r = router.send(message, { bypassCooldown: true });
+        if (r === "deferred") queueDeferred(message, "tick");
+      }
+    } catch {
+      // the guard must never break the sweep
     }
     // The authoritative fleet, fetched ONCE — both the auto-dispatch (A) and
     // the engine sweep use it (one RPC, and the request is emitted synchronously
