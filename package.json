@@ -21,14 +21,18 @@
     ]
   },
   "exports": {
-    ".": "./src/hosts/opencode-entry.ts"
+    ".": "./src/hosts/opencode-entry.ts",
+    "./tui": "./src/hosts/opencode-tui.ts"
   },
   "dependencies": {
     "@earendil-works/pi-tui": "^0.85.1",
     "@opencode-ai/plugin": "^1.4.7"
   },
   "peerDependencies": {
-    "typebox": "*"
+    "typebox": "*",
+    "@opentui/solid": "0.5.x",
+    "@opentui/core": "0.5.x",
+    "solid-js": "1.9.x"
   },
   "files": [
     "src",
@@ -37,5 +41,21 @@
     "docs",
     "README.md",
     "LICENSE"
-  ]
+  ],
+  "devDependencies": {
+    "@opentui/core": "0.5.11",
+    "@opentui/solid": "0.5.11",
+    "solid-js": "1.9.12"
+  },
+  "peerDependenciesMeta": {
+    "@opentui/solid": {
+      "optional": true
+    },
+    "@opentui/core": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
+  }
 }

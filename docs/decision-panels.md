@@ -29,7 +29,21 @@ Research date: 2026-09. Evidence is per-source and cited inline (`[verified]`).
   `applyPanelDecision` (same store the tools read — no drift). Component
   logic tested hermetic (6 tests: width safety, keyboard flow, store
   effects). `@earendil-works/pi-tui@^0.85.1` added as a runtime dep.
-- **Remaining** — opencode `./tui` module, nudges (widget/badge + attention).
+- **Done** — opencode TUI: `src/hosts/opencode-tui.ts` — `@opencode-ai/plugin/tui`
+  module (`exports["./tui"]`, separate from the server `exports["."]` entry,
+  per the target-exclusivity rule). Registers a full-screen panel route
+  (tabbed views, same shared controller), a palette/slash open command
+  (`/panel`) + keymap layer (a/r/d/e/x, ↑↓, tab, esc), DialogPrompt-driven
+  refine/re-dispatch, and toasts. State dir resolves via the framework's
+  resolveStateDir against the opencode config's command/orchestrate.md — the
+  same queue the server host reads. 8 hermetic tests incl. a real JSX render
+  smoke (testRender). Enable: `tui.json` → `"plugin": ["orchestrator-autopilot"]`.
+- **Fixed along the way** — opencode command projections (work + personal)
+  carried PRE-migration STATE_DIR/GOALS_FILE paths (nonexistent dirs → empty
+  queues for opencode hosts since the migration); now point at
+  `orchestrator/work` + `orchestrator/personal`.
+- **Remaining** — nudges (pi status widget / attention notify), wiring
+  `tui.json` in the real opencode configs, live opencode load smoke.
 
 ---
 
