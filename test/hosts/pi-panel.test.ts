@@ -90,6 +90,21 @@ describe("DecisionPanel renders width-safely from queue state", () => {
     const lines = panel.render(80);
     expect(lines.join("\n")).toContain("all clear");
   });
+
+  test("row shows the recorded budget; a budget-capped row gets the bigger-budget marker", () => {
+    const { panel } = setup([
+      item({ key: "H1", status: "human-review", title: "h1", scope: "work", cwd: "/tmp/repo", timeoutMs: 43_200_000 }),
+    ]);
+    panel.handleInput("t"); // human-review view
+    expect(panel.render(80).join("\n")).toContain("budget 12h");
+    const capped = setup([
+      item({ key: "H2", status: "human-review", title: "h2", scope: "work", cwd: "/tmp/repo", timeoutMs: 5_400_000, failCause: "budget-capped" }),
+    ]);
+    capped.panel.handleInput("t");
+    const rendered = capped.panel.render(80).join("\n");
+    expect(rendered).toContain("budget 1h30m");
+    expect(rendered).toContain("budget-capped: re-dispatch with a LARGER budget");
+  });
 });
 
 describe("DecisionPanel keyboard flow", () => {

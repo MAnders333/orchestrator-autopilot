@@ -13,7 +13,7 @@ behavior. This is the AUTHORITATIVE model; the orchestrator skills reference it.
 | `active` | dispatched — worker running (runId set) |
 | `ai-review` | worker done — AI reviewer in flight (reviewerRunId set). This is the **AI review** stage |
 | `human-review` | AI review PASSED — **your** approval pending. Not done until you act |
-| `failed` | run failed (re-dispatchable) |
+| `failed` | run failed (re-dispatchable). **The FAIL cause is explicit**: every failed item records *why* in `failCause` — `budget-capped` (the worker run was CUT OFF by the item's wall-clock budget `timeoutMs`, mid-task: a cap, not a verdict on the work), `verdict` (the run ended with an unsuccessful verdict/exit — incl. a review FAIL reaching the attempts cap), or `zombie` (the run's completion event was lost). Legacy failures without a recorded cause read as `null`. The cause is cleared on any transition OUT of `failed` — a re-dispatch starts fresh |
 | `done` | **human-approved** — you accepted the flagged work (re-openable) |
 | `rejected` | terminal — deliberately dropped |
 
@@ -51,6 +51,41 @@ item there, the harness auto-flags it for you, and your
 `queue_update(key, {status: "done"})` is what actually completes it.
 `done` is NOT a dead end: if you later find issues, re-open via `done → approved`
 (attempts reset — a fresh agent review loop starts with your findings).
+
+## Worker-time budget governance (timeoutMs)
+
+Every item can carry a requested wall-clock budget (`timeoutMs`, set via
+`queue_add`/`queue_update`); null = unset → the runtime default applies. The
+budget is delivered to EVERY dispatch lane (manual `queue_dispatch`, auto
+`autoDispatchEligible`, review-FAIL `autoRedispatch`, `queue_review`/autoReview)
+so the child inherits the requested budget instead of a silent uniform default.
+The governance layer makes that budget **visible and recoverable**:
+
+- **`failCause` (store)**: a worker that dies at its budget flips to `failed`
+  with `failCause: "budget-capped"` + a `[budget-capped] …` note naming the
+  run, the cap, and the re-dispatch-with-bigger-budget path. A run that fails
+  with an unsuccessful verdict (or a review FAIL reaching the attempts cap)
+  records `failCause: "verdict"` (`[failed: verdict]` note) — the
+  failed=cap vs failed=verdict distinction is machine-readable
+  (`queue_list` compact rows carry `timeoutMs` + `failCause`) and human-readable.
+- **Failure surfacing (tick)**: a failed worker run is never silent — the
+  completion handler returns an `[orch-tick: failure]` tick. A budget-capped
+  failure says *RE-DISPATCH WITH A BIGGER BUDGET* (`queue_update` `timeoutMs`
+  then `queue_dispatch`; the recorded budget rides every lane) instead of
+  generic fail-forward; partial work on the `pi-parallel-*` branch must be
+  verified first.
+- **Budget telemetry (dispatch ticks + panel rows)**: dispatch-tick `facts`
+  carry `budget` rows for every active budgeted run (`key`/`cap`/`remaining`/
+  `elapsed`/`used`) plus the failed-at-cap recovery keys as `budgetCapped`;
+  the message names any run past ~75% of its budget (cap risk). Panel rows
+  show the recorded budget and a budget-capped marker. The 10-min timer
+  heartbeat adds ONE `[orch-tick: budget]` warning per run once it passes
+  ~75% (never a 10-minute nag), so the operator can steer the run to wrap up /
+  commit before the cap cuts it off.
+
+Reason vocabulary: ticks arrive as `[orch-tick: <reason>]` — `dispatch` /
+`intake` / `review` / `failure` (a run failed; re-dispatch or recover) /
+`budget` (an active run is past ~75% of its wall-clock budget).
 
 ## Tick behavior (what the orchestrator is nudged to do)
 
