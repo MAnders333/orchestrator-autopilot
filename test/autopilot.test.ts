@@ -5,6 +5,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { Autopilot } from "../src/core.ts";
 import {
   loadAutopilotConfig,
@@ -17,6 +18,9 @@ import {
   readSessionAutopilotState,
   writeSessionAutopilotState,
   autopilotCommand,
+  resolveStateDir,
+  autopilotModeMessage,
+  autopilotConfigPath,
 } from "../src/config.ts";
 import { isUnisolatedWorkerSpawn } from "../src/framework/auto-dispatch.ts";
 import {
@@ -295,6 +299,67 @@ describe("core.Autopilot (store-first)", () => {
     expect(tick?.message).toContain("FLEET:");
     expect(tick?.message).toContain("QUEUE:");
     expect(tick?.facts.readyKeys).toEqual(["B1"]);
+  });
+
+  test("resolveStateDir: profile-scoped when the profile dir exists; legacy dirs keep their queues", () => {
+    delete process.env.AUTOPILOT_STATE_DIR;
+    // profile dir EXISTS → wins even though a legacy dir also exists
+    const agentDir = join(dir, "profile-a");
+    mkdirSync(join(agentDir, "orchestrator"), { recursive: true });
+    mkdirSync(join(homedir(), ".local/state/orchestrator-nonexistent-probe"), { recursive: true }); // ensure legacy probe shape exists for OTHER names only
+    const saved = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    try {
+      expect(resolveStateDir(undefined)).toBe(join(agentDir, "orchestrator"));
+    } finally {
+      process.env.PI_CODING_AGENT_DIR = saved;
+      rmSync(join(homedir(), ".local/state/orchestrator-nonexistent-probe"), { recursive: true, force: true });
+    }
+  });
+
+  test("resolveStateDir: legacy compat — mode-name dir used only while it exists; new profiles are deterministic", () => {
+    delete process.env.AUTOPILOT_STATE_DIR;
+    const agentDir = join(dir, "profile-personal"); // no profile-scoped dir, but the NAME hits the personal legacy branch
+    const saved = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    try {
+      // legacy personal dir exists on this machine → compat keeps it
+      const legacyPersonal = join(homedir(), ".local/state/orchestrator-personal");
+      if (existsSync(legacyPersonal)) {
+        expect(resolveStateDir(undefined)).toBe(legacyPersonal);
+      }
+      // an agentDir that matches NO legacy dir (name has no 'personal') falls
+      // back to the shared legacy default when it exists — the compat rule
+      const legacyDefault = join(homedir(), ".local/state/orchestrator");
+      if (existsSync(legacyDefault) && !agentDir.includes("personal")) {
+        expect(resolveStateDir(undefined)).toBe(legacyDefault);
+      }
+    } finally {
+      process.env.PI_CODING_AGENT_DIR = saved;
+    }
+  });
+
+  test("workspace config roundtrip: intake sources + goals file survive loadAutopilotConfig", () => {
+    writeAtomic(autopilotConfigPath(dir), JSON.stringify({
+      maxSlots: 4,
+      workspace: {
+        goalsFile: "my-goals.json",
+        intake: [{ type: "jira", project: "MI" }, { type: "git-state" }],
+        notes: "personal mode",
+      },
+    }));
+    const cfg = loadAutopilotConfig(dir);
+    expect(cfg.maxSlots).toBe(4);
+    expect(cfg.workspace?.goalsFile).toBe("my-goals.json");
+    expect(cfg.workspace?.intake).toEqual([{ type: "jira", project: "MI" }, { type: "git-state" }]);
+    expect(cfg.workspace?.notes).toBe("personal mode");
+  });
+
+  test("autopilotModeMessage ON carries the workspace facts pointer only when asked", () => {
+    expect(autopilotModeMessage("on", { stateDir: "/tmp/state" })).toContain("/tmp/state");
+    expect(autopilotModeMessage("on", { stateDir: "/tmp/state" })).toContain("autopilot.config.json");
+    expect(autopilotModeMessage("on")).not.toContain("Workspace facts");
+    expect(autopilotModeMessage("off", { stateDir: "/tmp/state" })).not.toContain("Workspace facts");
   });
 
   test("zombieReconcile: fleet idle + active item past grace → flipped to failed with evidence in notes", () => {

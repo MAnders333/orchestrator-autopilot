@@ -152,11 +152,35 @@ export interface AutopilotConfigFile {
    *  completion event was lost (timeout overnight / crash / restart). 0
    *  disables the sweep. */
   zombieGraceMinutes?: number;
+  /** Workspace FACTS (mode-invariant): the per-environment truth the
+   *  orchestrator reads instead of per-mode prompt projections. Facts live in
+   *  config; procedure lives in the (single, mode-invariant) /orchestrate
+   *  command. Credentials stay out — reference a secret store. */
+  workspace?: WorkspaceConfig;
   sweepIntervalMs?: number; // periodic capacity sweep; 0 disables (default 10 min)
   /** Intake suppression window: pending proposals suppress intake ticks for
    *  this many hours (the user deliberates), then the suppression lapses so a
    *  STALE proposal cannot starve the refill nudge forever. Default 24. */
   intakeSuppressionHours?: number;
+}
+
+/** The intake source vocabulary is deliberately OPEN: `type` is the label the
+ *  orchestrator interprets (the procedure for each type lives in the
+ *  orchestrator skill/command); everything else is that type's params. */
+export interface IntakeSource {
+  type: string;
+  [param: string]: unknown;
+}
+
+export interface WorkspaceConfig {
+  /** Goals file path (absolute or relative to the state dir). Default:
+   *  goals.json in the state dir. */
+  goalsFile?: string;
+  /** Where the orchestrator's intake scans come from. */
+  intake?: IntakeSource[];
+  /** Free-form environment notes the orchestrator should know (working
+   *  hours, escalation paths, whatever). */
+  notes?: string;
 }
 
 /** The autopilot TOGGLE — ONE implementation, both hosts (pi /autopilot + the
@@ -185,7 +209,9 @@ export function autopilotCommand(
   switch (action) {
     case "on":
       if (sessionId) writeSessionAutopilotState(stateDir, sessionId, "on"); // also clears any schedule
-      return { ok: true, message: autopilotModeMessage("on"), mode: "on" };
+      // The workspace hint rides the shared message: both hosts deliver THIS
+      // result to their agent (opencode tool return / pi injected message).
+      return { ok: true, message: autopilotModeMessage("on", opts.stateDir ? { stateDir: opts.stateDir } : undefined), mode: "on" };
     case "off": {
       // "off in <dur>" = SCHEDULED off: keep ON until the deadline, return the
       // distinct scheduledOffAt signal (never mode:"off"). The leading "in"
@@ -240,17 +266,26 @@ export function autopilotCommand(
  *  SAME thing on every host. Hosts only DELIVER it (pi: sendUserMessage
  *  followUp; opencode: the autopilot tool return); they never re-word it.
  *  The per-session state (isAutopilotOn) is the shared gate for all of it. */
-export function autopilotModeMessage(mode: "on" | "off"): string {
+export function autopilotModeMessage(mode: "on" | "off", workspace?: { stateDir: string }): string {
+  // The workspace hint rides the ON message only: facts are read ONCE at
+  // activation (single source of per-environment truth = the config file);
+  // OFF doesn't need them (the orchestrator isn't scanning anything).
+  const hint = mode === "on" && workspace
+    ? `\n\nWorkspace facts: state dir ${workspace.stateDir} — autopilot.config.json there carries your \"workspace\" section (intake sources, goals file). Read it before intake scans; it is the single source of per-environment truth.`
+    : "";
   return mode === "on"
-    ? "Autopilot is now ON — the harness is active: it auto-dispatches approved items (scope + cwd + low/med risk), auto-dispatches reviews on completion, auto-re-dispatches on review FAIL, routes verdicts (PASS to done), and sends [orch-tick] state messages. You keep: approval, high-risk checkpoints, review overrides, flag_for_review, steering. Do not manually queue_dispatch/queue_review what the harness handles."
+    ? "Autopilot is now ON — the harness is active: it auto-dispatches approved items (scope + cwd + low/med risk), auto-dispatches reviews on completion, auto-re-dispatches on review FAIL, routes verdicts (PASS to done), and sends [orch-tick] state messages. You keep: approval, high-risk checkpoints, review overrides, flag_for_review, steering. Do not manually queue_dispatch/queue_review what the harness handles." + hint
     : "Autopilot is now OFF — the harness is idle: no auto flips, no verdict routing, no auto-dispatch/review, no ticks. YOU must do everything manually: reconcile completions (queue_update active to reviewing/failed), route reviews (queue_review), read verdicts and move items (queue_update), dispatch (queue_dispatch), and flag (flag_for_review). The queue tools remain available. Re-enable by running the autopilot on command.";
 }
 
-/** Resolve the state dir ONCE, in the framework — no per-host copies (the
- *  hosts' versions already diverged: opencode skipped the command's STATE_DIR
- *  line and leaned on the pi-runtime var). Chain: AUTOPILOT_STATE_DIR env →
- *  the host's orchestrate command STATE_DIR line (when a commandFile is given)
- *  → the PI_CODING_AGENT_DIR mode name → the documented default. */
+/** Resolve the state dir ONCE, in the framework — no per-host copies. Chain:
+ *  AUTOPILOT_STATE_DIR env → the host's orchestrate command STATE_DIR line
+ *  (when a commandFile is given; config-carried) → PROFILE-SCOPED
+ *  ($PI_CODING_AGENT_DIR/orchestrator — the environment IS the profile root;
+ *  no mode-name knowledge) → LEGACY compat: the old mode-name heuristic
+ *  (~/.local/state/orchestrator[-personal]) only when that dir already
+ *  EXISTS (existing environments keep their queues; never re-derive from
+ *  a name) → the documented default. */
 export function resolveStateDir(commandFile?: string): string {
   if (process.env.AUTOPILOT_STATE_DIR) return process.env.AUTOPILOT_STATE_DIR;
   if (commandFile) {
@@ -260,13 +295,22 @@ export function resolveStateDir(commandFile?: string): string {
         if (parsed) return parsed;
       }
     } catch {
-      // fall through to the name-based + default resolution
+      // fall through to the profile-based + legacy resolution
     }
   }
   const agentDir = process.env.PI_CODING_AGENT_DIR ?? "";
-  return agentDir.includes("personal")
-    ? join(homedir(), ".local/state/orchestrator-personal")
-    : join(homedir(), ".local/state/orchestrator");
+  if (agentDir) {
+    const profileScoped = join(agentDir, "orchestrator");
+    if (existsSync(profileScoped)) return profileScoped;
+    // LEGACY compat (deprecated): the old mode-NAME heuristic — only while
+    // that dir already exists, so existing environments keep their queues.
+    const legacy = join(homedir(), agentDir.includes("personal")
+      ? ".local/state/orchestrator-personal"
+      : ".local/state/orchestrator");
+    if (existsSync(legacy)) return legacy;
+    return profileScoped; // new profile — deterministic, no name knowledge
+  }
+  return join(homedir(), ".local/state/orchestrator");
 }
 
 export function autopilotConfigPath(stateDir: string): string {
@@ -278,7 +322,7 @@ export function autopilotConfigPath(stateDir: string): string {
  * AUTOPILOT_QUEUE_LOW, AUTOPILOT_WORKER_AGENTS) win over the file; the file
  * wins over built-in defaults.
  */
-export function loadAutopilotConfig(stateDir: string, env: NodeJS.ProcessEnv = process.env): Required<AutopilotConfigFile> {
+export function loadAutopilotConfig(stateDir: string, env: NodeJS.ProcessEnv = process.env): Omit<Required<AutopilotConfigFile>, "workspace"> & { workspace?: WorkspaceConfig } {
   let file: AutopilotConfigFile = {};
   try {
     const p = autopilotConfigPath(stateDir);
@@ -309,6 +353,7 @@ export function loadAutopilotConfig(stateDir: string, env: NodeJS.ProcessEnv = p
     reviewCap: Number.isFinite(reviewCap) && reviewCap >= 1 ? reviewCap : 5,
     sweepIntervalMs: Number.isFinite(sweepIntervalMs) && sweepIntervalMs >= 0 ? sweepIntervalMs : 600_000,
     zombieGraceMinutes: Number.isFinite(zombieGraceMinutes) && zombieGraceMinutes >= 0 ? zombieGraceMinutes : 30,
+    ...(file.workspace ? { workspace: file.workspace } : {}),
   };
 }
 

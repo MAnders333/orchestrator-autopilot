@@ -227,8 +227,9 @@ export default function (pi: ExtensionAPI) {
    *  throw must not fail the command (followUp + guard, same as injection). */
   function informOrchestrator(mode: "on" | "off") {
     // The message is the framework's (autopilotModeMessage) — this host only
-    // DELIVERS it (followUp so a busy agent cannot fail the command).
-    const msg = autopilotModeMessage(mode);
+    // DELIVERS it (followUp so a busy agent cannot fail the command). The ON
+    // message carries the workspace facts pointer (state dir → config).
+    const msg = autopilotModeMessage(mode, { stateDir });
     if (agentBusy) {
       runner.deferUserMessage(msg); // the busy-not-streaming window throws — shared deferral
       return;
