@@ -201,14 +201,14 @@ export class DecisionPanel implements Component, Focusable {
 
     if (this.items.length === 0) {
       // fuller empty state — fills the window and shows BOTH views' counts
-      lines.push(th.fg("success", "  ✓ Nothing awaiting you here — this view is all clear"));
+      lines.push(...wrap(th.fg("success", "  ✓ Nothing awaiting you here — this view is all clear")));
       lines.push("");
       const other = VIEWS.filter((v) => v.kind !== this.kind)[0];
-      lines.push(th.fg("dim", `  ${other.label}: ${this.counts[other.kind]} — tab to check`));
+      lines.push(t(th.fg("dim", `  ${other.label}: ${this.counts[other.kind]} — tab to check`)));
       lines.push("");
-      lines.push(th.fg("dim", "  Decisions here apply straight to the queue (queue_update semantics);"));
-      lines.push(th.fg("dim", "  queue_list shows the same state at any time. New proposals land here"));
-      lines.push(th.fg("dim", "  after an intake sweep; reviewed work lands here after the AI review."));
+      lines.push(...wrap(th.fg("dim", "  Decisions here apply straight to the queue (queue_update semantics);")));
+      lines.push(...wrap(th.fg("dim", "  queue_list shows the same state at any time. New proposals land here")));
+      lines.push(...wrap(th.fg("dim", "  after an intake sweep; reviewed work lands here after the AI review.")));
     } else {
       // scroll window around the selection
       const start = Math.max(0, Math.min(this.sel - 3, this.items.length - WINDOW));
