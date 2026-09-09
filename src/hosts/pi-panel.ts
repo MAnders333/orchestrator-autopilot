@@ -9,11 +9,16 @@
 // queue. The panel is pure UI over the shared core; if pi-tui is unavailable
 // the command fails closed and the regular tick JSON remains the fallback.
 //
-// Keymap (footer-printed): ↑/↓ select · m expand (full item) · t/tab toggle view ·
+// Keymap (footer-printed): ↑/↓/jk select · gg top · G bottom · m expand (full item) · t/tab toggle view ·
 // enter/a approve · r reject · d defer · e refine (scope + repo input) · x re-dispatch (text field)
 // · esc/q close. The refine/re-dispatch field is a real multi-line editor: enter
 // submits, shift+enter inserts a newline, esc cancels. Repo-less proposals get a
 // second "repo (cwd)" stage during refine — the repo the work lands in.
+//
+// The expanded detail view (m) is a SCROLLABLE pane: j/k scroll by WRAPPED
+// line, ctrl+d/ctrl+u by half a page, gg/G jump to top/bottom — clamped to
+// the wrapped content height so overflowing detail can never get stuck
+// unreachable. esc/m collapse back to the list.
 // -------------------------------------------------------------------------
 
 import {
@@ -77,6 +82,11 @@ const PANEL_KEY: Record<PanelActionId, string> = { approve: "a", reject: "r", de
 const PANEL_LABEL: Record<PanelActionId, string> = { approve: "approve", reject: "reject", defer: "defer", refine: "refine", redispatch: "re-dispatch" };
 
 const WINDOW = 7; // visible item window — the overlay scrolls via selection
+/** Visible WRAPPED lines in the expanded detail pane. j/k scroll by line,
+ *  ctrl+d/ctrl+u by half this, gg/G jump to the edges. Sized so the whole
+ *  panel (frame + header + detail + hints + footer) stays inside the overlay
+ *  without ever clipping the footer hint. */
+const DETAIL_HEIGHT = 26;
 
 export class DecisionPanel implements Component, Focusable {
   /** Focusable — the TUI sets this; propagate to the Input in input mode (IME). */
@@ -94,6 +104,15 @@ export class DecisionPanel implements Component, Focusable {
   private editor: Editor;
   /** null = nav/list mode; an index into `items` = that item's full-detail view. */
   private detailFor: number | null = null;
+  /** The detail pane's scroll offset — WRAPPED visible lines to skip. Clamped
+   *  to the wrapped content height (render keeps it current; the input
+   *  handlers scroll against `detailTotal`, so the pane can never overshoot). */
+  private detailScroll = 0;
+  /** Wrapped line count of the current detail content, refreshed at render
+   *  (input handlers need it to clamp j/k and gg/G between renders). */
+  private detailTotal = 0;
+  /** A bare `g` was pressed — awaiting the second `g` to make `gg`. */
+  private ggArmed = false;
   /** The scope typed in the refine stage — submitted together with the repo
    *  field when the item is repo-less. */
   private pendingScope: string | null = null;
@@ -196,6 +215,16 @@ export class DecisionPanel implements Component, Focusable {
     this.apply("refine", repo ? { scope: scope ?? undefined, cwd: repo } : { scope: scope ?? undefined });
   }
 
+  /** Scroll the expanded detail pane by `delta` WRAPPED visible lines, clamped
+   *  to the pane content height known from the last render (the TUI re-renders
+   *  after every key, so `detailTotal` is always current — and render re-clamps
+   *  if the wrap count changed with the width, so the pane never overshoots). */
+  private scrollDetail(delta: number): void {
+    this.detailScroll = Math.max(0, Math.min(this.detailScroll + delta, Math.max(0, this.detailTotal - DETAIL_HEIGHT)));
+    this.cached = undefined;
+    this.opts.tui.requestRender();
+  }
+
   // -- input ----------------------------------------------------------------
 
   handleInput(data: string): void {
@@ -217,19 +246,83 @@ export class DecisionPanel implements Component, Focusable {
     }
 
     if (this.detailFor !== null) {
-      // Detail mode: m/esc collapse back to the list; q still closes the panel.
+      // Detail mode: m/esc collapse back to the list; q still closes the
+      // panel. Vim scrolling: j/k (and arrows) by wrapped line, ctrl+d/ctrl+u
+      // by half a page, gg/G to top/bottom — always clamped to the wrapped
+      // content height.
       if (matchesKey(data, Key.escape) || matchesKey(data, "m")) {
         this.detailFor = null;
+        this.detailScroll = 0;
+        this.detailTotal = 0;
+        this.ggArmed = false;
         this.cached = undefined;
         this.opts.tui.requestRender();
-      } else if (matchesKey(data, "q")) {
+        return;
+      }
+      if (matchesKey(data, "q")) {
         this.opts.done();
+        return;
+      }
+      if (matchesKey(data, "g")) {
+        if (this.ggArmed) {
+          this.ggArmed = false;
+          this.detailScroll = 0; // gg — top of the detail pane
+          this.cached = undefined;
+          this.opts.tui.requestRender();
+        } else {
+          this.ggArmed = true;
+        }
+        return;
+      }
+      this.ggArmed = false; // any other key discards a pending `g`
+      if (matchesKey(data, "shift+g")) {
+        this.detailScroll = Math.max(0, this.detailTotal - DETAIL_HEIGHT); // G — bottom
+        this.cached = undefined;
+        this.opts.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, "j") || matchesKey(data, Key.down)) {
+        this.scrollDetail(1);
+        return;
+      }
+      if (matchesKey(data, "k") || matchesKey(data, Key.up)) {
+        this.scrollDetail(-1);
+        return;
+      }
+      if (matchesKey(data, Key.ctrl("d"))) {
+        this.scrollDetail(Math.ceil(DETAIL_HEIGHT / 2));
+        return;
+      }
+      if (matchesKey(data, Key.ctrl("u"))) {
+        this.scrollDetail(-Math.ceil(DETAIL_HEIGHT / 2));
+        return;
       }
       return;
     }
 
     if (matchesKey(data, Key.escape) || matchesKey(data, "q")) {
       this.opts.done();
+      return;
+    }
+    // `g` arms the two-key `gg` chord (top); any other key discards it. The
+    // single `g` itself performs no action, so arming stays side-effect free
+    // (and `G` — a DIFFERENT key from `g` — jumps to the bottom directly).
+    if (matchesKey(data, "g")) {
+      if (this.ggArmed) {
+        this.ggArmed = false;
+        this.sel = 0; // gg — first item
+        this.cached = undefined;
+        this.opts.tui.requestRender();
+      } else {
+        this.ggArmed = true;
+      }
+      return;
+    }
+    this.ggArmed = false;
+    if (matchesKey(data, "shift+g")) {
+      if (this.items.length) this.sel = this.items.length - 1; // G — last item
+      this.cached = undefined;
+      this.opts.tui.requestRender();
       return;
     }
     if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
@@ -290,9 +383,13 @@ export class DecisionPanel implements Component, Focusable {
       return;
     }
     if (matchesKey(data, "m")) {
-      // one key expands the selected item to its ENTIRE readable content
+      // one key expands the selected item to its ENTIRE readable content,
+      // scrolled to the top of the pane
       if (this.items.length) {
         this.detailFor = this.sel;
+        this.detailScroll = 0;
+        this.detailTotal = 0;
+        this.ggArmed = false;
         this.cached = undefined;
         this.opts.tui.requestRender();
       }
@@ -339,26 +436,31 @@ export class DecisionPanel implements Component, Focusable {
       // EXPANDED detail view — the item's ENTIRE content, wrapped never
       // truncated: full scope, notes, evidence/value/urgency/risk, timestamps
       // and EVERY target (no 2-target cap). Wrapping is the only width
-      // handling; nothing here is sliced to a summary.
+      // handling; nothing here is sliced to a summary. The wrapped lines
+      // play through a scrollable viewport (DETAIL_HEIGHT visible lines):
+      // j/k by line, ctrl+d/ctrl+u by half a page, gg/G to top/bottom — the
+      // offset is clamped to the WRAPPED line count, so wrapping never hides
+      // content and the pane can never scroll past its end.
       const it = this.items[this.detailFor] ?? this.items[this.sel];
       const risk = it.risk === "high" ? th.fg("warning", " [high]") : it.risk === "medium" ? th.fg("muted", " [medium]") : "";
       const wrapAll = (s: string, pad = 2) => wrapTextWithAnsi(s, inner - pad).map((l) => " ".repeat(pad) + l);
-      const section = (name: string) => lines.push(t(th.fg("accent", th.bold(` ${name}`))));
-      lines.push(...wrapAll(`${th.fg("accent", th.bold(`▸ ${it.key} — ${it.title}`))}${risk}`));
-      lines.push("");
+      const content: string[] = [];
+      const section = (name: string) => content.push(t(th.fg("accent", th.bold(` ${name}`))));
+      content.push(...wrapAll(`${th.fg("accent", th.bold(`▸ ${it.key} — ${it.title}`))}${risk}`));
+      content.push("");
 
       section("Scope");
-      lines.push(...wrapAll(it.fullScope || "(empty)"));
-      lines.push("");
+      content.push(...wrapAll(it.fullScope || "(empty)"));
+      content.push("");
 
       if (it.fullNotes) {
         section("Notes");
-        lines.push(...wrapAll(it.fullNotes));
-        lines.push("");
+        content.push(...wrapAll(it.fullNotes));
+        content.push("");
       }
 
       section("Meta");
-      const metaLine = (k: string, v: string) => lines.push(...wrapAll(`  ${k}: ${v}`));
+      const metaLine = (k: string, v: string) => content.push(...wrapAll(`  ${k}: ${v}`));
       metaLine("created", it.meta.createdAt);
       metaLine("updated", it.updatedAt);
       metaLine("evidence", it.meta.evidence || "—");
@@ -369,15 +471,23 @@ export class DecisionPanel implements Component, Focusable {
       metaLine("cwd", it.cwd ?? "—");
       if (it.meta.runId) metaLine("run", it.meta.runId);
       if (it.meta.reviewerRunId) metaLine("reviewer run", it.meta.reviewerRunId);
-      lines.push("");
+      content.push("");
 
       section("Targets");
       if (it.fullTargets.length) {
-        for (const target of it.fullTargets) lines.push(...wrapAll(`↳ ${target.label}`));
+        for (const target of it.fullTargets) content.push(...wrapAll(`↳ ${target.label}`));
       } else {
-        lines.push(t("  (none)"));
+        content.push(t("  (none)"));
       }
-      lines.push("");
+      content.push("");
+
+      // Scrollable window over the WRAPPED content lines — re-clamped here
+      // (content re-wraps when the width changes), and the pane size is what
+      // the input handlers scroll against (detailTotal, kept current).
+      const total = content.length;
+      this.detailTotal = total;
+      this.detailScroll = Math.min(this.detailScroll, Math.max(0, total - DETAIL_HEIGHT));
+      lines.push(...content.slice(this.detailScroll, this.detailScroll + DETAIL_HEIGHT));
 
       const hints = it.actions.map((a) => `[${PANEL_KEY[a]}] ${PANEL_LABEL[a]}`);
       lines.push(t(th.fg("dim", ` ${hints.join("  ")}`)));
@@ -448,12 +558,19 @@ export class DecisionPanel implements Component, Focusable {
     }
 
     // Footer
+    // Detail mode keeps the vim scroll keys + live position (wrapped lines) on
+    // screen at ALL times — the keymap is discoverable with ONE glance, and a
+    // scrolled pane always says where it is (first–last/total wrapped lines).
+    const detailPos =
+      this.detailFor !== null && this.detailTotal > DETAIL_HEIGHT
+        ? ` — ${this.detailScroll + 1}–${Math.min(this.detailScroll + DETAIL_HEIGHT, this.detailTotal)}/${this.detailTotal}`
+        : "";
     const footer =
       this.inputFor !== null
         ? "enter submit · shift+enter newline · esc cancel input"
         : this.detailFor !== null
-          ? "m/esc back to list · q close"
-          : `↑↓ select · m expand · t/tab view · a approve · r reject · d defer · e refine · x re-dispatch · esc close`;
+          ? `j/k scroll · ctrl+d/u · gg/G · esc collapse${detailPos}`
+          : `↑↓/jk select · gg top · G bottom · m expand · t/tab view · a approve · r reject · d defer · e refine · x re-dispatch · esc close`;
     lines.push(...wrap(th.fg("dim", ` ${footer}`), 1));
 
     // Frame: a FULL boundary box — all four sides, not just top/bottom

@@ -296,6 +296,126 @@ describe("DecisionPanel item expansion + the visible refine text field", () => {
   });
 });
 
+describe("DecisionPanel vim keys — nav gg/G + scrollable detail pane", () => {
+  test("nav mode: gg selects the first item, G the last (j/k keep working beside them)", () => {
+    const { panel } = setup([
+      item({ key: "P1", status: "proposal", scope: "one", cwd: "/tmp" }),
+      item({ key: "P2", status: "proposal", scope: "two", cwd: "/tmp" }),
+      item({ key: "P3", status: "proposal", scope: "three", cwd: "/tmp" }),
+    ]);
+    panel.handleInput("j"); // ↓ to P2
+    expect(panel.render(80).join("\n")).toContain("▸ P2");
+    panel.handleInput("g");
+    panel.handleInput("g"); // gg — first item
+    let nav = panel.render(80).join("\n");
+    expect(nav).toContain("▸ P1");
+    expect(nav).not.toContain("▸ P2");
+    panel.handleInput("G"); // G — last item
+    nav = panel.render(80).join("\n");
+    expect(nav).toContain("▸ P3");
+    expect(nav).not.toContain("▸ P2");
+    panel.handleInput("k"); // j/k still move after gg/G
+    expect(panel.render(80).join("\n")).toContain("▸ P2");
+    panel.handleInput("g"); // a lone g arms gg but does NOT move…
+    panel.handleInput("j"); // …and the very next key discards the armed g
+    expect(panel.render(80).join("\n")).toContain("▸ P3");
+    // nav footer advertises the vim keys — discoverability is printed, not assumed
+    expect(panel.render(80).join("\n")).toContain("↑↓/jk select · gg top · G bottom");
+  });
+
+  test("detail mode: j/k scroll by line, ctrl+d/ctrl+u half-page, gg/G jump — all clamped to the content end", () => {
+    const scope = Array.from({ length: 60 }, (_, i) => `line ${String(i + 1).padStart(2, "0")}`).join("\n");
+    const { panel } = setup([item({ key: "P1", status: "proposal", scope, cwd: "/tmp" })]);
+    panel.handleInput("m");
+    const top = panel.render(80).join("\n");
+    expect(top).toContain("▸ P1 — P1"); // detail title
+    expect(top).toContain("  line 01");
+    expect(top).toContain("  line 23");
+    expect(top).not.toContain("  line 24"); // viewport bottom is line 23
+    // the vim scroll keymap + live position are ALWAYS on screen
+    expect(top).toContain("j/k scroll · ctrl+d/u · gg/G · esc collapse");
+    expect(top).toContain("1–26/77");
+
+    panel.handleInput("j"); // one wrapped line down — the TITLE scrolls away first
+    const one = panel.render(80).join("\n");
+    expect(one).not.toContain("▸ P1 — P1");
+    expect(one).toContain("  line 24");
+    expect(one).toContain("2–27/77");
+    panel.handleInput("j");
+    const two = panel.render(80).join("\n");
+    expect(two).toContain("  line 25");
+    expect(two).toContain("3–28/77");
+
+    panel.handleInput("\x04"); // ctrl+d — half page (13) down: offset 2 → 15
+    const half = panel.render(80).join("\n");
+    expect(half).toContain("  line 13");
+    expect(half).not.toContain("  line 12");
+    expect(half).toContain("16–41/77");
+    panel.handleInput("\x15"); // ctrl+u — half page up: offset 15 → 2
+    const up = panel.render(80).join("\n");
+    expect(up).toContain("  line 01");
+    expect(up).toContain("3–28/77");
+
+    panel.handleInput("G"); // bottom: offset 51 → first visible line 49
+    const bottom = panel.render(80).join("\n");
+    expect(bottom).toContain("  line 49");
+    expect(bottom).not.toContain("  line 48");
+    expect(bottom).toContain("↳ /tmp"); // tail of the detail is reachable
+    expect(bottom).toContain("52–77/77");
+    // clamped at the content end: further j presses rest on the last page
+    for (let i = 0; i < 5; i++) panel.handleInput("j");
+    expect(panel.render(80).join("\n")).toBe(bottom);
+
+    panel.handleInput("g");
+    panel.handleInput("g"); // gg — back to the top
+    const topAgain = panel.render(80).join("\n");
+    expect(topAgain).toContain("▸ P1 — P1");
+    expect(topAgain).toContain("  line 01");
+    expect(topAgain).toContain("1–26/77");
+    panel.handleInput("k"); // up from the top clamps at 0
+    expect(panel.render(80).join("\n")).toBe(topAgain);
+
+    panel.handleInput("m"); // collapse — back to the nav keymap
+    const collapsed = panel.render(80).join("\n");
+    expect(collapsed).toContain("↑↓/jk select · gg top · G bottom");
+    expect(collapsed).not.toContain("j/k scroll · ctrl+d/u · gg/G · esc collapse");
+  });
+
+  test("detail j/k step by WRAPPED visible lines — a long line counts once per wrap chunk", () => {
+    const long = "x".repeat(200);
+    const scope = [long, ...Array.from({ length: 40 }, (_, i) => `n ${String(i + 1).padStart(2, "0")}`)].join("\n");
+    const { panel } = setup([item({ key: "P1", status: "proposal", scope, cwd: "/tmp" })]);
+    panel.handleInput("m");
+    const top = panel.render(80).join("\n");
+    expect(top).toContain("  " + long.slice(0, 74)); // first wrap chunk visible at the top
+    expect(top).toContain("  n 01");
+    expect(top).toContain("1–26/60");
+
+    // 3 visible steps (title, blank, scope header) bring the head line's FIRST
+    // chunk to the top edge; 3 MORE steps scroll past ALL THREE wrap chunks of
+    // that ONE source line — n 01 is then the first visible line and every
+    // wrap chunk is off screen. Steps are WRAPPED lines, not source lines.
+    for (let i = 0; i < 6; i++) panel.handleInput("j");
+    const six = panel.render(80).join("\n");
+    expect(six).not.toContain("x".repeat(40)); // every wrap chunk scrolled past
+    expect(six).toContain("  n 01"); // …yet source line #2 is not skipped
+    expect(six).toContain("  n 26");
+    expect(six).not.toContain("  n 27");
+    expect(six).toContain("7–32/60");
+
+    panel.handleInput("G"); // bottom clamps to the WRAPPED end (60 lines)
+    const bottom = panel.render(80).join("\n");
+    expect(bottom).toContain("  n 29");
+    expect(bottom).toContain("↳ /tmp");
+    expect(bottom).toContain("35–60/60"); // clamped to the WRAPPED end (60 lines)
+    panel.handleInput("g");
+    panel.handleInput("g"); // gg — straight back to the top
+    const topAgain = panel.render(80).join("\n");
+    expect(topAgain).toContain("  " + long.slice(0, 74));
+    expect(topAgain).toContain("1–26/60");
+  });
+});
+
 describe("refreshPanelBadge — the push nudge", () => {
   test("shows pending counts when either view has items; clears when empty", () => {
     const { dir } = (() => {
