@@ -189,3 +189,32 @@ describe("queue_add — key auto-allocation", () => {
   });
 
 });
+
+describe("history vote — digit-less legacy keys", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-histseries-"));
+  function seed(rows: Array<[string, string, string]>) { // [key, cwd, updatedAt]
+    const store = newStore();
+    for (const [k, cwd, updatedAt] of rows) {
+      store.items[k] = item(k, { cwd, updatedAt });
+    }
+    saveStore(dir, store);
+  }
+
+  test("a SINGLE digit-less legacy key votes only its FIRST segment (no MBR-HANDOVER-SAEID latch)", () => {
+    seed([["MBR-HANDOVER-SAEID", "/repo/x", "2026-08-17T00:00:00Z"]]);
+    expect(resolveSeries(dir, "/repo/x")).toBe("MBR");
+  });
+
+  test("multiple digit-less keys with a common first segment vote that segment", () => {
+    seed([
+      ["AUTOPILOT-SCHEDULED-OFF", "/repo/y", "2026-08-22T00:00:00Z"],
+      ["AUTOPILOT-WORKTREE-PRESERVATION", "/repo/y", "2026-08-23T00:00:00Z"],
+    ]);
+    expect(resolveSeries(dir, "/repo/y")).toBe("AUTOPILOT");
+  });
+
+  test("digit-bearing keys keep the existing rule (text before the first digit)", () => {
+    seed([["EVAL-EXPT-M3", "/repo/z", "2026-08-24T00:00:00Z"]]);
+    expect(resolveSeries(dir, "/repo/z")).toBe("EVAL-EXPT-M");
+  });
+});

@@ -40,6 +40,18 @@ counts them (first number after the prefix, all series, guaranteed free) and
 remembers cwd→series across sessions — judgment is needed at most once per
 workstream, then never again.
 
+## Rescuing a weird history vote (registry override)
+
+The history vote can latch onto ONE legacy hand-named key and make it the
+workstream series (observed: a done key `MBR-HANDOVER-SAEID` from an old era
+became the series for its repo — every new item got `MBR-HANDOVER-SAEID-<n>`).
+The escape hatch is the registry, not the code: write the cwd → series you
+actually want into `series-registry.json` next to the queue (same shape the
+harness records: `{ "<cwd>": { "series": "<PREFIX>", "updatedAt": "<iso>" } }`).
+Resolution order is registry → history → slug, so a registry entry always
+wins. Existing keys keep their names (keys are identity); only FUTURE
+allocations use the override.
+
 ## When NOT to follow this
 
 Ad-hoc subagent runs (spawns that never enter the queue) don't get keys at all —

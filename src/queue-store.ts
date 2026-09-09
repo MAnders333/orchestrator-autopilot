@@ -294,8 +294,18 @@ function historicalSeries(store: QueueStore, cwd: string): string | null {
   for (const it of Object.values(store.items)) {
     if (it.cwd !== cwd) continue;
     const m = /^([A-Za-z0-9_-]*?)(?:\d|$)/.exec(it.key);
-    const series = m?.[1].replace(/[-_]+$/, "");
+    let series = m?.[1].replace(/[-_]+$/, "");
     if (!series) continue;
+    // A DIGIT-LESS key votes only its FIRST segment as the series. The old
+    // rule let the whole key-without-digits become its own series, so one
+    // legacy key (e.g. "MBR-HANDOVER-SAEID", "AUTOPILOT-SCHEDULED-OFF")
+    // latched as the workstream identity and every new item inherited the
+    // weird prefix (observed twice: MBR-HANDOVER-SAEID-1, AUTOPILOT-
+    // WORKTREE-PRESERVATION-1).
+    if (!/\d/.test(it.key)) {
+      series = (series.split(/[-_]/)[0] || series).trim();
+      if (!series) continue;
+    }
     const cur = counts.get(series) ?? { n: 0, latest: 0 };
     counts.set(series, { n: cur.n + 1, latest: Math.max(cur.latest, Date.parse(it.updatedAt) || 0) });
   }
