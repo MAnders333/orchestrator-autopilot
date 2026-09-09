@@ -1,47 +1,44 @@
 ---
 name: queue-id-series
 description: >-
-  How to derive the id series (Jira-style prefix) for orchestrator-autopilot
-  queue items: the general rule for choosing PREFIX-<N> keys for any given
-  task/repo, plus the allocation mechanics. Load when creating queue items
-  (queue_add / queue_update) or proposing work for the orchestrator queue.
+  How queue-item ids (Jira-style PREFIX-<N> series) are allocated in the
+  orchestrator-autopilot harness — deterministic, derived from the item's cwd;
+  when (rarely) the agent picks a series, and the provisional-key flow for
+  proposals. Load when creating queue items (queue_add / queue_update) or
+  proposing work for the orchestrator queue.
 ---
 
-# Queue id series — deriving the prefix
+# Queue id series — the prefix is NOT your job
 
-Queue items are identified by Jira-style keys: `PREFIX-<N>` (e.g. `B-21`,
-`EVAL-EXPT-10`). `queue_add` ALLOCATES them — omit `key`, pass `series`, and the
-harness computes `PREFIX-<max+1>`, guaranteed free. Hand-numbering is what
-produced the duplicate-series-number incidents ("multiple B-49 items"): humans
-miss the suffixed keys (`B5-NAME`) when eyeballing a counter.
+Queue items are identified by Jira-style keys: `PREFIX-<N>` (e.g. `B-21`). The
+prefix is a **property of the workstream, and the harness resolves it
+deterministically from the item's cwd** — you do not pick it per item.
 
-## Deriving the prefix for ANY task
+## What you do
 
-The prefix identifies the **workstream, not the item type**. Decide in order:
+1. **Pass `cwd` whenever you know the target repo** (even at proposal stage).
+   The series then resolves immediately: registry → history → repo-name slug.
+   `queue_add({ title, cwd: "/x/addrl", ... })` lands in the addrl series with
+   no thought spent.
+2. **Proposals without a cwd get a provisional `Q-<n>` handle.** Fine for
+   conversation ("approve Q-3"); at the approved transition — where cwd becomes
+   mandatory — the key is automatically RENAMED into the repo's real series
+   (`Q-3` → `B-49`), the rename is recorded in the item's notes, and the tool
+   result tells you the new key. Use the NEW key afterwards.
+3. **Explicit `series` only when starting a genuinely NEW workstream** (no
+   prior items, and the repo-name slug is wrong — e.g. a sub-workstream like
+   `EVAL-EXPT` inside a larger repo). That choice is recorded for the cwd and
+   every future item inherits it.
+4. **Explicit `key` for semantic suffixes** (`B21-FINISHER`) or milestone
+   letters (`EVAL-EXPT-M3`). Explicit keys are never renamed.
 
-1. **Existing items in the target repo win.** If the store already holds items
-   with the same `cwd`, reuse the dominant series among them (a
-   `queue_list({ includeNotes: true })` scan shows which keys point where).
-   Never start a second series for the same workstream — fragmenting the
-   counter destroys its meaning (Jira-series values only exist relative to one
-   project).
-2. **No existing items → derive from the repo/project name**: a short uppercase
-   code, 2–8 chars, `A-Z 0-9 - _` (e.g. repo `addrl` → `ADDRL`; repo `atl` →
-   `ATL`). Prefer the name a teammate would recognize without a lookup table.
-3. **Sub-series for internal structure are allowed** when a workstream has a
-   strong internal axis (`EVAL-EXPT` for eval experiments inside a larger
-   product repo) — but keep hierarchies shallow (one dash-level, at most).
-4. **No workstream affinity at all → omit `series` entirely**: the default `Q`
-   series exists precisely for generic items; don't mint a new prefix per task.
+## Why not hand-pick prefixes
 
-## Rules (enforced by `queue_add` — don't restate, rely on them)
-
-- Prefix characters are normalized (`A-Z 0-9 - _`, uppercased); allocated keys
-  are plain `PREFIX-<N>`; the counting rule (first number after the prefix)
-  makes suffixed keys visible to the counter; series counters are independent.
-- **Explicit keys stay allowed** for semantic suffixes (`B21-FINISHER`) or
-  milestone letters (`EVAL-EXPT-M3`): the allocator guarantees uniqueness and
-  monotonicity, you add the human-readable hint.
+Hand-numbering produced duplicate series numbers ("multiple B-49 items"):
+humans miss suffixed keys (`B5-NAME`) when eyeballing a counter. The harness
+counts them (first number after the prefix, all series, guaranteed free) and
+remembers cwd→series across sessions — judgment is needed at most once per
+workstream, then never again.
 
 ## When NOT to follow this
 

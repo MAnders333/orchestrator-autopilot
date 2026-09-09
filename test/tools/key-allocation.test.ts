@@ -9,7 +9,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { newStore, addItem, saveStore, loadStore } from "../../src/queue-store.ts";
 import type { QueueStore, QueueItem } from "../../src/queue-store.ts";
-import { nextKeyFor, queueAdd, type QueueOpsCtx } from "../../src/tools/queue-ops.ts";
+import { nextKeyFor, queueAdd, queueUpdate, type QueueOpsCtx } from "../../src/tools/queue-ops.ts";
+import { resolveSeries, recordSeries, readSeriesRegistry, seriesSlugFor } from "../../src/queue-store.ts";
 
 function item(key: string, over: Partial<QueueItem> = {}): QueueItem {
   return {
@@ -74,6 +75,7 @@ describe("nextKeyFor — sequential series allocation", () => {
   });
 });
 
+
 describe("queue_add — key auto-allocation", () => {
   let dir: string;
   let ctx: QueueOpsCtx;
@@ -123,4 +125,67 @@ describe("queue_add — key auto-allocation", () => {
     const r = await queueAdd(ctx, { series: "B", title: "next in line" });
     expect(r.text).toContain("B-49"); // singular — the duplicate-B-49 era is over
   });
+
+  test("resolveSeries: registry → history → slug, in that order", () => {
+    const d1 = mkdtempSync(join(tmpdir(), "series-"));
+    try {
+      // slug fallback (empty store, no registry)
+      expect(resolveSeries(d1, "/x/y/addrl")).toBe("ADDRL");
+      expect(seriesSlugFor("/x/y/addrl/")).toBe("ADDRL"); // trailing slash tolerated
+      expect(seriesSlugFor("/")).toBe("Q"); // degenerate cwd
+      // history beats slug (repo renamed, old series persists)
+      const s = newStore();
+      addItem(s, item("OLDS-9-THING", { cwd: "/x/y/renamed" }));
+      addItem(s, item("OLDS-8-TWO", { cwd: "/x/y/renamed" }));
+      addItem(s, item("NEW-1-ONE", { cwd: "/x/y/renamed" }));
+      saveStore(d1, s);
+      expect(resolveSeries(d1, "/x/y/renamed")).toBe("OLDS"); // 2 vs 1 — dominant wins
+      // registry beats history
+      recordSeries(d1, "/x/y/renamed", "EXPLICIT");
+      expect(resolveSeries(d1, "/x/y/renamed")).toBe("EXPLICIT");
+      expect(Object.keys(readSeriesRegistry(d1))).toContain("/x/y/renamed");
+    } finally {
+      rmSync(d1, { recursive: true, force: true });
+    }
+  });
+
+  test("provisional Q handle at proposal → renamed into the repo's real series at approval", async () => {
+    // repo already has history → its series wins at approval
+    const s = ctx.storeOrNew();
+    addItem(s, item("B48-EARLIER", { cwd: "/repo/b" }));
+    saveStore(dir, s);
+    const added = await queueAdd(ctx, { title: "brainstormed proposal" }); // no cwd, no series → provisional Q
+    expect(added.text).toMatch(/Q-\d+/);
+    const before = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8")).items;
+    const keyBefore = Object.keys(before).find((k) => k.startsWith("Q-"))!;
+    expect(before[keyBefore].provisionalKey).toBe(true);
+    // approval WITH cwd → renamed
+    const upd = await queueUpdate(ctx, { key: keyBefore, status: "approved", scope: "do it", cwd: "/repo/b" });
+    expect(upd.text).toContain("renamed");
+    const after = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8")).items;
+    const newKey = (upd.details as { key: string }).key;
+    expect(newKey).toMatch(/^B-\d+$/); // real series, NOT Q
+    expect(after[keyBefore]).toBeUndefined();
+    expect(after[newKey].provisionalKey).toBeUndefined(); // marker cleared
+    expect(after[newKey].notes).toContain(`renamed from ${keyBefore}`);
+    // registry recorded for future adds
+    const later = await queueAdd(ctx, { title: "follow-up", cwd: "/repo/b" });
+    expect(later.text).toMatch(/^added 'B-\d+'/);
+  });
+
+  test("explicit keys are NEVER renamed at approval (deliberate naming)", async () => {
+    const r = await queueAdd(ctx, { key: "MY-KEY", title: "explicit proposal" }); // explicit, no provisional flag
+    await queueUpdate(ctx, { key: "MY-KEY", status: "approved", scope: "s", cwd: "/repo/y" });
+    const after = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8")).items;
+    expect(after["MY-KEY"]).toBeDefined(); // still MY-KEY
+    expect(after["MY-KEY"].provisionalKey).toBeUndefined();
+  });
+
+  test("provisional in the RIGHT series stays put (marker cleared, no rename)", async () => {
+    const r = await queueAdd(ctx, { title: "cwd known at proposal", cwd: "/repo/z" }); // slug series Z-1, NOT provisional
+    expect(r.text).toContain("Z-1");
+    const after = JSON.parse(readFileSync(join(dir, "queue.json"), "utf8")).items;
+    expect(after["Z-1"].provisionalKey).toBeUndefined(); // cwd was present → real series immediately
+  });
+
 });

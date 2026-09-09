@@ -50,6 +50,11 @@ export interface QueueItem {
   notes: string;
   createdAt: string;
   updatedAt: string;
+  /** true when the key was allocated PROVISIONALLY (proposal with no cwd yet →
+   *  default Q series); a later approved transition with cwd RENAMES the key
+   *  into the repo's real series. Never set for explicit keys or deliberate
+   *  series choices. */
+  provisionalKey?: boolean;
 }
 
 export interface QueueStore {
@@ -215,6 +220,100 @@ export function queryItems(store: QueueStore, q: QueueQuery = {}): Array<Partial
     }
     return base;
   });
+}
+
+// ---------------------------------------------------------------------------
+// Series registry — cwd → id series, AUTO-MAINTAINED by the framework
+// ---------------------------------------------------------------------------
+
+/** The prefix is a PROPERTY OF THE WORKSTREAM, discovered from history and
+ *  remembered by the framework — the agent's only job is to not fight it.
+ *  Resolution order (resolveSeries): registry → history (dominant series among
+ *  items with the same cwd) → repo-name slug → default "Q". Every add with a
+ *  cwd RECORDS the used series, so judgment is needed exactly once per
+ *  workstream — the first item — and never again. */
+
+export interface SeriesRegistryEntry {
+  series: string;
+  updatedAt: string;
+}
+
+function seriesRegistryPath(stateDir: string): string {
+  return join(stateDir, "series-registry.json");
+}
+
+export function readSeriesRegistry(stateDir: string): Record<string, SeriesRegistryEntry> {
+  try {
+    const p = seriesRegistryPath(stateDir);
+    if (!existsSync(p)) return {};
+    const raw = JSON.parse(readFileSync(p, "utf8")) as Record<string, SeriesRegistryEntry>;
+    return raw && typeof raw === "object" ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Record cwd → series (best-effort, never throws — a registry problem must
+ *  not fail an add; the next add simply re-derives). */
+export function recordSeries(stateDir: string, cwd: string, series: string): void {
+  try {
+    const reg = readSeriesRegistry(stateDir);
+    reg[cwd] = { series, updatedAt: new Date().toISOString() };
+    const p = seriesRegistryPath(stateDir);
+    mkdirSync(stateDir, { recursive: true });
+    const tmp = `${p}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(reg, null, 2) + "\n", "utf8");
+    renameSync(tmp, p);
+  } catch {
+    // best-effort
+  }
+}
+
+/** The slug fallback: repo basename, uppercased + sanitized. */
+export function seriesSlugFor(cwd: string): string {
+  const base = (cwd.split("/").filter(Boolean).pop() ?? "").toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+  return base || "Q";
+}
+
+/** Dominant series among existing items with the same cwd (history beats the
+ *  slug — it survives repo renames and preserves sub-series). Same counting
+ *  rule as nextKeyFor: the series is the text BEFORE the first digit
+ *  (`B48-EARLIER` → B, `EVAL-EXPT-M9` → EVAL-EXPT-M). Most frequent wins;
+ *  ties broken by most recently updated. */
+function historicalSeries(store: QueueStore, cwd: string): string | null {
+  const counts = new Map<string, { n: number; latest: number }>();
+  for (const it of Object.values(store.items)) {
+    if (it.cwd !== cwd) continue;
+    const m = /^([A-Za-z0-9_-]*?)(?:\d|$)/.exec(it.key);
+    const series = m?.[1].replace(/[-_]+$/, "");
+    if (!series) continue;
+    const cur = counts.get(series) ?? { n: 0, latest: 0 };
+    counts.set(series, { n: cur.n + 1, latest: Math.max(cur.latest, Date.parse(it.updatedAt) || 0) });
+  }
+  let best: string | null = null;
+  for (const [series, v] of counts) {
+    if (best === null) {
+      best = series;
+      continue;
+    }
+    const bv = counts.get(best)!;
+    if (v.n > bv.n || (v.n === bv.n && v.latest > bv.latest)) best = series;
+  }
+  return best;
+}
+
+/** Resolve the series for a cwd: registry → history → slug. Records nothing —
+ *  the caller records the series it actually used. */
+export function resolveSeries(stateDir: string, cwd: string): string {
+  if (!cwd) return "Q";
+  const hit = readSeriesRegistry(stateDir)[cwd];
+  if (hit?.series) return hit.series;
+  const store = loadStore(stateDir);
+  if (store) {
+    const hist = historicalSeries(store, cwd);
+    if (hist) return hist;
+  }
+  return seriesSlugFor(cwd);
 }
 
 export function itemByRunId(store: QueueStore, runId: string): QueueItem | null {

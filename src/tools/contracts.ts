@@ -10,8 +10,8 @@ export const CONTRACTS = {
   queue_add:
     "Add a new queue item (proposal by default, or approved). Notes/scope are free-form — no schema constraints on content. " +
     "Approval (status=approved) REQUIRES a complete scope + cwd. " +
-    "KEY ALLOCATION: omit `key` to get a Jira-style sequential id — pass `series` (e.g. \"B\") for PREFIX-<max+1>, or nothing for Q-<max+1>. " +
-    "Hand-numbering collides (the multiple-B-49 class); explicit keys stay allowed for semantic suffixes (B5-NAME) and must be unique.",
+    "KEY ALLOCATION is deterministic: pass `cwd` and the series resolves automatically (registry → history → repo-name slug). A proposal without cwd gets a provisional Q-<n> handle, renamed into the repo's real series at approval. " +
+    "Pass explicit `series` only when starting a NEW workstream; explicit `key` for semantic suffixes (must be unique). Hand-numbering collides — do not hand-pick numbers.",
   queue_update:
     "Update a queue item: status (validated transitions: proposal→approved/rejected/blocked (defer a candidate without approving), approved→active/rejected, " +
     "active→reviewing/failed, reviewing→done/failed/active, failed→active (recovery re-dispatch) | done (verified-complete despite the failure record), done→approved (human re-open — you found issues in your review)); " +

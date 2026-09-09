@@ -10,7 +10,7 @@
 import type { SubagentBackend } from "../backends/types.ts";
 import type { Autopilot } from "../core.ts";
 import type { AutopilotConfigFile } from "../config.ts";
-import { loadStore, saveStore, newStore, addItem, updateItem, queryItems, queueLengths, type QueueStore } from "../queue-store.ts";
+import { loadStore, saveStore, newStore, addItem, updateItem, queryItems, queueLengths, resolveSeries, recordSeries, type QueueStore } from "../queue-store.ts";
 import { isAutoDispatchable } from "../framework/auto-dispatch.ts";
 import { preserveRunWorktree } from "../framework/worktree-preservation.ts";
 
@@ -109,14 +109,24 @@ export async function queueAdd(ctx: QueueOpsCtx, params: Record<string, unknown>
     // (telemetry, handoffs, steering), so the harness must hand them out
     // collision-free instead of trusting hand-numbering.
     let key = (params.key as string | undefined)?.trim();
-    if (!key) {
-      const series = ((params.series as string | undefined) ?? "Q").replace(/[^A-Za-z0-9_-]/g, "").toUpperCase();
-      key = nextKeyFor(store, series || "Q");
-    }
+    // Series resolution: explicit `series` is a DELIBERATE choice (new
+    // workstream / re-association). Otherwise the framework derives from the
+    // item's cwd (registry → history → repo-name slug) — the agent's only job
+    // is to not fight it. Without a cwd (proposal stage) there is nothing to
+    // derive from: allocate PROVISIONALLY in the default Q series; the key is
+    // renamed into the repo's real series at the approved transition (where
+    // cwd becomes mandatory).
+    const cwd = (params.cwd as string | null) ?? null;
+    const explicitSeries = ((params.series as string | undefined) ?? "").replace(/[^A-Za-z0-9_-]/g, "").toUpperCase();
+    // Provisional = we had NEITHER an explicit series NOR a cwd to derive one
+    // from — the Q handle is a placeholder that the approved transition renames.
+    const provisional = !key && !explicitSeries && !cwd;
+    let series = explicitSeries || (cwd ? resolveSeries(ctx.stateDir, cwd) : "Q");
+    if (!key) key = nextKeyFor(store, series);
+    if (cwd) recordSeries(ctx.stateDir, cwd, series);
     if (store.items[key]) return { text: `queue_add: key '${key}' already exists — use queue_update, or omit key to auto-allocate the next number in a series`, details: {} };
     const status: "approved" | "proposal" = params.status === "approved" ? "approved" : "proposal";
     const scope = (params.scope as string) ?? "";
-    const cwd = (params.cwd as string | null) ?? null;
     if (status === "approved" && !approvalReady(scope, cwd)) {
       return { text: "queue_add: approval requires a complete scope + cwd (the scope is the worker prompt; cwd is the repo it runs in) — add as proposal or supply both", details: {} };
     }
@@ -136,6 +146,7 @@ export async function queueAdd(ctx: QueueOpsCtx, params: Record<string, unknown>
       timeoutMs: normalizeTimeoutMs(params.timeoutMs),
       attempts: 0,
       notes: (params.notes as string) ?? "",
+      ...(provisional ? { provisionalKey: true } : {}),
     });
     saveStore(ctx.stateDir, store);
     return { text: `added '${key}' (${status})`, details: {} };
@@ -156,6 +167,11 @@ export async function queueUpdate(ctx: QueueOpsCtx, params: Record<string, unkno
     if (nextStatus === "approved" && !approvalReady(nextScope, nextCwd)) {
       return { text: "queue_update: approval requires a complete scope + cwd (the scope is the worker prompt; cwd is the repo it runs in) — blocked items are for waiting, not dispatchable work", details: {} };
     }
+    // Capture the REAL series BEFORE the transition mutates the store: the
+    // renamed item itself would otherwise participate in the history vote
+    // (its fresh updatedAt wins ties) and resolve to its own provisional Q.
+    const renamingProvisional = cur.provisionalKey === true && nextStatus === "approved" && !!nextCwd;
+    const realSeries = renamingProvisional ? resolveSeries(ctx.stateDir, nextCwd) : null;
     updateItem(store, params.key as string, {
       status: params.status as never,
       blocker: params.blocker as never,
@@ -171,6 +187,32 @@ export async function queueUpdate(ctx: QueueOpsCtx, params: Record<string, unkno
       notes: params.notes as string | undefined,
     });
     saveStore(ctx.stateDir, store);
+
+    // PROVISIONAL-KEY RENAME at approval: a proposal allocated without a cwd
+    // carries a provisional Q-<n> handle; the approved transition is where
+    // cwd becomes mandatory — so it is where the item gets its REAL series
+    // (resolved pre-mutation above). Explicit keys are never renamed, and a
+    // provisional key already in the right series just loses its marker.
+    const updated = store.items[params.key as string];
+    if (renamingProvisional && updated && realSeries) {
+      recordSeries(ctx.stateDir, updated.cwd!, realSeries);
+      const currentSeries = /^([A-Za-z0-9_-]+?)-\d+/.exec(updated.key)?.[1] ?? "";
+      if (currentSeries !== realSeries) {
+        const newKey = nextKeyFor(store, realSeries);
+        const renameNote = `(renamed from ${updated.key} at approval — provisional handle → real series ${realSeries})`;
+        store.items[newKey] = {
+          ...updated,
+          key: newKey,
+          provisionalKey: undefined,
+          notes: updated.notes ? `${updated.notes}\n\n${renameNote}` : renameNote,
+        };
+        delete store.items[updated.key];
+        saveStore(ctx.stateDir, store);
+        return { text: `updated '${params.key}' → approved; provisional key renamed to '${newKey}' (series ${realSeries})`, details: { renamedFrom: params.key, key: newKey } };
+      }
+      updated.provisionalKey = undefined;
+      saveStore(ctx.stateDir, store);
+    }
     return { text: `updated '${params.key}'`, details: {} };
   } catch (e) {
     return err(e, "queue_update");
