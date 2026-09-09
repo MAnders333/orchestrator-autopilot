@@ -333,7 +333,7 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
 
   tools.autopilot = tool({
     description:
-      "Toggle or query the orchestrator autopilot for THIS session. on: enable ticks + the intake/dispatch/review nudges; off: disable them now, or schedule with 'off in <duration>' (e.g. 'in 90s', 'in 30m', 'in 1h30m', max 24h — autopilot stays ON until then); status: show the current state + capacity; capacity <n>: set the worker slot limit. The toggle is per-session (like the pi /autopilot command).",
+      "Toggle or query the orchestrator autopilot for THIS session. on: enable ticks + the intake/dispatch/review nudges; off: disable them now, or schedule with 'off in <duration>' (e.g. 'in 90s', 'in 30m', 'in 1h30m', max 24h — autopilot stays ON until then); status: show the current state + capacity; capacity <n>: set the worker slot limit. The toggle is per-session.",
     args: {
       action: tool.schema.string().describe("on | off | status | capacity"),
       value: tool.schema.string().optional().describe("capacity value (when action=capacity); for action=off: an optional duration like 'in 30m' to schedule the shutdown"),

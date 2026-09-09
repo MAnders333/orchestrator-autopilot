@@ -11,6 +11,38 @@ the machinery is shared.
 
 ## Getting started
 
+### pi (official package)
+
+```bash
+pi install npm:orchestrator-autopilot        # or git:github.com/MAnders333/orchestrator-autopilot
+```
+
+Pi loads ONLY the pi adapter (`src/hosts/pi-extension.ts`) plus the shared
+skills and the `/orchestrate` prompt — the manifest in `package.json` scopes
+this; opencode code is inert in a pi install. Prerequisite: the pi-subagents
+extension must be installed (the backend spawns workers through its RPC).
+
+Then, in a session: `/autopilot on` — the activation command (ships with the
+extension). It enables the tick loop and injects `/orchestrate`, the operating
+program (shipped as a package prompt). `/orchestrate` can also be run
+standalone without the harness.
+
+### opencode (npm plugin)
+
+`opencode.jsonc`:
+
+```jsonc
+{ "plugin": ["orchestrator-autopilot"] }
+```
+
+The package's default export IS the opencode plugin (`src/hosts/opencode-entry.ts`
+→ `OrchestratorAutopilot`); pi code is not reachable from that entry. Requires
+`OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=1` for detached worker runs. The
+`autopilot` tool toggles the harness; the `/orchestrate` command comes from
+your opencode command config (projected separately).
+
+### Local development (both hosts)
+
 1. Clone + install: `bun install` (Bun required; the test suite is hermetic).
 2. Wire the host you use:
    - **pi**: add `src/hosts/pi-extension.ts` to your settings `extensions` array.
