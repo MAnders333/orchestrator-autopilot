@@ -182,10 +182,12 @@ export class DecisionPanel implements Component, Focusable {
   render(width: number): string[] {
     if (this.cached && this.cached.width === width) return this.cached.lines;
 
+    const inner = Math.max(10, width - 2); // the box frame takes 2 columns
     const lines: string[] = [];
     const th = this.opts.theme;
-    const t = (s: string) => truncateToWidth(s, width);
-    const wrap = (s: string, pad = 2) => wrapTextWithAnsi(s, width - pad).map((l) => t(" ".repeat(pad) + l));
+    const t = (s: string) => truncateToWidth(s, inner);
+    const wrap = (s: string, pad = 2) => wrapTextWithAnsi(s, inner - pad).map((l) => t(" ".repeat(pad) + l));
+    const border = (s: string) => th.fg("border", s);
 
     // Header + tab bar (with live pending counts per view)
     lines.push(t(`${th.fg("accent", th.bold(" Decision panel"))}${th.fg("dim", " — the human decision inbox (fed from queue state)")}`));
@@ -195,10 +197,18 @@ export class DecisionPanel implements Component, Focusable {
       return v.kind === this.kind ? th.fg("accent", th.bold(`▸ ${label}`)) : th.fg("dim", label);
     });
     lines.push(t(tabParts.join(th.fg("muted", "   "))));
-    lines.push(th.fg("border", "─".repeat(Math.max(10, width - 2))));
+    lines.push("");
 
     if (this.items.length === 0) {
-      lines.push(th.fg("success", " Nothing awaiting you here — all clear ✓"));
+      // fuller empty state — fills the window and shows BOTH views' counts
+      lines.push(th.fg("success", "  ✓ Nothing awaiting you here — this view is all clear"));
+      lines.push("");
+      const other = VIEWS.filter((v) => v.kind !== this.kind)[0];
+      lines.push(th.fg("dim", `  ${other.label}: ${this.counts[other.kind]} — tab to check`));
+      lines.push("");
+      lines.push(th.fg("dim", "  Decisions here apply straight to the queue (queue_update semantics);"));
+      lines.push(th.fg("dim", "  queue_list shows the same state at any time. New proposals land here"));
+      lines.push(th.fg("dim", "  after an intake sweep; reviewed work lands here after the AI review."));
     } else {
       // scroll window around the selection
       const start = Math.max(0, Math.min(this.sel - 3, this.items.length - WINDOW));
@@ -224,8 +234,8 @@ export class DecisionPanel implements Component, Focusable {
     if (this.inputFor) {
       const label = this.inputFor === "refine" ? " Refine scope:" : " Re-dispatch findings:";
       lines.push(t(th.fg("accent", th.bold(label))));
-      const inputLines = this.input.render(width);
-      lines.push(...inputLines.map((l) => " " + l));
+      const inputLines = this.input.render(inner - 2);
+      lines.push(...inputLines.map((l) => "  " + l));
     }
 
     // Last decision result
@@ -239,16 +249,22 @@ export class DecisionPanel implements Component, Focusable {
       this.inputFor !== null
         ? "enter submit · esc cancel input"
         : `↑↓ select · t/tab view · a approve · r reject · d defer · e refine · x re-dispatch · esc close`;
-    lines.push(th.fg("dim", t(` ${footer}`)));
-    lines.push(th.fg("border", "─".repeat(Math.max(10, width - 2))));
+    lines.push(...wrap(th.fg("dim", ` ${footer}`), 1));
 
-    for (const line of lines) {
+    // Frame: a FULL boundary box — all four sides, not just top/bottom
+    const boxed: string[] = [border(`╭${"─".repeat(inner)}╮`)];
+    for (const l of lines) {
+      const pad = Math.max(0, inner - visibleWidth(l));
+      boxed.push(border("│") + l + " ".repeat(pad) + border("│"));
+    }
+    boxed.push(border(`╰${"─".repeat(inner)}╯`));
+    for (const line of boxed) {
       if (visibleWidth(line) > width) {
         throw new Error(`panel render overflow: ${visibleWidth(line)} > ${width}`);
       }
     }
-    this.cached = { width, lines };
-    return lines;
+    this.cached = { width, lines: boxed };
+    return boxed;
   }
 }
 
