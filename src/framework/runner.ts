@@ -15,9 +15,11 @@ import { storeToSnapshot, type Autopilot } from "../core.ts";
 import type { CompletionEvent, Tick } from "../types.ts";
 import { loadAutopilotConfig } from "../config.ts";
 import { loadStore, itemByRunId } from "../queue-store.ts";
+import { formatDurationMs } from "../duration.ts";
 import { flagForReview } from "./flag-review.ts";
 import { createTickRouter, type TickHostState } from "./tick-router.ts";
 import { autoDispatchEligible, autoRedispatch, autoReview } from "./auto-dispatch.ts";
+import { autoRecoverFails } from "./auto-recovery.ts";
 import { decisionTick } from "./panels.ts";
 import { humanReviewTargetsFor, preserveActiveItems, prunePreservedRefs, preserveRunWorktree } from "./worktree-preservation.ts";
 import { checkMainWrites } from "./main-write-guard.ts";
@@ -55,6 +57,17 @@ export interface RunnerOptions {
    *  itself — the orchestrator keeps the judgment (intake, approval,
    *  high-risk checkpoints). */
   autoDispatch?: boolean;
+  /** AUTOMATIC RECOVERY of failed items (AUTO-RECOVER-FAILS). Default on with
+   *  auto-dispatch; the per-cause policy + bounds live in auto-recovery.ts.
+   *  backoffMs/maxRecoveries/degraded window are injectable for tests and for
+   *  a slow-provider deployment. */
+  recovery?: {
+    enabled?: boolean;
+    backoffMs?: number;
+    maxRecoveries?: number;
+    spawnFailureThreshold?: number;
+    degradedCooldownMs?: number;
+  };
 }
 
 export interface FrameworkRunner {
@@ -206,10 +219,69 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     const r = router.send(t.message);
     if (r === "deferred") queueDeferred(t.message, "tick", t); // hold the ENGINE tick — its facts refresh at delivery
   };
+  /** Framework-crafted one-line ticks (recovery announcements) through the
+   *  SAME gate: deferred → held for the settle flush; never lost. */
+  const sendTickText = (message: string): void => {
+    const r = router.send(message, { bypassCooldown: true });
+    if (r === "deferred") queueDeferred(message, "tick");
+  };
 
   // The auto-actions opt-out: env (AUTOPILOT_AUTO_DISPATCH=0) or the option.
   const autoDispatchOn = opts.autoDispatch ?? process.env.AUTOPILOT_AUTO_DISPATCH !== "0";
   const cfg = () => loadAutopilotConfig(opts.stateDir);
+  // AUTOMATIC RECOVERY (AUTO-RECOVER-FAILS): the failed lane's deterministic
+  // policy. Gated with the other auto-actions; the engine (auto-recovery.ts)
+  // owns the per-cause plan + bounds, this runner owns DELIVERY (the
+  // `[orch-tick: recover]` announcements) and the short backoff TIMER.
+  const recoveryOn = autoDispatchOn && (opts.recovery?.enabled ?? true);
+  let recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  let recoveryTimerAt = 0;
+  const scheduleRecoveryAt = (at: number | null): void => {
+    if (at === null || !recoveryOn) return;
+    // An earlier (or equal) pass is already armed — leave it.
+    if (recoveryTimer && recoveryTimerAt <= at) return;
+    if (recoveryTimer) clearTimeout(recoveryTimer);
+    recoveryTimerAt = at;
+    recoveryTimer = setTimeout(() => {
+      recoveryTimer = null;
+      recoveryTimerAt = 0;
+      void runRecoveryPass();
+    }, Math.max(0, at - Date.now()));
+  };
+  const runRecoveryPass = async (totalActive?: number): Promise<void> => {
+    // The recovery timer fires outside the sweep's own gate — honour BOTH the
+    // structural opt-out and the live autopilot toggle there too (a pending
+    // backoff scheduled before an OFF must not spawn).
+    if (!recoveryOn || !enabled()) return;
+    let outcome;
+    try {
+      outcome = await autoRecoverFails(opts.stateDir, opts.backend, {
+        backoffMs: opts.recovery?.backoffMs,
+        maxRecoveries: opts.recovery?.maxRecoveries,
+        spawnFailureThreshold: opts.recovery?.spawnFailureThreshold,
+        degradedCooldownMs: opts.recovery?.degradedCooldownMs,
+        maxSlots: cfg().maxSlots,
+        totalActive,
+      });
+    } catch {
+      return; // recovery must never break a sweep
+    }
+    for (const r of outcome.recovered) {
+      const budget = r.budgetMs ? `, budget ${formatDurationMs(r.budgetMs)}` : "";
+      sendTickText(`[orch-tick: recover] re-dispatched ${r.key} (attempt ${r.attempt}, ${r.cause}${budget})`);
+    }
+    for (const e of outcome.escalated) {
+      sendTickText(
+        `[orch-tick: recover] ${e.key} exhausted auto-recovery (${e.attempts} attempt${e.attempts === 1 ? "" : "s"}, ${e.cause}) — it STAYS failed. Verify its pi-parallel-* branch, then your call: re-dispatch manually with a bigger budget / apply findings / drop. Not a user request; respond ≤2 lines.`,
+      );
+    }
+    if (outcome.heldNotice) {
+      sendTickText(
+        `[orch-tick: recover] DEGRADED WINDOW: ${outcome.spawnFailures} consecutive provider failures (bare 400 / empty api_error / hang-then-die) — auto-recovery is PAUSED for a cooldown instead of churning retries. Failed items are held, not lost; a probe resumes automatically. Tell the user the provider looks degraded. Not a user request; respond ≤2 lines.`,
+      );
+    }
+    scheduleRecoveryAt(outcome.nextAt);
+  };
   // QUEUED harness info: auto-actions (dispatched / reviewed / re-dispatched)
   // accumulate into ONE consolidated tick, flushed at the next natural boundary
   // (the agent settles / the timer) instead of interrupting mid-turn. If the
@@ -345,6 +417,11 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
         // silent — the tick still nudges the manual cases
       }
     }
+    // AUTOMATIC RECOVERY of failed items (AUTO-RECOVER-FAILS): the failed lane
+    // re-dispatches by policy AFTER the backoff; running it after auto-dispatch
+    // lets the engine's slot math see the just-filled slots. The pass arms its
+    // own backoff timer for the next due attempt.
+    await runRecoveryPass(effectiveTotalActive);
     const result = autopilot.sweep(source, Date.now(), fleet ? { totalActive: fleet.totalActive } : undefined);
     if (result.tick) sendTick(result.tick);
     // timer/activate safety net: stuck ai-review items get a review nudge —
@@ -497,6 +574,8 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       timer = null;
       if (retryTimer) clearTimeout(retryTimer);
       retryTimer = null;
+      if (recoveryTimer) clearTimeout(recoveryTimer);
+      recoveryTimer = null;
     },
   };
 }

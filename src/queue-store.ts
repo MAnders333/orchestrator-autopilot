@@ -21,12 +21,16 @@ export type BlockerReason = "parked" | "serialized" | "merge" | "decision" | nul
  *  nothing about the work, and the re-dispatch must run with a BIGGER budget.
  *  `verdict`: the run ended with an unsuccessful verdict/exit (incl. a review
  *  FAIL reaching the attempts cap). `zombie`: the run's completion event was
- *  lost (fleet idle past grace). null = not failed, or a legacy/pre-governance
- *  failure with no recorded cause. */
-export type FailCause = "budget-capped" | "verdict" | "zombie";
+ *  lost (fleet idle past grace). `spawn`: the provider/infra layer failed the
+ *  run — rejected AT SPAWN (bare 400) or died mid-run producing NO deliverable
+ *  (empty api_error) — so the failure says nothing about the work and the
+ *  recovery is a bounded provider retry (2× then escalate, AUTO-RECOVER-FAILS).
+ *  null = not failed, or a legacy/pre-governance failure with no recorded
+ *  cause. */
+export type FailCause = "budget-capped" | "verdict" | "zombie" | "spawn";
 
 export function isFailCause(v: unknown): v is FailCause {
-  return v === "budget-capped" || v === "verdict" || v === "zombie";
+  return v === "budget-capped" || v === "verdict" || v === "zombie" || v === "spawn";
 }
 
 const STATUSES: QueueStatus[] = ["proposal", "approved", "blocked", "active", "ai-review", "human-review", "failed", "done", "rejected"];
@@ -66,6 +70,19 @@ export interface QueueItem {
    *  run. The capped-failure path ALSO writes a human note, so both the
    *  machine flag and the operator-visible text say 'budget-capped'. */
   failCause?: FailCause | null;
+  /** AUTO-RECOVER-FAILS bookkeeping: how many automatic recovery attempts
+   *  this item has consumed (spawn calls made by the recovery engine). Bounded
+   *  by the recovery policy per cause + the global cap (default 2) — an item
+   *  that exhausts them stays `failed` with a one-time escalation tick. Counts
+   *  FAILED attempts too (a spawn the provider rejected consumed an attempt). */
+  recoveries?: number;
+  /** Epoch ms before which the next automatic recovery attempt must NOT run
+   *  (the short backoff after a failure). null = eligible on the next pass. */
+  recoveryNotBefore?: number | null;
+  /** true once the recovery budget is spent and the escalation tick fired —
+   *  the item stays failed for the orchestrator/human to act on. Prevents a
+   *  re-escalation tick on every sweep. */
+  recoveryEscalated?: boolean;
   /** free-form notes/description — no schema constraints on content */
   notes: string;
   createdAt: string;
@@ -136,6 +153,9 @@ export function loadStore(stateDir: string): QueueStore | null {
         if (it.timeoutMs === undefined) it.timeoutMs = null;
         if (it.attempts === undefined) it.attempts = 0;
         if (it.failCause === undefined) it.failCause = null;
+        if (it.recoveries === undefined) it.recoveries = 0;
+        if (it.recoveryNotBefore === undefined) it.recoveryNotBefore = null;
+        if (it.recoveryEscalated === undefined) it.recoveryEscalated = false;
         if (it.runId === undefined) it.runId = null;
         if (it.cwd === undefined) it.cwd = null;
         if (it.blocker === undefined) it.blocker = null;
@@ -402,6 +422,9 @@ export interface UpdatePatch {
   timeoutMs?: number | null;
   attempts?: number;
   failCause?: FailCause | null;
+  recoveries?: number;
+  recoveryNotBefore?: number | null;
+  recoveryEscalated?: boolean;
   title?: string;
   scope?: string;
   cwd?: string | null;
@@ -431,6 +454,11 @@ export function updateItem(store: QueueStore, key: string, patch: UpdatePatch, n
   // (A metadata-only patch with status undefined leaves the cause alone, as
   // does a re-statement of status failed while the item stays failed.)
   if (to !== undefined && to !== "failed") clean.failCause = null;
+  // Leaving `failed` also drops the recovery SCHEDULING gate (the backoff is
+  // per-failure-episode) — a manual re-dispatch or a recovery must never
+  // inherit a stale "not before" instant. The attempt COUNTER + the escalation
+  // flag deliberately persist (the recovery bound spans the item's history).
+  if (to !== undefined && to !== "failed" && clean.recoveryNotBefore === undefined) clean.recoveryNotBefore = null;
   // done/human-review/failed are terminal-ish for their runs: the AI review
   // is over at human-review, so clear stale run refs (a done item must not
   // keep pointing at a dead worker; the FAIL flip already nulls them; this

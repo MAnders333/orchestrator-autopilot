@@ -24,6 +24,7 @@
 import { loadStore, saveStore, updateItem, type QueueItem } from "../queue-store.ts";
 import type { SubagentBackend } from "../backends/types.ts";
 import { preserveRunWorktree } from "./worktree-preservation.ts";
+import { isProviderDegraded, recordProviderFailure, recordProviderSuccess } from "./recovery-state.ts";
 
 /** B26 rule as a testable PREDICATE: a subagent tool call is a worker spawn
  *  WITHOUT worktree isolation — the class that breaks parallel workers (B20's
@@ -88,6 +89,10 @@ export async function autoDispatchEligible(
 ): Promise<Array<{ key: string; runId: string }>> {
   const store = loadStore(stateDir);
   if (!store) return [];
+  // DEGRADED-WINDOW HOLD (AUTO-RECOVER-FAILS): while the provider is failing
+  // spawns back-to-back, do NOT keep churning auto-dispatches into a dead
+  // provider — the recovery engine emits the user tick that pauses retries.
+  if (isProviderDegraded(stateDir)) return [];
   const eligible = Object.values(store.items)
     .filter(isAutoDispatchable)
     .sort((a, b) => (a.updatedAt < b.updatedAt ? -1 : 1)); // oldest first
@@ -100,7 +105,12 @@ export async function autoDispatchEligible(
       // The item's recorded budget rides along — harness dispatches must not
       // silently fall back to the runtime default (the timeout-plumbing fix).
       const runId = await backend.spawn(workerTask(item), { cwd: item.cwd!, timeoutMs: item.timeoutMs ?? undefined });
-      if (!runId) continue;
+      if (!runId) {
+        // A falsy run id is a provider-layer rejection too — same hold signal.
+        recordProviderFailure(stateDir);
+        break;
+      }
+      recordProviderSuccess(stateDir);
       updateItem(store, item.key, { status: "active", runId });
       dispatched.push({ key: item.key, runId });
       try {
@@ -109,6 +119,9 @@ export async function autoDispatchEligible(
         // preservation never breaks dispatch
       }
     } catch {
+      // bare-400 / infra at spawn: count the provider failure (degraded-window
+      // hold) and stop the batch — the orchestrator/recovery handles it.
+      recordProviderFailure(stateDir);
       break; // a spawn failure stops the batch — the orchestrator handles it
     }
   }

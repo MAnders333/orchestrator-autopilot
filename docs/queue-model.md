@@ -114,6 +114,8 @@ The governance layer makes that budget **visible and recoverable**:
 Reason vocabulary: ticks arrive as `[orch-tick: <reason>]` — `dispatch` /
 `intake` / `review` / `failure` (a run failed; re-dispatch or recover) /
 `budget` (an active run is past ~75% of its wall-clock budget) /
+`recover` (automatic recovery of a failed item — re-dispatched /
+escalated / degraded-window hold; see below) /
 `main-write` (a main-branch write landed while an item referencing that repo
 was not yet human-approved — a MAIN-IMMUTABILITY violation; SHA + offending
 key in the message).
@@ -187,3 +189,39 @@ key in the message).
   and who wrote it, and keeps recovery on the branch — the only legitimate
   main-write path is the post-approval merge-finisher (see Shipping above).
 - **blocked** items never trigger ticks (they are waiting by design).
+
+## Automatic recovery of failed items (AUTO-RECOVER-FAILS)
+
+No failed item sits silent: the harness acts on the `failed` lane itself,
+deterministically, by the item's recorded `failCause`, after a short backoff
+(default 30s):
+
+- **`budget-capped`** → re-dispatch with a BIGGER budget (`timeoutMs × 1.5`,
+  capped at 3h; a cap-less run grows from the observed 30-min runtime default).
+- **`verdict` / `zombie`** → ONE recovery re-dispatch carrying the **P5**
+  context (check recoverability on the `pi-parallel-<runid>-0` branch BEFORE
+  redoing anything; commit early on the branch; never main).
+- **`spawn` / infra** (the provider rejected the run at spawn — bare 400 /
+  empty api_error) → retry up to **2×** with backoff, then ESCALATE.
+- **Bounds**: every attempt (including a spawn the provider REJECTED)
+  increments the item's `recoveries`; once the per-cause cap (clamped to the
+  global `MAX_RECOVERIES` = 2) is spent the item STAYS `failed` and gets a
+  one-time escalation tick (`recoveryEscalated` prevents re-nagging).
+- **Degraded-window hold**: consecutive provider failures (spawn throws, or a
+  hang-then-die zombie pattern) trip a hold — retries and auto-dispatch PAUSE
+  and one `[orch-tick: recover] DEGRADED WINDOW …` tick tells the user, instead
+  of churning re-dispatches into a dead provider. The hold self-heals: after a
+  cooldown the next pass PROBES once; a successful spawn resets the counter.
+- **Announcements**: each move is one line —
+  `[orch-tick: recover] re-dispatched <key> (attempt N, <cause>, budget <dur>)`
+  (or `… exhausted auto-recovery (N attempts, cause) — it STAYS failed …`).
+- **Recovered items carry their branch** (AUTO-SHIP-ON-DONE): the re-dispatch
+  preserves the new run's parallel-branch tip exactly like every other lane,
+  and the item still flows `active → ai-review → human-review`. Recovery NEVER
+  short-circuits the approval gate and NEVER touches main — shipping remains
+  the post-`done` merge-finisher lane.
+
+Recovery bookkeeping lives on the item (`recoveries`, `recoveryNotBefore`,
+`recoveryEscalated`); provider health lives in `recovery-state.json`
+(`providerFailures`, cooldown). Neither is operator-editable — the harness
+owns them, like `attempts`/`failCause`.

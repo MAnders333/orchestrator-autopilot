@@ -152,8 +152,10 @@ export class Autopilot {
             const capNote = failCause === "budget-capped"
               ? `[budget-capped] ${new Date(now).toISOString()} — worker run ${topRunId} hit the item's wall-clock budget` +
                 (it.timeoutMs ? ` (cap ${formatDurationMs(it.timeoutMs)}, timeoutMs ${it.timeoutMs}ms)` : " (runtime default)") +
-                ` and was CUT OFF mid-task — this is a CAP, not a verdict on the work. Partial work may exist on the pi-parallel-* branch (verify before re-dispatch). RE-DISPATCH WITH A BIGGER BUDGET: queue_update('${it.key}', {timeoutMs: <larger than ${it.timeoutMs ? `${it.timeoutMs}ms` : "the previous cap"}>}) then queue_dispatch — the recorded budget rides every dispatch lane.`
-              : `[failed: verdict] ${new Date(now).toISOString()} — worker run ${topRunId} ended unsuccessfully (not budget-capped). Read its output; verify partial work on the pi-parallel-* branch before re-dispatching (failed items are re-dispatchable: queue_dispatch).`;
+                ` and was CUT OFF mid-task — this is a CAP, not a verdict on the work. Partial work may exist on the pi-parallel-* branch (verify before re-dispatch). RE-DISPATCH WITH A BIGGER BUDGET: queue_update('${it.key}', {timeoutMs: <larger than ${it.timeoutMs ? `${it.timeoutMs}ms` : "the previous cap"}>}) then queue_dispatch — the recorded budget rides every dispatch lane (the harness also auto-recovers capped items with a bigger budget).`
+              : failCause === "spawn"
+                ? `[failed: spawn] ${new Date(now).toISOString()} — worker run ${topRunId} died at the provider/infra layer (bare 400 / empty api_error — no deliverable produced), not a verdict on the work. The harness AUTO-RECOVERS with backoff (bounded retries, then escalates). Verify partial work on the pi-parallel-* branch.`
+                : `[failed: verdict] ${new Date(now).toISOString()} — worker run ${topRunId} ended unsuccessfully (not budget-capped). Read its output; verify partial work on the pi-parallel-* branch before re-dispatching (failed items are re-dispatchable: queue_dispatch).`;
             updateItem(store, it.key, {
               status: "failed",
               failCause,
@@ -191,6 +193,7 @@ export class Autopilot {
         const cap = item?.timeoutMs ?? null;
         domainEvents.push({ name: "orch:item-failed", data: { key: flippedKey, runId: topRunId, cause: failCause, timeoutMs: cap } });
         const capped = failCause === "budget-capped";
+        const infra = failCause === "spawn";
         return {
           tick: {
             reason: "failure",
@@ -198,7 +201,9 @@ export class Autopilot {
               ? `[orch-tick: failure] ${flippedKey} FAILED — its worker run ${topRunId.slice(0, 8)} hit the item's wall-clock budget cap` +
                 (cap ? ` (${formatDurationMs(cap)})` : "") +
                 ` and was CUT OFF mid-task (budget-capped, NOT a verdict on the work). Verify partial work on the pi-parallel-* branch, then RE-DISPATCH WITH A BIGGER BUDGET: queue_update('${flippedKey}', {timeoutMs: ${cap ? `> ${cap}` : "<a larger budget>"}}) then queue_dispatch (or let auto-dispatch take it — the recorded budget rides every lane). Respond ≤2 lines.`
-              : `[orch-tick: failure] ${flippedKey} FAILED — its worker run ${topRunId.slice(0, 8)} ended unsuccessfully (verdict/exit, not budget-capped). Read the run's output and verify partial work on the pi-parallel-* branch before re-dispatching (failed items are re-dispatchable: queue_dispatch). Respond ≤2 lines.`,
+              : infra
+                ? `[orch-tick: failure] ${flippedKey} FAILED — its worker run ${topRunId.slice(0, 8)} died at the provider/infra layer (bare 400 / empty api_error, no deliverable) — NOT a verdict on the work. The harness AUTO-RECOVERS with a short backoff (bounded retries, then escalates); verify partial work on the pi-parallel-* branch. Respond ≤2 lines.`
+                : `[orch-tick: failure] ${flippedKey} FAILED — its worker run ${topRunId.slice(0, 8)} ended unsuccessfully (verdict/exit, not budget-capped). Read the run's output and verify partial work on the pi-parallel-* branch before re-dispatching (failed items are re-dispatchable: queue_dispatch). Respond ≤2 lines.`,
             facts: {
               key: flippedKey,
               outcome: "failed",
@@ -798,5 +803,22 @@ function workerFailCause(ev: CompletionEvent, timeoutMs: number | null | undefin
     const startedAt = Date.parse(updatedAt || "");
     if (Number.isFinite(startedAt) && now - startedAt >= timeoutMs) return "budget-capped";
   }
+  // PROVIDER/INFRA (AUTO-RECOVER-FAILS): a run that ended unsuccessful with NO
+  // deliverable text at all — the provider returned an empty api_error / the
+  // session produced nothing. That is not a verdict on the work, so it gets the
+  // bounded provider-retry recovery (2× then escalate). Detected only when the
+  // event carries a results array whose entries have no output AND no summary;
+  // an event with no results at all stays a verdict (legacy/unenriched runs).
+  if (infraNoOutput(ev)) return "spawn";
   return "verdict";
+}
+
+/** true when the completion carries results but produced NO output text. */
+function infraNoOutput(ev: CompletionEvent): boolean {
+  if (typeof ev.summary === "string" && ev.summary.trim()) return false;
+  if (!Array.isArray(ev.results) || ev.results.length === 0) return false;
+  return ev.results.every((r) => {
+    const out = (r as { output?: unknown })?.output;
+    return !(typeof out === "string" && out.trim());
+  });
 }
