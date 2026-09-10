@@ -460,6 +460,7 @@ export default function (pi: ExtensionAPI) {
       timeoutMs: Type.Optional(Type.Number()),
       dispatchClass: Type.Optional(Type.String({ description: "worker (default) | finisher — use 'finisher' for a MERGE FINISHER that writes into the cwd's checkout instead of its worktree; success is then judged on the declared source landing there, not on worktree edits" })),
       finisherSource: Type.Optional(Type.String({ description: "the branch/tag/sha this finisher must land in cwd (e.g. pi-parallel-<runid>-0). REQUIRED for the landed-evidence path: without it a runtime 'no edits in the worktree' verdict fails the run as usual" })),
+      overrideCapacity: Type.Optional(Type.Boolean({ description: "dispatch even though the fleet is at/above maxSlots. Default false = the dispatch is REFUSED at capacity; true is a deliberate over-subscription (recorded in the result) — use it when you know better than the cap, not routinely" })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const r = await queueDispatch(opsFor(ctx), params as never);

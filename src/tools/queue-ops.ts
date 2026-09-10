@@ -12,7 +12,7 @@ import type { Autopilot } from "../core.ts";
 import type { LoadedAutopilotConfig } from "../config.ts";
 import { loadStore, newStore, mutateStore, addItem, updateItem, queryItems, queueLengths, resolveSeries, recordSeries, isDispatchClass, type DispatchClass, type QueueStore } from "../queue-store.ts";
 import { appendOverride, captureFinisherBaseline } from "../finisher-evidence.ts";
-import { isAutoDispatchable } from "../framework/auto-dispatch.ts";
+import { effectiveOccupiedSlots, isAutoDispatchable } from "../framework/auto-dispatch.ts";
 import { reviewerRunAlive } from "../framework/run-liveness.ts";
 import { preserveRunWorktree } from "../framework/worktree-preservation.ts";
 
@@ -293,8 +293,31 @@ export async function queueUpdate(ctx: QueueOpsCtx, params: Record<string, unkno
   }
 }
 
+/** CAPACITY GATE for the manual lane (KEY: AUTOPILOT-48).
+ *  The harness lane has always honoured maxSlots (auto-dispatch's freeSlots);
+ *  `queue_dispatch` — the lane MOST work actually runs through — consulted it
+ *  nowhere: a live queue_list read occupied 11 / totalActive 5 against
+ *  maxSlots 3 with nothing refusing, and ~8 concurrent workers had already
+ *  produced provider-level failures that day. So the cap BINDS here too:
+ *  refuse at/above capacity, and name the one-parameter override in the same
+ *  breath. Warn-and-proceed was rejected — the failure this item exists for is
+ *  an orchestrator acting on capacity facts it did not re-read, and a warning
+ *  it can ignore reproduces exactly that. Leaving it unconstrained keeps the
+ *  cap decorative in the lane that matters. The override keeps the deliberate
+ *  path the orchestrator relies on when it knows better than the harness, so
+ *  no work is stranded — it just becomes a decision instead of an accident. */
+function capacityRefusal(occupied: number, maxSlots: number): string {
+  return (
+    `queue_dispatch: AT CAPACITY — ${occupied} of ${maxSlots} worker slots occupied, nothing dispatched. ` +
+    `Over-subscription is not free (concurrent-worker pileups have caused provider-level failures). ` +
+    `Deliberate override: re-call with overrideCapacity: true (the dispatch proceeds and is marked as over-capacity). ` +
+    `Or raise the cap for everyone: /autopilot capacity <n>. Or wait for a slot — a completion frees one and the harness re-dispatches.`
+  );
+}
+
 /** queue_dispatch — spawn the worker (worktree isolation, fail-closed repo
- *  check) AND record approved→active + runId atomically. */
+ *  check) AND record approved→active + runId atomically. Refuses above the
+ *  fleet cap unless overrideCapacity is passed (see capacityRefusal). */
 export async function queueDispatch(ctx: QueueOpsCtx, params: Record<string, unknown>): Promise<ToolResult> {
   try {
     const store = ctx.storeOrNew();
@@ -306,6 +329,33 @@ export async function queueDispatch(ctx: QueueOpsCtx, params: Record<string, unk
     } else if (item.status !== "ai-review" && item.status !== "failed") {
       return { text: `queue_dispatch: '${key}' is ${item.status}, not dispatchable`, details: {} };
     }
+    // CAPACITY GATE — before the repo check and the spawn, so a refusal costs
+    // nothing. The item being dispatched is approved/ai-review/failed (never
+    // `active`), so it is not itself part of the occupied count.
+    const overrideCapacity = params.overrideCapacity === true;
+    const maxSlots = ctx.cfg().maxSlots;
+    let fleetTotalActive: number | null = null;
+    try {
+      // A failing/absent fleet view is UNKNOWN, never a fake 0 — the store and
+      // the engine ledger still bind the count below.
+      fleetTotalActive = (await ctx.backend.fleetStatus())?.totalActive ?? null;
+    } catch {
+      fleetTotalActive = null;
+    }
+    const occupied = effectiveOccupiedSlots(ctx.stateDir, {
+      ledgerRunning: ctx.autopilot().status().running,
+      fleetTotalActive,
+    });
+    // An unreadable/absent cap FAILS OPEN: a missing config must never strand a
+    // dispatch (the harness lane treats it the same way — a default, not a stop).
+    const capBinds = Number.isFinite(maxSlots) && maxSlots >= 1;
+    if (capBinds && occupied >= maxSlots && !overrideCapacity) {
+      return { text: capacityRefusal(occupied, maxSlots), details: { occupied, maxSlots, refused: "capacity" } };
+    }
+    const overCapacityNote =
+      capBinds && occupied >= maxSlots
+        ? ` WARNING: dispatched ABOVE capacity by explicit override (${occupied + 1} running vs maxSlots ${maxSlots}) — deliberate over-subscription; concurrent-worker pileups have caused provider-level failures. Raise the cap (/autopilot capacity <n>) if this is the new normal.`
+        : "";
     const cwd = (params.cwd as string | undefined) ?? ctx.sessionCwd ?? process.cwd();
     const check = await ctx.repoCheck(cwd);
     if (!check.ok) {
@@ -379,7 +429,10 @@ export async function queueDispatch(ctx: QueueOpsCtx, params: Record<string, unk
           ? ` FINISHER-CLASS: this dispatch writes into ${cwd} (not its worktree); success is judged on '${finisherSource}' (${finisherBaseline.sourceSha.slice(0, 8)}) entering that checkout's history from baseline ${finisherBaseline.sha ? finisherBaseline.sha.slice(0, 8) : "unreadable"} — EITHER as the declared commits (merge/fast-forward) OR as patch-equivalent copies (clean cherry-pick/rebase/squash of a single-commit source), so a runtime 'no edits' verdict is overridden (and recorded) when the work lands in one of those shapes. NOT DETECTED, so the failure stands and closing the item is your deliberate call (queue_update overrideReason): a CONFLICT-RESOLVED cherry-pick (resolving the conflict rewrites the patch), a squash of a MULTI-commit source, and any landing that never moves this checkout — notably shipping flow 'mrs', which only pushes the branch and opens an MR.`
           : ` FINISHER-CLASS: this dispatch writes into ${cwd} (not its worktree), but ${finisherSource ? `the declared source '${finisherSource}' does not resolve to a commit there` : "NO source branch/sha was declared (finisherSource)"} — LANDED EVIDENCE IS OFF for this run, so a runtime 'no edits in the worktree' verdict will fail it as usual. Re-dispatch with finisherSource=<branch/sha it must land> to get the evidence path.`
         : "";
-    return { text: `dispatched '${key}' — run ${runId}.${autoNote}${finisherNote}`, details: { runId, dispatchClass } };
+    return {
+      text: `dispatched '${key}' — run ${runId}.${overCapacityNote}${autoNote}${finisherNote}`,
+      details: { runId, dispatchClass, occupied: occupied + 1, maxSlots, ...(overCapacityNote ? { overCapacity: true } : {}) },
+    };
   } catch (e) {
     return err(e, "queue_dispatch");
   }

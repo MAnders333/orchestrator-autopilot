@@ -240,6 +240,7 @@ export function createOpenCodeFramework(opts: OpenCodeFrameworkOptions): OpenCod
         { name: "timeoutMs", type: "number", required: false },
         { name: "dispatchClass", type: "string", required: false, description: "worker (default) | finisher — use 'finisher' for a MERGE FINISHER that writes into the cwd's checkout instead of its worktree; success is judged on the declared source landing there, not on worktree edits" },
         { name: "finisherSource", type: "string", required: false, description: "the branch/tag/sha this finisher must land in cwd (e.g. pi-parallel-<runid>-0). REQUIRED for the landed-evidence path: without it a runtime 'no edits in the worktree' verdict fails the run as usual" },
+        { name: "overrideCapacity", type: "boolean", required: false, description: "dispatch even though the fleet is at/above maxSlots. Default false = the dispatch is REFUSED at capacity; true is a deliberate over-subscription (recorded in the result)" },
       ],
       (a) => queueDispatch(ctx, a),
     ),

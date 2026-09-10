@@ -183,7 +183,8 @@ function ctxForDispatch(dir: string, spawns: string[]): QueueOpsCtx {
       },
     },
     storeOrNew: () => loadStore(dir) ?? newStore(),
-    autopilot: () => ({ handleAsyncStarted: () => undefined }),
+    // status() feeds the dispatch capacity gate's occupancy floor (AUTOPILOT-48)
+    autopilot: () => ({ handleAsyncStarted: () => undefined, status: () => ({ running: 0 }) }),
     cfg: () => ({}),
     emit: () => {},
     repoCheck: async () => ({ ok: true }),
