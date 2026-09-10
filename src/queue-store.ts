@@ -202,8 +202,9 @@ export function loadStore(stateDir: string): QueueStore | null {
  *  file). It does NOT serialize against other writers and does NOT bump `rev`
  *  — a bare loadStore → mutate → saveStore pair is exactly the lost-update
  *  race this module now guards against. Every mutation goes through
- *  mutateStore; direct calls are reserved for bootstrap paths that own the
- *  file outright (ensureMigrated) and for tests. */
+ *  mutateStore — which is the only non-test caller left (ensureMigrated writes
+ *  through it too). Exported for tests, which need to plant store states the
+ *  protocol would never produce. */
 export function saveStore(stateDir: string, store: QueueStore): void {
   const p = storePath(stateDir);
   mkdirSync(stateDir, { recursive: true });
@@ -250,8 +251,24 @@ export function loadStoreOrNew(stateDir: string): QueueStore {
 // nonce that produced its revision; a writer only ever recognises its own.
 // The lock can still be stolen (a hard-killed holder must not wedge the
 // harness, so a stale/expired lock IS broken open) — the identity checks are
-// what make that steal safe: the writer whose lock was taken sees that it no
-// longer holds it, counts a conflict, and re-applies on the fresh store.
+// what make that steal safe FOR THE WRITER WHOSE LOCK WAS TAKEN: it sees that
+// it no longer holds it, counts a conflict, and re-applies on the fresh store.
+// The guarantee is ASYMMETRIC, and the residual is the THIEF's: the victim's
+// pre-write guard can pass a moment before the steal, so its rename is already
+// in flight and can land ON TOP of a write the thief has already made, verified
+// and reported. The victim then re-applies (its own change is never lost), but
+// the thief's receipt was for a write that is gone. That needs a steal (5s of
+// contention, or a stale/dead-pid lock) PLUS that interleaving, where before
+// the lock+CAS a loss needed nothing but two overlapping writers — which is why
+// this shipped with the hole named rather than hidden. Closing it fully needs a
+// different commit point: an O_EXCL rev-marker rename protocol on the store
+// file, where the marker create (not the store rename) decides the winner, so
+// no writer can be overwritten after it has been told it won. Deferred. A
+// cheaper partial mitigation was evaluated and also deferred: re-probing lock
+// ownership between saveStore's tmp write and its rename would shrink the
+// victim's exposure from a whole serialize+write to a single syscall, but it is
+// a real behaviour change (a new abort path, and saveStore would have to take a
+// nonce), so it belongs to the rev-marker work, not here.
 // Liveness is the hard requirement: NOTHING here waits unboundedly — a stuck
 // sweep would be a worse failure than the bug.
 
@@ -349,6 +366,15 @@ function acquireStoreLock(stateDir: string, nonce: string, waitMs: number, stale
   // in that gap saw unparsable content, called it abandoned, and deleted a lock
   // its live owner was still about to write into (two holders, no dead pid, no
   // staleness, no expired wait budget).
+  // CONSTRAINT: this requires a filesystem with HARDLINKS. A link() that fails
+  // with anything but EEXIST (EPERM/ENOSYS/EOPNOTSUPP on some network/FUSE
+  // mounts) propagates and fails the write, loudly. That is deliberate: the
+  // obvious fallback — openSync(p, "wx") then write the content — is exactly
+  // the half-created-lock hazard above, so falling back to it would trade a
+  // clear failure for the silent two-holders bug. The state dir is a local
+  // ~/.local/state path, so this does not arise; if it ever must live on a
+  // hardlink-less mount, the fix is a directory lock (mkdir is atomic-exclusive
+  // everywhere), not a wx fallback.
   const tmp = `${p}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
   try {
     for (let round = 0; round < MAX_LOCK_ROUNDS; round++) {
@@ -441,9 +467,15 @@ export function mutateStore<T>(stateDir: string, apply: (store: QueueStore) => T
       const store = loadStoreOrNew(stateDir);
       const baseRev = store.rev ?? 0;
       const value = apply(store);
-      if (!holdsStoreLock(stateDir, nonce) || diskStamp(stateDir).rev !== baseRev) {
+      if (diskStamp(stateDir).rev !== baseRev || !holdsStoreLock(stateDir, nonce)) {
         // Our window was taken (the lock is someone else's now) or the store
         // moved under us — either way, re-apply on the fresh store.
+        // ORDER IS DELIBERATE: the rev term reads and parses the WHOLE store
+        // (milliseconds at real store sizes), so it runs FIRST; the cheap lock
+        // probe runs last, leaving only a lock read between the check and the
+        // write. Both terms are pure reads, so this is evaluation order only —
+        // it narrows the check-then-act gap at zero cost. It does not close it
+        // (see the residual above).
         conflicts++;
       } else {
         store.rev = baseRev + 1;

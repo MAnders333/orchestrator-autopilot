@@ -83,10 +83,21 @@ tools) and several fire from harness timers, so the guard is cross-process:
   exhaustion THROWS. (`rev` backfills to 0 and `revBy` to null on read, so
   pre-`rev` stores just work.)
 
-That identity is exactly what makes a broken-open lock safe: the writer whose
-window was stolen finds the lock is no longer its own, counts a conflict, and
-re-applies against the fresh store instead of handing back a receipt for a write
-that did not survive.
+That identity is exactly what makes a broken-open lock safe **for the writer
+whose window was stolen**: it finds the lock is no longer its own, counts a
+conflict, and re-applies against the fresh store instead of handing back a
+receipt for a write that did not survive.
+
+The guarantee is **asymmetric**, and the residual belongs to the *thief*: the
+victim's pre-write check can pass a moment before the steal, so its rename is
+already in flight and may land on top of a write the thief has already made,
+verified and reported. The victim re-applies (its own change is never lost), but
+the thief's receipt was for a write that is gone. Reaching that needs a steal (5s
+of contention, or a stale/dead-pid lock) *plus* that interleaving — where before
+the lock+CAS a loss needed nothing but two overlapping writers. Closing it fully
+needs a different commit point (an `O_EXCL` rev-marker rename protocol, where the
+marker create rather than the store rename decides the winner); that is deferred,
+and named here rather than papered over.
 
 Consequences for callers: `apply` may be re-run, so it must be a pure function
 of the store it is handed — spawns, git, and other side effects happen before or

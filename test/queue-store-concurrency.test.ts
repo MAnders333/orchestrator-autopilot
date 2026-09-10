@@ -416,10 +416,12 @@ describe("queue store — compare-and-swap and lock recovery (in-process)", () =
     expect(after.revBy).toContain(`${process.pid}@`); // stamped with OUR write identity
   });
 
-  test("a competitor's stamp of the same rev is not accepted as our own write", () => {
-    // The bare-rev check `diskRev === baseRev + 1` is satisfied by ANY writer's
-    // stamp of that number. The store therefore records WHO wrote the revision,
-    // and a foreign nonce at our expected rev reads as a conflict.
+  test("a competitor's write inside our window trips the PRE-WRITE rev check", () => {
+    // Named for what it actually exercises: the competitor's foreignWrite lands
+    // BEFORE the guard runs, so the disk rev has already moved past baseRev and
+    // the rev term rejects the attempt — we never write. (The post-write nonce
+    // term is isolated by the next test.) It also pins the shape of the write
+    // identity and that a fresh one is minted per write.
     mutateStore(dir, (s) => updateItem(s, "CAS-1", { notes: "ours" }));
     const mine = loadStore(dir)!.revBy!;
     expect(mine).toMatch(/^\d+@.+:[0-9a-f]{16}$/);
@@ -433,6 +435,33 @@ describe("queue store — compare-and-swap and lock recovery (in-process)", () =
     const after = loadStore(dir)!;
     expect(after.revBy).not.toBe(mine); // a fresh identity per write
     expect(after.items["FOREIGN-SAME-REV"]).toBeDefined(); // the competitor's write survived
+    expect(after.items["CAS-1"].notes).toBe("attempt 2");
+  });
+
+  test("a foreign nonce at our expected rev is NOT accepted as our own write", () => {
+    // Isolates the POST-write identity term. The disk state a thief's rename
+    // leaves behind is `rev === baseRev + 1` with SOMEONE ELSE's nonce — the
+    // exact state a bare-rev check accepts as "my write landed". We stage that
+    // state directly by intercepting the stamp on the store we are about to
+    // write, so what lands on disk carries a foreign identity at our expected
+    // revision. The rev term cannot see it; only the nonce can.
+    let attempts = 0;
+    mutateStore(dir, (s) => {
+      attempts++;
+      if (attempts === 1) {
+        Object.defineProperty(s, "revBy", {
+          configurable: true,
+          enumerable: true,
+          get: () => "the-thief@elsewhere:0123456789abcdef",
+          set: () => {}, // swallow mutateStore's stamp
+        });
+      }
+      updateItem(s, "CAS-1", { notes: `attempt ${attempts}` });
+    });
+    expect(attempts).toBe(2); // the foreign-stamped write was NOT counted as landed
+    const after = loadStore(dir)!;
+    expect(after.rev).toBe(2); // attempt 1 did write (rev 1) — it just did not claim it
+    expect(after.revBy).toMatch(/^\d+@.+:[0-9a-f]{16}$/); // ours, not the thief's
     expect(after.items["CAS-1"].notes).toBe("attempt 2");
   });
 
