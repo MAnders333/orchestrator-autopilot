@@ -873,6 +873,12 @@ export function updateItem(store: QueueStore, key: string, patch: UpdatePatch, n
   // status) must NOT drop the reviewer that is running right now. An explicit
   // reviewerRunId in the same patch wins — the caller is stamping the dispatch.
   if (to === "ai-review" && from !== "ai-review" && clean.reviewerRunId === undefined) clean.reviewerRunId = null;
+  // ENTERING `active` starts a NEW run, so the PREVIOUS run's landed evidence
+  // must not survive into it (FINISHER-EVIDENCE): a re-dispatched finisher
+  // that genuinely does nothing has to fail on its own merits, and stale
+  // evidence would override that verdict forever. The dispatch lane records a
+  // fresh baseline; the override LOG (overrides[]) keeps the history.
+  if (to === "active" && from !== "active" && clean.landedEvidence === undefined) clean.landedEvidence = null;
   // blocked must say WHY (parked/serialized/merge/decision) — a blocker-less
   // block would be indistinguishable from a rejected proposal.
   if (to === "blocked" && !clean.blocker) {
