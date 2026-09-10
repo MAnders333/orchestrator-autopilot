@@ -543,4 +543,16 @@ describe("DecisionPanel refine UX fixes — detail actions, newline safety, repl
     panel.handleInput("\x13"); // ctrl+s submits
     expect(read()["P1"].scope).toBe("ol"); // the old scope survived the edit
   });
+
+  test("detail mode: r (reject) and d (defer) also act on the expanded item", () => {
+    const rejected = setup([item({ key: "P1", status: "proposal", scope: "s", cwd: "/tmp" })]);
+    rejected.panel.handleInput("m");
+    rejected.panel.handleInput("r");
+    expect(rejected.read()["P1"].status).toBe("rejected");
+
+    const deferred = setup([item({ key: "P2", status: "proposal", scope: "s", cwd: "/tmp" })]);
+    deferred.panel.handleInput("m");
+    deferred.panel.handleInput("d");
+    expect(deferred.read()["P2"].status).toBe("blocked");
+  });
 });
