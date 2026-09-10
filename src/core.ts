@@ -190,12 +190,19 @@ export class Autopilot {
           }
           if (outcome === "failed") {
             failCause = workerFailCause(ev, it.timeoutMs, it.updatedAt, now);
+            // The two notes below promise harness auto-recovery — which is NOT
+            // offered to a finisher-class item (AUTOPILOT-46: an automatic
+            // re-run of a landing can duplicate a merge), so say so where the
+            // promise is made instead of leaving the operator waiting for it.
+            const heldNote = isFinisherItem(it)
+              ? " FINISHER-CLASS: auto-recovery does NOT re-dispatch this item — it holds it and escalates; re-running the landing is your deliberate act."
+              : "";
             const capNote = failCause === "budget-capped"
               ? `[budget-capped] ${new Date(now).toISOString()} — worker run ${topRunId} hit the item's wall-clock budget` +
                 (it.timeoutMs ? ` (cap ${formatDurationMs(it.timeoutMs)}, timeoutMs ${it.timeoutMs}ms)` : " (runtime default)") +
-                ` and was CUT OFF mid-task — this is a CAP, not a verdict on the work. Partial work may exist on the pi-parallel-* branch (verify before re-dispatch). RE-DISPATCH WITH A BIGGER BUDGET: queue_update('${it.key}', {timeoutMs: <larger than ${it.timeoutMs ? `${it.timeoutMs}ms` : "the previous cap"}>}) then queue_dispatch — the recorded budget rides every dispatch lane (the harness also auto-recovers capped items with a bigger budget).`
+                ` and was CUT OFF mid-task — this is a CAP, not a verdict on the work. Partial work may exist on the pi-parallel-* branch (verify before re-dispatch). RE-DISPATCH WITH A BIGGER BUDGET: queue_update('${it.key}', {timeoutMs: <larger than ${it.timeoutMs ? `${it.timeoutMs}ms` : "the previous cap"}>}) then queue_dispatch — the recorded budget rides every dispatch lane (the harness also auto-recovers capped items with a bigger budget).${heldNote}`
               : failCause === "spawn"
-                ? `[failed: spawn] ${new Date(now).toISOString()} — worker run ${topRunId} died at the provider/infra layer (bare 400 / empty api_error — no deliverable produced), not a verdict on the work. The harness AUTO-RECOVERS with backoff (bounded retries, then escalates). Verify partial work on the pi-parallel-* branch.`
+                ? `[failed: spawn] ${new Date(now).toISOString()} — worker run ${topRunId} died at the provider/infra layer (bare 400 / empty api_error — no deliverable produced), not a verdict on the work. The harness AUTO-RECOVERS with backoff (bounded retries, then escalates). Verify partial work on the pi-parallel-* branch.${heldNote}`
                 : `[failed: verdict] ${new Date(now).toISOString()} — worker run ${topRunId} ended unsuccessfully (not budget-capped). Read its output; verify partial work on the pi-parallel-* branch before re-dispatching (failed items are re-dispatchable: queue_dispatch).`;
             mutateStore(this.cfg.stateDir, (s) => {
               const fresh = s.items[it.key];

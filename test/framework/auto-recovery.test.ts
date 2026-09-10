@@ -109,6 +109,19 @@ describe("recoveryTask — P5 context rides the re-dispatch", () => {
     expect(recoveryContext("budget-capped")).toContain("BIGGER budget");
     expect(recoveryContext("spawn")).toContain("rejected the previous run AT SPAWN");
   });
+
+  test("the main-write rule is DISPATCH-CLASS aware: a finisher is not told never to merge (AUTOPILOT-46)", () => {
+    // "NEVER commit or merge to main" instructs a merge finisher to fail: its
+    // whole scope is landing the approved branch in the target checkout.
+    const forFinisher = recoveryContext("verdict", "finisher");
+    expect(forFinisher).not.toContain("NEVER commit or merge to main");
+    expect(forFinisher).toContain("FINISHER-CLASS");
+    expect(forFinisher).toContain("CHECK FIRST whether the previous attempt already landed it");
+    expect(recoveryContext("verdict", "worker")).toContain("NEVER commit or merge to main");
+    // the item's class drives the task, so no call site has to remember
+    expect(recoveryTask(item({ key: "R2", dispatchClass: "finisher" }), "verdict")).toContain("FINISHER-CLASS");
+    expect(recoveryTask(item({ key: "R3" }), "verdict")).toContain("NEVER commit or merge to main");
+  });
 });
 
 describe("autoRecoverFails — capped → bigger budget", () => {
@@ -196,6 +209,102 @@ describe("autoRecoverFails — spawn/infra → retry up to 2× with backoff, the
     after = read(f.dir).items["S1"];
     expect(after.status).toBe("failed");
     expect(after.recoveryEscalated).toBe(true);
+  });
+});
+
+describe("autoRecoverFails — the FINISHER HOLD (AUTOPILOT-46)", () => {
+  test("a failed finisher is held and escalated once; a plain worker beside it still recovers", async () => {
+    const f = fixture([
+      item({ key: "FIN1", status: "failed", failCause: "verdict", dispatchClass: "finisher", recoveryNotBefore: NOW - 1 }),
+      item({ key: "W1", status: "failed", failCause: "verdict", recoveryNotBefore: NOW - 1 }),
+    ]);
+    const { backend, spawns } = recordingBackend();
+
+    const out = await autoRecoverFails(f.dir, backend, { now: NOW, backoffMs: BACKOFF });
+
+    // the guard is NARROW: it holds the finisher and nothing else — a blanket
+    // skip that stranded ordinary failures would be the worse bug
+    expect(out.finisherHeld).toEqual([{ key: "FIN1", cause: "verdict", attempts: 0, surfaced: true }]);
+    expect(out.recovered.map((r) => r.key)).toEqual(["W1"]);
+    expect(spawns).toHaveLength(1);
+    expect(spawns[0].task).toContain("KEY: W1");
+    const fin = read(f.dir).items["FIN1"];
+    expect(fin.status).toBe("failed"); // stays failed — never silently dropped
+    expect(fin.recoveries).toBe(0); // no attempt was spent on it
+    expect(fin.recoveryEscalated).toBe(true); // … and it is ESCALATED, not forgotten
+    expect(fin.notes).toContain("[recover-hold: finisher]");
+    expect(fin.notes).toContain("conflict-resolved cherry-pick");
+
+    // a second pass neither re-announces nor re-dispatches
+    const again = await autoRecoverFails(f.dir, backend, { now: NOW + 10 * BACKOFF, backoffMs: BACKOFF });
+    expect(again.finisherHeld).toEqual([{ key: "FIN1", cause: "verdict", attempts: 0, surfaced: false }]);
+    expect(again.recovered).toEqual([]);
+    expect(spawns).toHaveLength(1);
+  });
+
+  test("the hold covers EVERY cause — a budget-capped finisher gets no bigger-budget retry either", async () => {
+    const f = fixture([item({ key: "FIN2", status: "failed", failCause: "budget-capped", timeoutMs: HOUR, dispatchClass: "finisher" })]);
+    const { backend, spawns } = recordingBackend();
+
+    // pass 1: a fresh failure. A worker would arm the backoff here; the finisher
+    // is held immediately — there is no attempt to schedule.
+    const p1 = await autoRecoverFails(f.dir, backend, { now: NOW, backoffMs: BACKOFF });
+    expect(p1.finisherHeld).toEqual([{ key: "FIN2", cause: "budget-capped", attempts: 0, surfaced: true }]);
+    expect(p1.nextAt).toBeNull(); // nothing is waiting to fire
+    expect(read(f.dir).items["FIN2"].recoveryNotBefore).toBeNull();
+    // pass 2, well past any backoff: still no spawn
+    await autoRecoverFails(f.dir, backend, { now: NOW + 10 * BACKOFF, backoffMs: BACKOFF });
+    expect(spawns).toEqual([]);
+    expect(read(f.dir).items["FIN2"].status).toBe("failed");
+  });
+
+  test("the failure note does not promise a recovery this class will not get", () => {
+    // The infra/cap notes tell the operator "the harness AUTO-RECOVERS" — true
+    // for a worker, false for a finisher now that the hold exists.
+    const dir = mkdtempSync(join(tmpdir(), "orch-recover-finisher-note-"));
+    const store = newStore();
+    addItem(store, item({ key: "FIN4", status: "active", failCause: null, runId: "371d1bb9", dispatchClass: "finisher" }));
+    addItem(store, item({ key: "W4", status: "active", failCause: null, runId: "482e2cc0" }));
+    saveStore(dir, store);
+    const ap = new Autopilot({ stateDir: dir, now: () => NOW });
+    ap.handleAsyncComplete({ runId: "371d1bb9-aaaa", agent: "worker", success: false, results: [{ agent: "worker" }] });
+    ap.handleAsyncComplete({ runId: "482e2cc0-bbbb", agent: "worker", success: false, results: [{ agent: "worker" }] });
+    const items = read(dir).items;
+    expect(items["FIN4"].failCause).toBe("spawn");
+    expect(items["FIN4"].notes).toContain("auto-recovery does NOT re-dispatch this item");
+    expect(items["W4"].notes).toContain("The harness AUTO-RECOVERS");
+    expect(items["W4"].notes).not.toContain("auto-recovery does NOT re-dispatch this item");
+  });
+
+  test("the hold is DELIVERED: the runner ticks it once, naming the item and what to do", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "orch-recover-finisher-"));
+    const store = newStore();
+    addItem(store, item({ key: "FIN3", status: "failed", failCause: "verdict", dispatchClass: "finisher" }));
+    saveStore(dir, store);
+    const { backend, spawns } = recordingBackend();
+    const delivered: string[] = [];
+    const runner = createFrameworkRunner({
+      stateDir: dir,
+      autopilot: new Autopilot({ stateDir: dir }),
+      backend,
+      host: { interactive: () => true, loaded: () => true, busy: () => false, compacting: () => false },
+      deliver: (m) => {
+        delivered.push(m);
+      },
+      enabled: () => true,
+      sweepIntervalMs: 0,
+      recovery: { backoffMs: 5 },
+    });
+    runner.onTimer();
+    await new Promise((r) => setTimeout(r, 120));
+    expect(spawns).toEqual([]); // never re-dispatched
+    const tick = delivered.find((m) => m.includes("FINISHER-CLASS"));
+    expect(tick).toBeTruthy();
+    expect(tick).toContain("[orch-tick: recover]");
+    expect(tick).toContain("FIN3");
+    expect(tick).toContain("will NOT re-dispatch it");
+    expect(tick).toContain("STAYS failed");
+    runner.stop();
   });
 });
 
