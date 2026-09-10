@@ -77,6 +77,11 @@ export interface FinisherBaseline {
 /** PROOF that a finisher-class dispatch's work LANDED: the source it was sent
  *  to land entered the declared cwd's history during the run. This is the
  *  success evidence for work that never touches its own worktree. */
+/** How a declared source is present in a history: `ancestor` = the very
+ *  commits it names (merge/fast-forward); `patch-equivalent` = copies carrying
+ *  the same patch (cherry-pick/rebase/squash of a single-commit source). */
+export type LandingShape = "ancestor" | "patch-equivalent";
+
 export interface LandedEvidence {
   repo: string;
   ref: string | null;
@@ -84,6 +89,9 @@ export interface LandedEvidence {
   fromSha: string | null;
   /** HEAD after the run — the landed commit. */
   sha: string;
+  /** HOW the source is present. Absent on records written before the shape
+   *  was tracked. */
+  landing?: LandingShape;
   /** The source that landed, as declared at dispatch, and its commit. */
   source: string | null;
   sourceSha: string;

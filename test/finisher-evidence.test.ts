@@ -7,6 +7,13 @@
 // failure is not cosmetic: auto-recovery treats `failed` as a re-dispatch
 // candidate, so it can re-run a merge that already landed.
 //
+// Pinned here, including the LANDING SHAPES (a finisher in this project lands
+// by CHERRY-PICK, because the approved branch's base is stale — so ancestry
+// alone would cover nothing): a merge/fast-forward and a clean cherry-pick or
+// rebase (patch-equivalent) ARE evidence; a CONFLICT-RESOLVED cherry-pick is
+// NOT, because resolving the conflict rewrites the patch — that case fails
+// closed and stays a deliberate human override.
+//
 // Pinned here: (1) a finisher-class run whose DECLARED SOURCE landed in the
 // declared cwd is NOT failed — the verdict is overridden and the override
 // RECORDED; (2) a run that landed nothing IS failed (finisher and plain worker
@@ -78,9 +85,31 @@ function branchWithCommit(repo: string, branch: string): string {
   return sha;
 }
 
-/** What the finisher itself does: merge the approved branch into the checkout. */
+/** One landing shape: merge the approved branch into the checkout. */
 function landBranch(repo: string, branch: string): string {
   g(repo, "merge", "--no-ff", "-m", `ship ${branch}`, branch);
+  return g(repo, "rev-parse", "HEAD");
+}
+
+/** THE landing shape this project actually uses: the branch's base is stale, so
+ *  the finisher CHERRY-PICKS it onto the checkout — new commits, so the declared
+ *  sha never becomes an ancestor. */
+function cherryPickBranch(repo: string, branch: string): string {
+  g(repo, "cherry-pick", "-x", branch);
+  return g(repo, "rev-parse", "HEAD");
+}
+
+/** A cherry-pick that CONFLICTED and was resolved by hand: the landed patch is
+ *  no longer the source's patch, so patch-id equality legitimately fails. */
+function cherryPickWithConflict(repo: string, branch: string, file: string, resolution: string): string {
+  try {
+    g(repo, "cherry-pick", branch);
+  } catch {
+    // expected: the conflict is the point
+  }
+  writeFileSync(join(repo, file), resolution);
+  g(repo, "add", ".");
+  g(repo, "-c", "core.editor=true", "cherry-pick", "--continue");
   return g(repo, "rev-parse", "HEAD");
 }
 
@@ -185,6 +214,7 @@ describe("finisher-class evidence — the declared source landing in the declare
     expect(it.status).toBe("ai-review"); // NOT failed
     expect(it.landedEvidence?.sha).toBe(landedSha);
     expect(it.landedEvidence?.fromSha).toBe(baseSha);
+    expect(it.landedEvidence?.landing).toBe("ancestor"); // merged, not patch-equivalent
     expect(it.failCause ?? null).toBeNull();
     // the override is a RECORD, not folklore in notes
     expect(it.overrides?.length).toBe(1);
@@ -350,6 +380,76 @@ describe("finisher evidence is bound to this run AND to the declared source", ()
     expect(it.status).toBe("failed"); // the finisher's own failure stands
     expect(it.landedEvidence ?? null).toBeNull();
     expect(it.overrides ?? []).toEqual([]);
+  });
+
+  test("a CHERRY-PICKED landing is evidence — new commits, patch-equivalent to the declared source", () => {
+    const repo = initRepo();
+    const sourceSha = branchWithCommit(repo, "feature-cp");
+    commit(repo, "moved-on.txt", "main advanced, so the branch base is stale"); // why finishers cherry-pick
+    const baseSha = g(repo, "rev-parse", "HEAD");
+    const dir = dirWith([
+      item({
+        key: "AP-40",
+        cwd: repo,
+        dispatchClass: "finisher",
+        finisherSource: "feature-cp",
+        finisherBaseline: baselineFor(repo, "feature-cp", sourceSha, "run-fin-1"),
+      }),
+    ]);
+    const landedSha = cherryPickBranch(repo, "feature-cp"); // the finisher's only output
+    expect(landedSha).not.toBe(sourceSha);
+    expect(() => g(repo, "merge-base", "--is-ancestor", sourceSha, "HEAD")).toThrow(); // NOT an ancestor
+
+    new Autopilot({ stateDir: dir, now: () => NOW }).handleAsyncComplete(failedCompletion("run-fin-1"), NOW);
+
+    const it = read(dir).items["AP-40"];
+    expect(it.status).toBe("ai-review"); // NOT failed
+    expect(it.landedEvidence?.sha).toBe(landedSha);
+    expect(it.landedEvidence?.fromSha).toBe(baseSha);
+    expect(it.landedEvidence?.landing).toBe("patch-equivalent"); // the shape is RECORDED, not implied
+    expect(it.overrides?.[0].reason).toContain("patch-equivalent");
+    expect(it.notes).toContain("[finisher-landed]");
+  });
+
+  test("a CONFLICT-RESOLVED cherry-pick yields NO evidence — the patch changed, so the failure verdict STANDS", () => {
+    const repo = initRepo();
+    const sourceSha = branchWithCommit(repo, "feature-conflict"); // writes feature-conflict.txt
+    // the checkout already has that file with other content → the pick conflicts
+    commit(repo, "feature-conflict.txt", "a different line on main");
+    const dir = dirWith([
+      item({
+        key: "AP-41",
+        cwd: repo,
+        dispatchClass: "finisher",
+        finisherSource: "feature-conflict",
+        finisherBaseline: baselineFor(repo, "feature-conflict", sourceSha, "run-fin-1"),
+      }),
+    ]);
+    const landedSha = cherryPickWithConflict(repo, "feature-conflict", "feature-conflict.txt", "a hand-merged resolution\n");
+    expect(landedSha).not.toBe(g(repo, "rev-parse", "HEAD~1")); // it DID land something
+
+    new Autopilot({ stateDir: dir, now: () => NOW }).handleAsyncComplete(failedCompletion("run-fin-1"), NOW);
+
+    // DECIDED AND DOCUMENTED: resolving a conflict rewrites the patch, so no git
+    // predicate can distinguish it from "landed something else". This fails
+    // CLOSED — the verdict stands and the operator overrides deliberately
+    // (queue_update overrideReason) after verifying the commit.
+    const it = read(dir).items["AP-41"];
+    expect(it.status).toBe("failed");
+    expect(it.landedEvidence ?? null).toBeNull();
+    expect(it.overrides ?? []).toEqual([]);
+  });
+
+  test("a source CHERRY-PICKED before the dispatch is not evidence — patch-presence is checked at the baseline too", () => {
+    const repo = initRepo();
+    const sourceSha = branchWithCommit(repo, "feature-cp-old");
+    commit(repo, "moved-on.txt", "main advanced");
+    cherryPickBranch(repo, "feature-cp-old"); // it landed BEFORE this dispatch
+    const baseline = baselineFor(repo, "feature-cp-old", sourceSha, "run-fin-1");
+    const it = item({ key: "AP-42", cwd: repo, dispatchClass: "finisher", finisherSource: "feature-cp-old", finisherBaseline: baseline });
+    commit(repo, "later.txt", "HEAD keeps moving for other reasons");
+
+    expect(finisherLandedEvidence(it, NOW)).toBeNull();
   });
 
   test("a source that was ALREADY in at dispatch is not evidence, however far HEAD then moves", () => {

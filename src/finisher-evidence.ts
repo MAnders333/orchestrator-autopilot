@@ -2,12 +2,12 @@
 //
 // The runtime decides "this child did nothing" by looking for file edits in the
 // child's own ISOLATED WORKTREE. That heuristic is right for a normal worker
-// and WRONG for a merge finisher: a finisher cherry-picks/merges an approved
-// branch into the TARGET REPO'S CHECKOUT (its declared cwd) and leaves its
-// worktree untouched BY DESIGN. Observed live (AUTOPILOT-33 landing
-// AUTOPILOT-24): the merge landed, the suite was green — and the run was
-// reported as "returned planning or scratchpad output instead of applying
-// changes" and marked FAILED.
+// and WRONG for a merge finisher: a finisher lands an approved branch into the
+// TARGET REPO'S CHECKOUT (its declared cwd) — usually by CHERRY-PICK, because
+// the branch's base is stale — and leaves its worktree untouched BY DESIGN.
+// Observed live (AUTOPILOT-33 landing AUTOPILOT-24): the merge landed, the
+// suite was green — and the run was reported as "returned planning or
+// scratchpad output instead of applying changes" and marked FAILED.
 //
 // A false failure is not cosmetic here. AUTOPILOT-18's auto-recovery treats a
 // `failed` item as a re-dispatch candidate, so a false failure on a finisher
@@ -32,15 +32,40 @@
 // shipping lane's `git merge --no-ff` for other done items, by a second
 // finisher, and by humans. So evidence requires ALL of:
 //   * the run being judged OWNS the baseline (baseline.runId is this item's
-//     run — a stale baseline from a previous run proves nothing about this one);
+//     run — a stale baseline from a previous run proves nothing about this one;
+//     on a terminal status the item has NO runId, and there the baseline is its
+//     most recent dispatch BY CONSTRUCTION: entering `active` clears the
+//     baseline and only a dispatch lane writes one);
 //   * a SOURCE was declared at dispatch and resolved to a commit
 //     (`finisherSource`, e.g. the approved branch) — with no declared source
 //     there is NO evidence and the runtime verdict stands, unchanged;
 //   * HEAD ADVANCED from the baseline (baseline is an ancestor of HEAD — a
 //     reset/checkout to an unrelated commit is not a landing);
-//   * the declared source is NOW an ancestor of HEAD but was NOT an ancestor
-//     of the baseline — i.e. that branch entered the target's history during
-//     this dispatch's window.
+//   * the declared source is IN the target's history NOW and was NOT at the
+//     baseline — i.e. it entered during this dispatch's window.
+//
+// WHICH LANDING SHAPES ARE DETECTABLE — precisely, because a check that
+// silently covers nothing is worse than no check. "IN" means EITHER the source
+// commits themselves are ancestors of HEAD (`git merge --no-ff`, fast-forward),
+// OR every source commit has a PATCH-EQUIVALENT commit in HEAD's history
+// (`git cherry`, i.e. patch-id equality — cherry-pick, rebase, and a squash of
+// a single-commit source). Cherry-pick is the shape this project actually uses,
+// so ancestry alone would have made this lane inert.
+// NOT detectable — these produce NO evidence and the runtime's failure verdict
+// STANDS (fail closed; the operator overrides deliberately with
+// `queue_update(key, {overrideReason})` after verifying the commit):
+//   * a CONFLICT-RESOLVED cherry-pick/rebase. Resolving a conflict changes the
+//     patch, so the patch-id no longer matches and no mechanism can tell that
+//     landing apart from "landed something else" without judging content
+//     equivalence — which is a human/reviewer call, not a git question.
+//     (Observed: AUTOPILOT-25's finisher, where `git cherry` reported its own
+//     landed commit as unlanded for exactly this reason.)
+//   * a SQUASH of a MULTI-COMMIT source: one combined patch matches none of the
+//     source commits' patch-ids.
+//   * a landing that never touches the declared cwd at all — notably the
+//     shipping lane's `mrs` flow, which PUSHES the branch and opens an MR: the
+//     local checkout's HEAD never moves, so there is nothing to evidence here
+//     (that work is judged by the MR, not by this lane).
 // RESIDUAL (stated, not hidden): this proves THE WORK LANDED, not WHO landed
 // it. If a human or another lane merges the same declared source while the
 // finisher runs, that also satisfies the check. The consequence is bounded and
@@ -48,7 +73,9 @@
 // refuses to re-dispatch, it never closes the item), which is the right call in
 // that case too — the branch IS in, so a re-run would duplicate the merge.
 // Everything else fails closed: unreadable repo, unresolvable source, missing
-// baseline, mismatched run, non-advancing HEAD → no evidence, failure stands.
+// baseline, mismatched run, non-advancing HEAD, a git question git cannot
+// answer (bad object, timeout), or a landing shape outside the two detectable
+// ones → no evidence, the failure verdict stands.
 //
 // THE UPSTREAM FIX this lane substitutes for: pi-subagents exposes a per-agent
 // `completionGuard` boolean, which is where "this class of child writes outside
@@ -60,11 +87,15 @@
 // for the pi host specifically.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import type { FailureOverride, FinisherBaseline, LandedEvidence, QueueItem } from "./queue-store.ts";
+import type { FailureOverride, FinisherBaseline, LandedEvidence, LandingShape, QueueItem } from "./queue-store.ts";
+
+/** Every git call here is bounded: a hung/huge repo must not stall completion
+ *  handling, and a timeout throws/sets `error` → null → NO evidence (closed). */
+const GIT_TIMEOUT_MS = 15_000;
 
 function git(repo: string, args: string[]): string | null {
   try {
-    return execFileSync("git", args, { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim() || null;
+    return execFileSync("git", args, { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: GIT_TIMEOUT_MS }).trim() || null;
   } catch {
     return null;
   }
@@ -74,11 +105,49 @@ function git(repo: string, args: string[]): string | null {
  *  null when git could not answer (missing object, not a repo). Null is never
  *  treated as a yes — an unanswerable ancestry question yields no evidence. */
 function isAncestor(repo: string, ancestor: string, descendant: string): boolean | null {
-  const r = spawnSync("git", ["merge-base", "--is-ancestor", ancestor, descendant], { cwd: repo, stdio: "ignore" });
+  const r = spawnSync("git", ["merge-base", "--is-ancestor", ancestor, descendant], { cwd: repo, stdio: "ignore", timeout: GIT_TIMEOUT_MS });
   if (r.error || r.status === null) return null;
   if (r.status === 0) return true;
   if (r.status === 1) return false;
   return null; // 128 & friends: bad object / not a repo
+}
+
+/**
+ * Is the declared SOURCE in `tip`'s history? FOUR-state: the shape when it is,
+ * `false` when it demonstrably is not, `null` when git could not answer (bad
+ * object, not a repo, timeout) — and null is never treated as a yes.
+ *
+ * Ancestry alone is not enough: a cherry-pick, rebase or squash creates NEW
+ * commits, so the declared sha never becomes an ancestor even though the work
+ * IS in — and cherry-pick is how every finisher in this project lands (the
+ * branch's base is routinely stale). So after the ancestry fast path we ask
+ * `git cherry <tip> <source>`, which lists the source-side commits since the
+ * merge base and marks each `-` when an equivalent PATCH already exists in tip
+ * and `+` when it does not. ALL `-` ⇒ the whole declared source is in.
+ *
+ * Why `git cherry` and not hand-rolled `git patch-id` comparison: it is git's
+ * own patch-equivalence primitive (same patch-id machinery, merge-base scoped,
+ * merges skipped), it answers both sides of the narrowing with ONE predicate
+ * (present now / absent at the baseline), and reimplementing it would add
+ * failure modes without adding power.
+ *
+ * Its known limit is REAL and deliberate: a CONFLICT-RESOLVED cherry-pick has a
+ * different patch, so it reports `+` and this returns false → no evidence, the
+ * failure verdict stands. Same for a squash of a multi-commit source. Deciding
+ * those landed needs content judgment, not a git predicate, so they stay a
+ * human override — see the header.
+ */
+function sourceLandingIn(repo: string, sourceSha: string, tip: string): LandingShape | false | null {
+  const direct = isAncestor(repo, sourceSha, tip);
+  if (direct === null) return null;
+  if (direct) return "ancestor";
+  const r = spawnSync("git", ["cherry", tip, sourceSha], { cwd: repo, encoding: "utf8", timeout: GIT_TIMEOUT_MS });
+  if (r.error || r.status !== 0 || typeof r.stdout !== "string") return null; // unanswerable → no evidence
+  const marks = r.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  // Not an ancestor ⇒ there IS at least one source-side commit. An empty list
+  // means git answered something we cannot interpret → fail closed.
+  if (!marks.length) return null;
+  return marks.every((l) => l.startsWith("-")) ? "patch-equivalent" : false;
 }
 
 export interface RepoHead {
@@ -132,7 +201,8 @@ export function captureFinisherBaseline(
 
 /**
  * The landed check for ONE finisher item: did the source this dispatch was
- * sent to land ENTER the declared cwd's history during this run?
+ * sent to land ENTER the declared cwd's history during this run — as itself,
+ * or as patch-equivalent commits (cherry-pick/rebase/squash-of-one)?
  *
  * Returns the evidence, or null when there is none — see the header for the
  * exact conditions and the stated residual. ALREADY-RECORDED evidence wins: it
@@ -158,13 +228,18 @@ export function finisherLandedEvidence(item: QueueItem, now = Date.now()): Lande
   const head = readRepoHead(repo);
   if (!head || head.sha === baseline.sha) return null; // HEAD never moved → no evidence
   if (isAncestor(repo, baseline.sha, head.sha) !== true) return null; // HEAD did not ADVANCE from the baseline
-  if (isAncestor(repo, baseline.sourceSha, head.sha) !== true) return null; // the declared source is still not in
-  if (isAncestor(repo, baseline.sourceSha, baseline.sha) !== false) return null; // it was ALREADY in at dispatch
+  // IN NOW, NOT IN AT THE BASELINE — the same predicate on both sides, so the
+  // narrowing survives: a cherry-pick that landed BEFORE this dispatch is
+  // already patch-present at the baseline and yields no evidence.
+  const landing = sourceLandingIn(repo, baseline.sourceSha, head.sha);
+  if (landing === false || landing === null) return null; // still not in, or unanswerable
+  if (sourceLandingIn(repo, baseline.sourceSha, baseline.sha) !== false) return null; // already in at dispatch (or unanswerable)
   return {
     repo,
     ref: head.ref ?? baseline.ref,
     fromSha: baseline.sha,
     sha: head.sha,
+    landing,
     source: baseline.source,
     sourceSha: baseline.sourceSha,
     runId: item.runId ?? baseline.runId,
@@ -185,7 +260,7 @@ export function landedOverride(evidence: LandedEvidence, runId: string | null, n
     runId: runId ?? evidence.runId,
     reason:
       `runtime reported the run unsuccessful, but this is a FINISHER-CLASS dispatch (writes outside its worktree) and the work it was sent to land IS LANDED: ` +
-      `${evidence.source ?? short(evidence.sourceSha)} is now in ${evidence.repo} ${evidence.ref ?? "HEAD"} (${short(evidence.fromSha)} → ${short(evidence.sha)}), and was not at dispatch. ` +
+      `${evidence.source ?? short(evidence.sourceSha)} is now in ${evidence.repo} ${evidence.ref ?? "HEAD"} ${landingPhrase(evidence.landing)} (${short(evidence.fromSha)} → ${short(evidence.sha)}), and was not at dispatch. ` +
       `The 'no edits in the worktree' signal does not apply to this class. This evidences THE LANDING, not who performed it — a re-run would duplicate the merge either way.`,
     evidence,
   };
@@ -196,9 +271,15 @@ export function landedNote(evidence: LandedEvidence, runId: string | null, now =
   return (
     `[finisher-landed] ${new Date(now).toISOString()} — run ${runId ?? evidence.runId ?? "?"} was reported unsuccessful by the runtime, ` +
     `but this item is FINISHER-CLASS (it writes into ${evidence.repo}, not its worktree) and the source it was sent to land IS IN: ` +
-    `${evidence.source ?? short(evidence.sourceSha)} → ${evidence.ref ?? "HEAD"} ${short(evidence.fromSha)} → ${short(evidence.sha)}. ` +
+    `${evidence.source ?? short(evidence.sourceSha)} → ${evidence.ref ?? "HEAD"} ${landingPhrase(evidence.landing)} ${short(evidence.fromSha)} → ${short(evidence.sha)}. ` +
     `The failure verdict is OVERRIDDEN (recorded in overrides[]) and auto-recovery will NOT re-dispatch this item — a re-run would duplicate a merge that already landed. Verify the landed commit.`
   );
+}
+
+/** Say WHICH landing shape the evidence found — "is now in" would be false for
+ *  a cherry-pick, where the declared sha itself is not in the history at all. */
+function landingPhrase(landing: LandingShape | undefined): string {
+  return landing === "patch-equivalent" ? "as patch-equivalent commits (cherry-pick/rebase)" : "as the declared commits (merge/fast-forward)";
 }
 
 function short(sha: string | null): string {
