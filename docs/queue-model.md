@@ -235,16 +235,23 @@ false failure can RE-RUN A MERGE THAT ALREADY LANDED.
 
 For that class the queue's own record is authoritative:
 
-- **The dispatch declares the class**: `queue_dispatch(..., dispatchClass:
-  "finisher")` records `dispatchClass` on the item and captures the declared
-  cwd's HEAD as `finisherBaseline` (repo, ref, sha, run). Default is `worker` —
-  nothing about plain workers changes.
-- **Success evidence is a HEAD move, not file edits**: on completion, a
-  finisher-class run reported unsuccessful is checked against the baseline. If
-  the declared cwd's HEAD moved, the work LANDED: the item takes the normal
-  success path (`active → ai-review`), the proof is stored as `landedEvidence`
-  (repo/ref/fromSha/sha/run), and an `[orch-tick: review]` tick tells the
-  operator the runtime verdict was overridden.
+- **The dispatch declares the class AND what it lands**: `queue_dispatch(...,
+  dispatchClass: "finisher", finisherSource: "<branch/tag/sha>")` records
+  `dispatchClass` + `finisherSource` on the item and captures the declared cwd's
+  HEAD *and* that source's commit as `finisherBaseline` (repo, ref, sha, source,
+  sourceSha, run). Default is `worker` — nothing about plain workers changes.
+- **Success evidence is the declared source LANDING, not file edits and not a
+  bare HEAD move**: on completion, a finisher-class run reported unsuccessful is
+  checked against the baseline. Evidence requires all of: the baseline belongs to
+  THIS run, a source was declared and resolved, HEAD ADVANCED from the baseline
+  (baseline is an ancestor of HEAD), and the source is an ancestor of HEAD now
+  but was NOT at dispatch. Then the work LANDED: the item takes the normal
+  success path (`active → ai-review`, so the reviewer still verifies the commit),
+  the proof is stored as `landedEvidence`
+  (repo/ref/fromSha/sha/source/sourceSha/run), and an `[orch-tick: review]` tick
+  tells the operator the runtime verdict was overridden. A bare HEAD move is
+  deliberately NOT enough: the same checkout is written by the shipping lane's
+  `merge --no-ff` for other items, by a second finisher, and by humans.
 - **Overrides are RECORDED, not folklore**: every override of a failure verdict
   appends to the item's `overrides[]` (`by: framework` with the evidence, or
   `by: orchestrator` via `queue_update(..., overrideReason: "…")`). A PATTERN of
@@ -254,9 +261,33 @@ For that class the queue's own record is authoritative:
   as landed is never re-dispatched. It is recorded, surfaced ONCE
   (`[orch-tick: recover] … EVIDENCED AS LANDED`), and left for the human's
   close-out call (`failed → done`) — a re-run would duplicate the merge.
-- **The real case still fails**: a finisher whose declared cwd did NOT move has
-  no evidence, so its failure stands. Entering `active` clears the previous
-  run's `landedEvidence`, so a re-dispatched finisher is judged on its own run.
+- **The real case still fails**: a finisher that did not land its declared
+  source has no evidence, so its failure stands — as does one dispatched with no
+  `finisherSource` at all (no source → no evidence path, by design).
+- **Every run is judged on its own**: entering `active` clears BOTH the previous
+  run's `landedEvidence` and its `finisherBaseline`, on the lifecycle edge in
+  `updateItem`, so every lane that re-activates an item is covered (queue
+  dispatch, harness auto-dispatch, review-FAIL re-dispatch, recovery
+  re-dispatch). Each of those lanes captures a FRESH baseline for the run it
+  spawns, and the landed check additionally refuses a baseline whose `runId` is
+  not the item's current run. `finisherSource` is sticky (it describes the
+  item's work, not one run) and the override LOG keeps the history.
+
+**Residual, stated plainly**: the evidence proves THE DECLARED SOURCE IS IN the
+target's history, not WHO put it there. A human (or another lane) merging the
+same branch during the run satisfies it too. The consequence is bounded on
+purpose: the item is moved off the failure path and LEFT FOR A HUMAN —
+auto-recovery declines to re-dispatch, and nothing closes the item — which is
+also the right handling when someone else landed it, because a re-run would
+still duplicate the merge. Everything else fails closed (unreadable repo,
+unresolvable source, missing/foreign baseline, non-advancing HEAD → no evidence).
+
+**Where this belongs eventually**: the pi runtime has a per-agent
+`completionGuard` flag — the right home for "this class of child writes outside
+its worktree". Using it needs an agent identity plus a spawn-time selector on
+`SubagentBackend.spawn`, and it would only fix the pi host. The queue-side lane
+above stays authoritative across hosts; a spawn-time `completionGuard` selector
+upstream is the cheaper host-specific complement, not a replacement.
 
 ## Worker-time budget governance (timeoutMs)
 
