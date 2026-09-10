@@ -105,7 +105,11 @@ export function recoveryPlan(item: QueueItem, cause: FailCause, globalMax = MAX_
     const base = item.timeoutMs && item.timeoutMs > 0 ? item.timeoutMs : DEFAULT_BUDGET_MS;
     const escalated = Math.min(Math.round(base * BUDGET_MULTIPLIER), BUDGET_MAX_MS);
     const budgetMs = assessRequestedBudget(escalated).effectiveMs ?? escalated;
-    const budgetGrew = budgetMs > (item.timeoutMs && item.timeoutMs > 0 ? item.timeoutMs : 0);
+    // Compared against `base`, which IS the budget the prior run effectively ran
+    // under — including the runtime default when nothing was recorded. Comparing
+    // against a null-as-0 would call the very first escalation "bigger" when it
+    // lands on the same wall the unbudgeted run already hit.
+    const budgetGrew = budgetMs > base;
     return { cause, maxAttempts, budgetMs, budgetGrew, context: recoveryContext(cause, item.dispatchClass, budgetGrew) };
   }
   return { cause, maxAttempts, budgetMs: item.timeoutMs ?? null, budgetGrew: false, context: recoveryContext(cause, item.dispatchClass) };

@@ -110,6 +110,12 @@ describe("recoveryPlan — the deterministic per-cause policy", () => {
     const atCeiling = recoveryPlan(item({ key: "S2", timeoutMs: RUNTIME_STEP_BUDGET_CEILING_MS }), "budget-capped");
     expect(atCeiling.budgetMs).toBe(RUNTIME_STEP_BUDGET_CEILING_MS);
     expect(atCeiling.budgetGrew).toBe(false);
+    // NO recorded budget → the prior run already ran under the runtime default,
+    // so landing on that same wall is NOT growth and must not be sold as one
+    const unbudgeted = recoveryPlan(item({ key: "S3", timeoutMs: null }), "budget-capped");
+    expect(unbudgeted.budgetMs).toBe(RUNTIME_STEP_BUDGET_CEILING_MS);
+    expect(unbudgeted.budgetGrew).toBe(false);
+    expect(unbudgeted.context).toContain("THE SAME WALL");
   });
   test("verdict + zombie → ONE recovery re-dispatch; spawn → retries up to the cap", () => {
     expect(recoveryPlan(item({ key: "V" }), "verdict").maxAttempts).toBe(1);
