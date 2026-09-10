@@ -242,6 +242,14 @@ function promptFor(api: TuiApi, ctl: PanelController, which: "refine" | "redispa
         }),
     );
   };
+  // PARITY NOTE (pi refine UX, 2026-09-09): the pi overlay's refine field is
+  // prefilled with the current scope using SELECT-ALL semantics — the first
+  // keystroke replaces it — so a submitted refinement REPLACES the scope
+  // (applyPanelDecision replaces; it never appends). This host has no
+  // multi-line editor: DialogPrompt is a one-shot modal whose confirmed value
+  // IS the new scope, and a modal submit is explicit by nature (no
+  // shift+enter-as-\r ambiguity). If a future DialogPrompt appends to `value`
+  // on typing, it must adopt the same replace-on-first-edit behavior.
   const fullScope = refine ? (loadStoreOrNew(ctl.stateDir).items[key]?.scope ?? "") : "";
   api.ui.dialog.replace(
     () =>

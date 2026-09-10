@@ -74,6 +74,20 @@ Research date: 2026-09. Evidence is per-source and cited inline (`[verified]`).
   the rename cannot resolve back to Q). Hermetic tests on all three layers
   (core + both hosts): repo-less proposal → repo from the panel → key stays
   `Q-<n>` → approval renames it into the real series, all inside the panel.
+- **Done** (UX fix, 2026-09-09) — refine flow hardening in the pi overlay
+  (`src/hosts/pi-panel.ts`): (1) action keys a/r/d/e/x now WORK in the expanded
+  detail view (the detail collapses, then the list-mode handler runs against the
+  expanded item), so the per-item hints drawn beside the detail pane are never
+  inert; (2) ENTER inserts a newline and `ctrl+s` is the single explicit submit —
+  the editor's own submit path is disabled, so a terminal without the Kitty
+  protocol (where shift+enter collapses to `\r`) can never submit by accident;
+  (3) the refine scope field's prefill uses select-all semantics (the first
+  keystroke replaces it), so a submitted refinement REPLACES the scope instead of
+  concatenating old+new; the footer reads `enter newline · ctrl+s submit · esc
+  cancel`. Hermetic tests cover detail-mode actions, enter-never-submits, the
+  legacy/Kitty `ctrl+s` encodings, and the no-old-prefix replace. opencode
+  parity: its DialogPrompt is a one-shot modal (confirmed value = new scope, an
+  explicitly submitted modal), noted in `src/hosts/opencode-tui.ts`.
 - **Remaining** — 0.5.1 publish (OTP) + final live smoke against the published
   artifact (auto-navigation stub).
 

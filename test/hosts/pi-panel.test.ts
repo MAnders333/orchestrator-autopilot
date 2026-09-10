@@ -8,7 +8,7 @@ import { describe, test, expect } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { visibleWidth, matchesKey, Key } from "@earendil-works/pi-tui";
 import { newStore, saveStore, type QueueItem } from "../../src/queue-store.ts";
 import { DecisionPanel, refreshPanelBadge } from "../../src/hosts/pi-panel.ts";
 
@@ -140,14 +140,14 @@ describe("DecisionPanel keyboard flow", () => {
     expect(read()["P2"].status).toBe("blocked");
   });
 
-  test("refine input mode collects scope text and rewrites the item", () => {
+  test("refine input mode collects scope text and rewrites the item (typing REPLACES the prefill)", () => {
     const { panel, read } = setup([item({ key: "P1", status: "proposal", scope: "old", cwd: "/tmp" })]);
     panel.handleInput("e");
-    panel.handleInput("t"); // typing in INPUT mode — must be consumed by the Input, not toggle
+    panel.handleInput("t"); // typing in INPUT mode — must be consumed by the editor, not toggle
     panel.handleInput("h"); // 'h' — consumed as text, not a nav key
-    panel.handleInput("i"); // 'i' — nav? no: input mode routes everything to Input
-    panel.handleInput("\r"); // enter submits
-    expect(read()["P1"].scope).toContain("thi");
+    panel.handleInput("i"); // 'i' — nav? no: input mode routes everything to the editor
+    panel.handleInput("\x13"); // ctrl+s submits (enter is a newline now)
+    expect(read()["P1"].scope).toBe("thi"); // the prefill is GONE — replace, not append
   });
 
   test("repo-less provisional proposal: refine collects the repo → key stays Q-<n>; approval renames it (seriesHint live)", () => {
@@ -157,11 +157,11 @@ describe("DecisionPanel keyboard flow", () => {
     ]);
     panel.handleInput("j"); // select Q1 (oldest-first feed: B1, Q1)
     panel.handleInput("e"); // refine — scope stage prefilled with the full scope
-    panel.handleInput("\r"); // scope unchanged → repo-less item now asks for its REPO
+    panel.handleInput("\x13"); // ctrl+s: scope unchanged → repo-less item now asks for its REPO
     for (const ch of "/repo/b") panel.handleInput(ch);
     // LIVE destined-series preview while the path is typed (registry/history/slug)
     expect(panel.render(80).join("\n")).toContain("series B");
-    panel.handleInput("\r"); // submit the repo
+    panel.handleInput("\x13"); // ctrl+s: submit the repo
     let after = read()["Q1"];
     expect(after.cwd).toBe("/repo/b");
     expect(after.status).toBe("proposal");
@@ -189,7 +189,7 @@ describe("DecisionPanel keyboard flow", () => {
     panel.handleInput("e");
     panel.handleInput("e"); // text 'mergee'… wait: 'e' in input mode is text
     panel.handleInput("d");
-    panel.handleInput("\r");
+    panel.handleInput("\x13"); // ctrl+s submits (enter only inserts newlines)
     expect(read()["H1"].status).toBe("human-review"); // no transition — harness re-dispatches
     expect(read()["H1"].notes).toContain("merge");
     panel.handleInput("q");
@@ -271,7 +271,7 @@ describe("DecisionPanel item expansion + the visible refine text field", () => {
     expect(closed).toBe(true);
   });
 
-  test("refine opens a visible editable text field PREFILLED with the full scope; enter submits into the store", () => {
+  test("refine opens a prefilled editable field; typing REPLACES the prefill; ctrl+s submits into the store", () => {
     const multiScope = "rewrite the parser\nsecond scope line";
     const { panel, read } = setup([item({ key: "P1", status: "proposal", scope: multiScope, cwd: "/tmp" })]);
     panel.handleInput("e");
@@ -279,11 +279,11 @@ describe("DecisionPanel item expansion + the visible refine text field", () => {
     expect(field).toContain("Refine scope — P1:"); // prompt label
     expect(field).toContain("rewrite the parser"); // the FULL scope visible in the box
     expect(field).toContain("second scope line"); // multi-line, not the truncated summary
-    expect(field).toContain("enter submit · shift+enter newline · esc cancel input");
+    expect(field).toContain("ctrl+s submit · esc cancel");
 
-    panel.handleInput("!"); // edit live
-    panel.handleInput("\r"); // enter submits (non-conflicting: shift+enter makes newlines)
-    expect(read()["P1"].scope).toBe("rewrite the parser\nsecond scope line!");
+    for (const ch of "brand new scope") panel.handleInput(ch); // typing replaces the prefill
+    panel.handleInput("\x13"); // ctrl+s is the explicit submit
+    expect(read()["P1"].scope).toBe("brand new scope"); // ONLY the new text — no old prefix
   });
 
   test("esc cancels the refine field without touching the store", () => {
@@ -471,7 +471,76 @@ describe("DecisionPanel deliver sink — the decision tick rides the custom-role
     panel.handleInput("t"); // → human-review view (H1)
     panel.handleInput("x");
     for (const ch of "merge") panel.handleInput(ch);
-    panel.handleInput("\r");
+    panel.handleInput("\x13");
     expect(delivered.length).toBe(1); // still only the approve tick
+  });
+});
+
+describe("DecisionPanel refine UX fixes — detail actions, newline safety, replace-not-append", () => {
+  test("detail mode: action keys WORK — e opens the editor (detail collapses), a approves; hints are never inert", () => {
+    const sut = setup([
+      item({ key: "P1", status: "proposal", scope: "old scope", cwd: "/tmp" }),
+      item({ key: "H1", status: "human-review", scope: "work", cwd: "/tmp/repo" }),
+    ]);
+    const { panel, read } = sut;
+    panel.handleInput("m"); // expand P1
+    const detail = panel.render(80).join("\n");
+    expect(detail).toContain("Meta"); // the detail pane is up
+    expect(detail).toContain("[e] refine"); // …and it advertises the refine action
+
+    panel.handleInput("e"); // action key from the expanded view
+    const field = panel.render(80).join("\n");
+    expect(field).toContain("Refine scope — P1:"); // the editor opened
+    expect(field).not.toContain("Meta"); // detail collapsed first, so the editor is visible not buried
+    for (const ch of "refined scope") panel.handleInput(ch);
+    panel.handleInput("\x13"); // ctrl+s submits
+    expect(read()["P1"].scope).toBe("refined scope"); // REPLACES — no "old scope" prefix
+
+    // a also works from the expanded view
+    panel.handleInput("m");
+    expect(panel.render(80).join("\n")).toContain("Meta");
+    panel.handleInput("a");
+    expect(read()["P1"].status).toBe("approved");
+
+    // x works from detail on a human-review item
+    panel.handleInput("t"); // human-review view
+    panel.handleInput("m"); // expand H1
+    panel.handleInput("x"); // re-dispatch editor opens
+    expect(panel.render(80).join("\n")).toContain("Re-dispatch findings — H1:");
+    for (const ch of "fix it") panel.handleInput(ch);
+    panel.handleInput("\x13");
+    expect(read()["H1"].notes).toContain("fix it");
+  });
+
+  test("enter inserts a NEWLINE and never submits (shift+enter-as-\\r included); ctrl+s is the only submit", () => {
+    const { panel, read } = setup([item({ key: "P1", status: "proposal", scope: "old", cwd: "/tmp" })]);
+    panel.handleInput("e");
+    for (const ch of "new") panel.handleInput(ch); // replaces the prefill → "new"
+    // legacy \r is ALSO what shift+enter collapses to on terminals without the
+    // Kitty protocol — neither press may submit
+    panel.handleInput("\r");
+    panel.handleInput("\r");
+    expect(read()["P1"].scope).toBe("old"); // nothing applied yet
+    expect(panel.render(80).join("\n")).toContain("Refine scope — P1:"); // the field is still open
+    for (const ch of "line") panel.handleInput(ch);
+    panel.handleInput("\x13"); // the explicit submit
+    expect(read()["P1"].scope).toBe("new\n\nline"); // the two \r presses became real newlines
+  });
+
+  test("ctrl+s is distinct from enter in legacy AND Kitty encodings (submit can never be confused with a newline)", () => {
+    expect(matchesKey("\x13", Key.ctrl("s"))).toBe(true); // legacy control char
+    expect(matchesKey("\x1b[115;5u", Key.ctrl("s"))).toBe(true); // Kitty CSI-u
+    expect(matchesKey("\x1b[27;5;115~", Key.ctrl("s"))).toBe(true); // modifyOtherKeys fallback
+    expect(matchesKey("\r", Key.ctrl("s"))).toBe(false); // enter never matches submit
+    expect(matchesKey("\n", Key.ctrl("s"))).toBe(false);
+    expect(matchesKey("\x13", Key.enter)).toBe(false);
+  });
+
+  test("a navigation/deletion key collapses the select-all — the prefill stays editable", () => {
+    const { panel, read } = setup([item({ key: "P1", status: "proposal", scope: "old", cwd: "/tmp" })]);
+    panel.handleInput("e");
+    panel.handleInput("\x7f"); // backspace EDITS the prefill (does not nuke it)
+    panel.handleInput("\x13"); // ctrl+s submits
+    expect(read()["P1"].scope).toBe("ol"); // the old scope survived the edit
   });
 });

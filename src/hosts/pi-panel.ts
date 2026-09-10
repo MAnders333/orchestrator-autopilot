@@ -11,14 +11,19 @@
 //
 // Keymap (footer-printed): ↑/↓/jk select · gg top · G bottom · m expand (full item) · t/tab toggle view ·
 // enter/a approve · r reject · d defer · e refine (scope + repo input) · x re-dispatch (text field)
-// · esc/q close. The refine/re-dispatch field is a real multi-line editor: enter
-// submits, shift+enter inserts a newline, esc cancels. Repo-less proposals get a
-// second "repo (cwd)" stage during refine — the repo the work lands in.
+// · esc/q close. The action keys work in the expanded detail view too — the detail collapses
+// and the action (or its editor) runs against the expanded item. The refine/re-dispatch field
+// is a real multi-line editor: ENTER inserts a NEWLINE and ctrl+s is the single explicit
+// submit, so a terminal without the Kitty protocol (where shift+enter collapses to \r) can
+// never submit by accident; esc cancels. The refine scope field is prefilled with the current
+// scope with select-all semantics — the first keystroke REPLACES the prefill, so a submitted
+// refinement replaces the scope instead of appending to it. Repo-less proposals get a second
+// "repo (cwd)" stage during refine — the repo the work lands in.
 //
 // The expanded detail view (m) is a SCROLLABLE pane: j/k scroll by WRAPPED
 // line, ctrl+d/ctrl+u by half a page, gg/G jump to top/bottom — clamped to
 // the wrapped content height so overflowing detail can never get stuck
-// unreachable. esc/m collapse back to the list.
+// unreachable. esc/m collapse back to the list; a/r/d/e/x act on the item.
 // -------------------------------------------------------------------------
 
 import {
@@ -26,6 +31,7 @@ import {
   type EditorTheme,
   Key,
   matchesKey,
+  decodeKittyPrintable,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
@@ -116,6 +122,12 @@ export class DecisionPanel implements Component, Focusable {
   /** The scope typed in the refine stage — submitted together with the repo
    *  field when the item is repo-less. */
   private pendingScope: string | null = null;
+  /** The refine scope field opens prefilled with the current scope; the prefill
+   *  is armed as a "selection" — typing REPLACES it, so a submitted refinement
+   *  replaces the scope instead of appending to it (select-all semantics; the
+   *  pi-tui Editor exposes no selection API). A navigation/deletion key first
+   *  collapses the "selection" and keeps the prefill editable. */
+  private prefillArmed = false;
   private cached?: { width: number; lines: string[] };
 
   constructor(private opts: DecisionPanelOptions) {
@@ -125,6 +137,11 @@ export class DecisionPanel implements Component, Focusable {
     // needs the terminal row count, and input is driven by the panel's own
     // handleInput (same IME/paste path as before).
     this.editor = new Editor(this.editorTui(), this.editorTheme(), {});
+    // The editor's OWN submit path (enter/return) is neutralized: enter is a
+    // NEWLINE in these fields and ctrl+s is the single explicit submit. onSubmit
+    // stays wired as a last-resort fallback, but disableSubmit means no enter
+    // encoding (incl. shift+enter-as-\r) can ever trigger it.
+    this.editor.disableSubmit = true;
     this.editor.onSubmit = (value) => this.confirmInput(value);
     this.refresh();
   }
@@ -179,9 +196,35 @@ export class DecisionPanel implements Component, Focusable {
     this.opts.tui.requestRender();
   }
 
+  /** Open a text-input stage. `prefill` is placed in the editor with the caret
+   *  at its end; `armPrefill` marks it as a selection — the next text insertion
+   *  replaces it (refine opens with armPrefill so a typed scope REPLACES the old
+   *  one). */
+  private openInput(stage: "refine" | "refine-repo" | "redispatch", prefill = "", armPrefill = false): void {
+    this.inputFor = stage;
+    this.editor.setText(prefill);
+    this.prefillArmed = armPrefill;
+    this.cached = undefined;
+    this.opts.tui.requestRender();
+  }
+
+  /** True for input that INSERTS text — a printable character, a bracketed
+   *  paste, or a newline. In the armed refine field those REPLACE the prefilled
+   *  scope (select-all semantics); navigation and deletion keys KEEP the prefill
+   *  so the old scope stays editable after a caret move. */
+  private replacesPrefill(data: string): boolean {
+    if (matchesKey(data, Key.enter) || matchesKey(data, "shift+enter")) return true;
+    if (data.length === 1) {
+      const code = data.charCodeAt(0);
+      return code >= 32 && code !== 127; // printable single char (incl. space)
+    }
+    return data.startsWith("\x1b[200~") || decodeKittyPrintable(data) !== undefined; // paste / Kitty-encoded char
+  }
+
   private confirmInput(value: string): void {
     const forAction = this.inputFor;
     this.inputFor = null;
+    this.prefillArmed = false;
     const item = this.items[this.sel];
     if (!item || !forAction) {
       this.opts.tui.requestRender();
@@ -201,9 +244,7 @@ export class DecisionPanel implements Component, Focusable {
         this.apply("refine", { scope: value });
         return;
       }
-      this.inputFor = "refine-repo";
-      this.editor.setText("");
-      this.opts.tui.requestRender();
+      this.openInput("refine-repo");
       return;
     }
     // refine-repo stage: a non-empty repo sets the item's cwd (the KEY stays
@@ -229,15 +270,34 @@ export class DecisionPanel implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.inputFor) {
-      // Text-input mode: everything goes to the editor EXCEPT escape, which
-      // cancels the input (esc is not a printable — the editor ignores it).
+      // Text-input mode. esc cancels; ctrl+s is the ONE explicit submit (matched
+      // in legacy, Kitty CSI-u and modifyOtherKeys encodings); ENTER inserts a
+      // newline — including shift+enter on terminals without the Kitty protocol,
+      // where shift+enter collapses to \r. The editor's own submit path is
+      // disabled, so no enter/return encoding can submit.
       if (matchesKey(data, Key.escape)) {
         this.inputFor = null;
         this.pendingScope = null;
+        this.prefillArmed = false;
         this.opts.tui.requestRender();
         return;
       }
-      this.editor.handleInput(data);
+      if (matchesKey(data, Key.ctrl("s"))) {
+        this.confirmInput(this.editor.getExpandedText());
+        return;
+      }
+      // Select-all emulation: an input that inserts text REPLACES the prefilled
+      // refine scope before it is applied — typing a new scope never
+      // concatenates onto the old one (navigation/deletion keep the prefill).
+      if (this.prefillArmed) {
+        this.prefillArmed = false;
+        if (this.replacesPrefill(data)) this.editor.setText("");
+      }
+      if (matchesKey(data, Key.enter) || matchesKey(data, "shift+enter")) {
+        this.editor.handleInput("\n"); // enter = newline, never submit
+      } else {
+        this.editor.handleInput(data);
+      }
       // typing must NOT hit the width-cache — the input line + the live
       // destined-series preview re-render from the current value
       this.cached = undefined;
@@ -297,7 +357,23 @@ export class DecisionPanel implements Component, Focusable {
         this.scrollDetail(-Math.ceil(DETAIL_HEIGHT / 2));
         return;
       }
-      return;
+      // Action keys work HERE too: collapse the detail view and fall through to
+      // the list handlers, so the action (and any editor it opens) is exactly
+      // the list-mode one against the expanded item — the item hints drawn
+      // beside the detail pane are never inert. Keys the item does not support
+      // (and every other key) stay put, so the detail can never be collapsed by
+      // a no-op.
+      const detailAction = (Object.keys(PANEL_KEY) as PanelActionId[]).find((a) => matchesKey(data, PANEL_KEY[a]));
+      if (detailAction && this.items[this.detailFor]?.actions.includes(detailAction)) {
+        this.detailFor = null;
+        this.detailScroll = 0;
+        this.detailTotal = 0;
+        this.ggArmed = false;
+        this.cached = undefined;
+        // fall through to the list-mode handlers below
+      } else {
+        return;
+      }
     }
 
     if (matchesKey(data, Key.escape) || matchesKey(data, "q")) {
@@ -363,23 +439,16 @@ export class DecisionPanel implements Component, Focusable {
     if (matchesKey(data, "e")) {
       const item = this.items[this.sel];
       if (item && item.actions.includes("refine")) {
-        this.inputFor = "refine";
         this.pendingScope = null;
-        // prefill the FULL scope (the worker prompt), not the truncated summary
-        this.editor.setText(item.fullScope);
-        this.cached = undefined;
-        this.opts.tui.requestRender();
+        // prefill the FULL scope (the worker prompt), not the truncated summary;
+        // armed so the first keystroke REPLACES it (refine = replace, not append)
+        this.openInput("refine", item.fullScope, true);
       }
       return;
     }
     if (matchesKey(data, "x")) {
       const item = this.items[this.sel];
-      if (item && item.actions.includes("redispatch")) {
-        this.inputFor = "redispatch";
-        this.editor.setText("");
-        this.cached = undefined;
-        this.opts.tui.requestRender();
-      }
+      if (item && item.actions.includes("redispatch")) this.openInput("redispatch");
       return;
     }
     if (matchesKey(data, "m")) {
@@ -537,6 +606,9 @@ export class DecisionPanel implements Component, Focusable {
             ? ` Repo (cwd) — ${currentKey} (the repo this work lands in):`
             : ` Re-dispatch findings — ${currentKey}:`;
       lines.push(t(th.fg("accent", th.bold(label))));
+      if (this.inputFor === "refine") {
+        lines.push(...wrap(th.fg("dim", "prefilled with the current scope — typing replaces it; ctrl+s submits"), 2));
+      }
       this.editor.focused = this.focused;
       const inputLines = this.editor.render(inner - 2);
       lines.push(...inputLines.map((l) => "  " + l));
@@ -567,7 +639,7 @@ export class DecisionPanel implements Component, Focusable {
         : "";
     const footer =
       this.inputFor !== null
-        ? "enter submit · shift+enter newline · esc cancel input"
+        ? "enter newline · ctrl+s submit · esc cancel"
         : this.detailFor !== null
           ? `j/k scroll · ctrl+d/u · gg/G · esc collapse${detailPos}`
           : `↑↓/jk select · gg top · G bottom · m expand · t/tab view · a approve · r reject · d defer · e refine · x re-dispatch · esc close`;
