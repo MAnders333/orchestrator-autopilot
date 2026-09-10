@@ -7,11 +7,14 @@
 // failure is not cosmetic: auto-recovery treats `failed` as a re-dispatch
 // candidate, so it can re-run a merge that already landed.
 //
-// Pinned here: (1) a finisher-class run whose declared cwd's HEAD MOVED is NOT
-// failed — the verdict is overridden and the override RECORDED; (2) a run that
-// moved nothing IS failed (finisher and plain worker alike — the real
-// "wrote a plan and stopped" case still lands); (3) auto-recovery never
-// re-dispatches an item with landed evidence; (4) the override record survives
+// Pinned here: (1) a finisher-class run whose DECLARED SOURCE landed in the
+// declared cwd is NOT failed — the verdict is overridden and the override
+// RECORDED; (2) a run that landed nothing IS failed (finisher and plain worker
+// alike — the real "wrote a plan and stopped" case still lands); (3) evidence
+// is bound to THE RUN BEING JUDGED and to the DECLARED SOURCE, so neither a
+// previous run's landing (via ANY re-activation lane) nor a third party's
+// commit in the same checkout can launder a failed run; (4) auto-recovery never
+// re-dispatches an item with landed evidence; (5) the override record survives
 // a store round-trip.
 import { describe, test, expect, afterEach } from "bun:test";
 import { execFileSync } from "node:child_process";
@@ -24,10 +27,13 @@ import {
   addItem,
   saveStore,
   loadStore,
+  mutateStore,
+  updateItem,
   type QueueItem,
   type QueueStore,
 } from "../src/queue-store.ts";
 import { captureFinisherBaseline, finisherLandedEvidence, readRepoHead } from "../src/finisher-evidence.ts";
+import { autoDispatchEligible, autoRedispatch } from "../src/framework/auto-dispatch.ts";
 import { autoRecoverFails } from "../src/framework/auto-recovery.ts";
 import { queueDispatch, queueUpdate, type QueueOpsCtx } from "../src/tools/queue-ops.ts";
 import type { SubagentBackend } from "../src/backends/types.ts";
@@ -60,6 +66,36 @@ function commit(repo: string, file: string, message: string): string {
   g(repo, "add", ".");
   g(repo, "commit", "-q", "-m", message);
   return g(repo, "rev-parse", "HEAD");
+}
+
+/** The approved work a finisher is sent to LAND: a branch with a commit on it,
+ *  left unmerged. Returns its sha. */
+function branchWithCommit(repo: string, branch: string): string {
+  const base = g(repo, "rev-parse", "--abbrev-ref", "HEAD");
+  g(repo, "checkout", "-q", "-b", branch);
+  const sha = commit(repo, `${branch}.txt`, `work on ${branch}`);
+  g(repo, "checkout", "-q", base);
+  return sha;
+}
+
+/** What the finisher itself does: merge the approved branch into the checkout. */
+function landBranch(repo: string, branch: string): string {
+  g(repo, "merge", "--no-ff", "-m", `ship ${branch}`, branch);
+  return g(repo, "rev-parse", "HEAD");
+}
+
+/** The dispatch record a finisher lane writes before spawning: cwd HEAD +
+ *  the source it must land, bound to the run being dispatched. */
+function baselineFor(repo: string, source: string, sourceSha: string, runId: string | null) {
+  return {
+    repo,
+    ref: "main",
+    sha: g(repo, "rev-parse", "HEAD"),
+    source,
+    sourceSha,
+    runId,
+    at: new Date(NOW - 60_000).toISOString(),
+  };
 }
 
 function item(over: Partial<QueueItem> & { key: string }): QueueItem {
@@ -126,20 +162,22 @@ function failedCompletion(runId: string) {
   return { runId, agent: "worker", success: false, status: "failed", summary: "no edits detected" };
 }
 
-describe("finisher-class evidence — a HEAD move in the declared cwd is the success proof", () => {
-  test("a finisher-class run whose declared cwd's HEAD MOVED is NOT failed; the verdict is overridden and RECORDED", () => {
+describe("finisher-class evidence — the declared source landing in the declared cwd is the success proof", () => {
+  test("a finisher-class run whose DECLARED SOURCE landed is NOT failed; the verdict is overridden and RECORDED", () => {
     const repo = initRepo();
+    const sourceSha = branchWithCommit(repo, "feature-1");
     const baseSha = g(repo, "rev-parse", "HEAD");
     const dir = dirWith([
       item({
         key: "AP-1",
         cwd: repo,
         dispatchClass: "finisher",
-        finisherBaseline: { repo, ref: "main", sha: baseSha, runId: "run-fin-1", at: new Date(NOW - 60_000).toISOString() },
+        finisherSource: "feature-1",
+        finisherBaseline: baselineFor(repo, "feature-1", sourceSha, "run-fin-1"),
       }),
     ]);
-    // the finisher's ONLY output: a commit in the target repo's checkout
-    const landedSha = commit(repo, "shipped.txt", "cherry-picked the approved branch");
+    // the finisher's ONLY output: the merge in the target repo's checkout
+    const landedSha = landBranch(repo, "feature-1");
 
     const res = new Autopilot({ stateDir: dir, now: () => NOW }).handleAsyncComplete(failedCompletion("run-fin-1"), NOW);
 
@@ -153,6 +191,8 @@ describe("finisher-class evidence — a HEAD move in the declared cwd is the suc
     expect(it.overrides?.[0].by).toBe("framework");
     expect(it.overrides?.[0].runId).toBe("run-fin-1");
     expect(it.overrides?.[0].evidence?.sha).toBe(landedSha);
+    expect(it.landedEvidence?.source).toBe("feature-1");
+    expect(it.landedEvidence?.sourceSha).toBe(sourceSha);
     expect(it.notes).toContain("[finisher-landed]");
     // and the operator is told, because the runtime just said "failed"
     expect(res.flipped).toBe(true);
@@ -163,13 +203,14 @@ describe("finisher-class evidence — a HEAD move in the declared cwd is the suc
 
   test("a finisher whose declared cwd did NOT move IS failed — the plan-only case still lands", () => {
     const repo = initRepo();
-    const baseSha = g(repo, "rev-parse", "HEAD");
+    const sourceSha = branchWithCommit(repo, "feature-2");
     const dir = dirWith([
       item({
         key: "AP-2",
         cwd: repo,
         dispatchClass: "finisher",
-        finisherBaseline: { repo, ref: "main", sha: baseSha, runId: "run-fin-1", at: new Date(NOW - 60_000).toISOString() },
+        finisherSource: "feature-2",
+        finisherBaseline: baselineFor(repo, "feature-2", sourceSha, "run-fin-1"),
       }),
     ]);
 
@@ -198,7 +239,16 @@ describe("finisher-class evidence — a HEAD move in the declared cwd is the suc
   test("finisherLandedEvidence: recorded evidence wins, and a missing baseline yields none", () => {
     const repo = initRepo();
     const baseSha = g(repo, "rev-parse", "HEAD");
-    const recorded = { repo, ref: "main", fromSha: baseSha, sha: "deadbeefdeadbeef", runId: "run-old", at: "2026-01-01T00:00:00.000Z" };
+    const recorded = {
+      repo,
+      ref: "main",
+      fromSha: baseSha,
+      sha: "deadbeefdeadbeef",
+      source: "feature-old",
+      sourceSha: "cafecafecafecafe",
+      runId: "run-old",
+      at: "2026-01-01T00:00:00.000Z",
+    };
     const withRecord = item({ key: "AP-4", cwd: repo, dispatchClass: "finisher", landedEvidence: recorded });
     expect(finisherLandedEvidence(withRecord, NOW)).toEqual(recorded);
     // finisher without a baseline: nothing to compare against → no evidence
@@ -207,8 +257,9 @@ describe("finisher-class evidence — a HEAD move in the declared cwd is the suc
 
   test("a re-dispatch drops the previous run's landed evidence — the new run is judged on its own", async () => {
     const repo = initRepo();
+    const oldSourceSha = branchWithCommit(repo, "feature-old");
     const baseSha = g(repo, "rev-parse", "HEAD");
-    const landed = commit(repo, "shipped.txt", "the previous finisher's merge");
+    const landed = landBranch(repo, "feature-old");
     const dir = dirWith([
       item({
         key: "AP-10",
@@ -217,30 +268,231 @@ describe("finisher-class evidence — a HEAD move in the declared cwd is the suc
         cwd: repo,
         runId: null,
         dispatchClass: "finisher",
-        finisherBaseline: { repo, ref: "main", sha: baseSha, runId: "run-old", at: new Date(NOW - 60_000).toISOString() },
-        landedEvidence: { repo, ref: "main", fromSha: baseSha, sha: landed, runId: "run-old", at: new Date(NOW - 60_000).toISOString() },
+        finisherSource: "feature-old",
+        finisherBaseline: { repo, ref: "main", sha: baseSha, source: "feature-old", sourceSha: oldSourceSha, runId: "run-old", at: new Date(NOW - 60_000).toISOString() },
+        landedEvidence: { repo, ref: "main", fromSha: baseSha, sha: landed, source: "feature-old", sourceSha: oldSourceSha, runId: "run-old", at: new Date(NOW - 60_000).toISOString() },
       }),
     ]);
+    const nextSourceSha = branchWithCommit(repo, "feature-next");
     const spawns: string[] = [];
 
-    await queueDispatch(ctxForDispatch(dir, spawns), { key: "AP-10", task: "re-run the finisher", cwd: repo, dispatchClass: "finisher" });
+    await queueDispatch(ctxForDispatch(dir, spawns), {
+      key: "AP-10",
+      task: "re-run the finisher",
+      cwd: repo,
+      dispatchClass: "finisher",
+      finisherSource: "feature-next",
+    });
     const redispatched = read(dir).items["AP-10"];
     expect(redispatched.landedEvidence ?? null).toBeNull(); // stale proof cleared
     expect(redispatched.finisherBaseline?.sha).toBe(landed); // fresh baseline = the CURRENT head
+    expect(redispatched.finisherBaseline).toMatchObject({ source: "feature-next", sourceSha: nextSourceSha, runId: "run-dispatched" });
 
     // the new run writes nothing → it fails, exactly like the plan-only case
     new Autopilot({ stateDir: dir, now: () => NOW }).handleAsyncComplete(failedCompletion("run-dispatched"), NOW);
     expect(read(dir).items["AP-10"].status).toBe("failed");
   });
 
-  test("captureFinisherBaseline/readRepoHead read the declared cwd's real HEAD", () => {
+  test("captureFinisherBaseline/readRepoHead read the declared cwd's real HEAD and resolve the declared source", () => {
     const repo = initRepo();
+    const sourceSha = branchWithCommit(repo, "feature-cap");
     const head = readRepoHead(repo);
     expect(head?.sha).toBe(g(repo, "rev-parse", "HEAD"));
     expect(head?.ref).toBe("main");
-    const baseline = captureFinisherBaseline(repo, "run-x", NOW);
-    expect(baseline).toMatchObject({ repo, ref: "main", sha: head?.sha, runId: "run-x" });
+    const baseline = captureFinisherBaseline(repo, "run-x", "feature-cap", NOW);
+    expect(baseline).toMatchObject({ repo, ref: "main", sha: head?.sha, source: "feature-cap", sourceSha, runId: "run-x" });
+    // an undeclared / unresolvable source resolves to null — the evidence path is then OFF
+    expect(captureFinisherBaseline(repo, "run-x", null, NOW).sourceSha).toBeNull();
+    expect(captureFinisherBaseline(repo, "run-x", "no-such-branch", NOW).sourceSha).toBeNull();
     expect(readRepoHead(mkdtempSync(join(tmpdir(), "orch-not-a-repo-")))).toBeNull();
+  });
+});
+
+// The false-positive surface: evidence must belong to THE RUN BEING JUDGED and
+// to the SOURCE THE DISPATCH WAS SENT TO LAND. A stale baseline (any lane that
+// re-activates an item) or a third party writing the same checkout (the
+// shipping lane's `merge --no-ff` for another item, a second finisher, a human)
+// would otherwise let a genuinely failed run inherit somebody else's commit as
+// its own success — and auto-recovery would then refuse to recover it while
+// announcing "EVIDENCED AS LANDED".
+describe("finisher evidence is bound to this run AND to the declared source", () => {
+  test("a baseline from a DIFFERENT run is not evidence for this one", () => {
+    const repo = initRepo();
+    const sourceSha = branchWithCommit(repo, "feature-bind");
+    const baseline = baselineFor(repo, "feature-bind", sourceSha, "run-one");
+    const landed = landBranch(repo, "feature-bind");
+    const stale = item({ key: "AP-20", cwd: repo, runId: "run-two", dispatchClass: "finisher", finisherSource: "feature-bind", finisherBaseline: baseline });
+
+    expect(finisherLandedEvidence(stale, NOW)).toBeNull(); // run 2 did not land this
+    // the SAME repo state IS evidence for the run the baseline belongs to
+    expect(finisherLandedEvidence({ ...stale, runId: "run-one" }, NOW)?.sha).toBe(landed);
+  });
+
+  test("a third party moving the declared cwd is NOT evidence — only the declared source landing is", () => {
+    const repo = initRepo();
+    const sourceSha = branchWithCommit(repo, "feature-third");
+    const dir = dirWith([
+      item({
+        key: "AP-21",
+        cwd: repo,
+        dispatchClass: "finisher",
+        finisherSource: "feature-third",
+        finisherBaseline: baselineFor(repo, "feature-third", sourceSha, "run-fin-1"),
+      }),
+    ]);
+    // somebody else's write to the same checkout while the finisher ran
+    // (the shipping lane merging ANOTHER done item, a second finisher, a human)
+    commit(repo, "someone-else.txt", "an unrelated commit on main");
+
+    new Autopilot({ stateDir: dir, now: () => NOW }).handleAsyncComplete(failedCompletion("run-fin-1"), NOW);
+
+    const it = read(dir).items["AP-21"];
+    expect(it.status).toBe("failed"); // the finisher's own failure stands
+    expect(it.landedEvidence ?? null).toBeNull();
+    expect(it.overrides ?? []).toEqual([]);
+  });
+
+  test("a source that was ALREADY in at dispatch is not evidence, however far HEAD then moves", () => {
+    const repo = initRepo();
+    const sourceSha = branchWithCommit(repo, "feature-already");
+    landBranch(repo, "feature-already"); // it landed BEFORE this dispatch
+    const baseline = baselineFor(repo, "feature-already", sourceSha, "run-fin-1");
+    const it = item({ key: "AP-22", cwd: repo, dispatchClass: "finisher", finisherSource: "feature-already", finisherBaseline: baseline });
+    commit(repo, "later.txt", "HEAD keeps moving for other reasons");
+
+    expect(finisherLandedEvidence(it, NOW)).toBeNull();
+  });
+
+  test("no declared source → no evidence path at all: the dispatch says so and the run fails as usual", async () => {
+    const repo = initRepo();
+    const dir = dirWith([item({ key: "AP-23", status: "approved", runId: null, cwd: repo })]);
+
+    const res = await queueDispatch(ctxForDispatch(dir, []), { key: "AP-23", task: "land something", cwd: repo, dispatchClass: "finisher" });
+    expect(res.text).toContain("LANDED EVIDENCE IS OFF");
+    expect(read(dir).items["AP-23"].finisherBaseline?.sourceSha ?? null).toBeNull();
+
+    commit(repo, "whoever.txt", "a commit from somewhere else");
+    new Autopilot({ stateDir: dir, now: () => NOW }).handleAsyncComplete(failedCompletion("run-dispatched"), NOW);
+    expect(read(dir).items["AP-23"].status).toBe("failed");
+  });
+});
+
+// EVERY lane that returns an item to `active` starts a new run, and each one
+// must judge that run on its own baseline. The dispatch tool is not the only
+// lane: the harness auto-dispatches approved items, re-dispatches after a
+// review FAIL, and recovers failed ones.
+describe("every re-activation lane rebaselines the finisher", () => {
+  function laneBackend(ids: string[]): { backend: SubagentBackend; spawns: string[] } {
+    const spawns: string[] = [];
+    const backend: SubagentBackend = {
+      spawn: async (task) => {
+        spawns.push(task);
+        return ids[spawns.length - 1] ?? `run-${spawns.length}`;
+      },
+      fleetStatus: async () => ({ totalActive: 0 }),
+      steer: async () => "req",
+      asyncDirFor: () => null,
+    };
+    return { backend, spawns };
+  }
+
+  test("review-FAIL re-dispatch (autoRedispatch): run 1's landing is never run 2's evidence", async () => {
+    const repo = initRepo();
+    const sourceSha = branchWithCommit(repo, "feature-rd");
+    const dir = dirWith([
+      item({
+        key: "AP-30",
+        cwd: repo,
+        runId: "run-one",
+        dispatchClass: "finisher",
+        finisherSource: "feature-rd",
+        finisherBaseline: baselineFor(repo, "feature-rd", sourceSha, "run-one"),
+      }),
+    ]);
+    // run 1 DOES land the merge; the runtime still reports it unsuccessful
+    const landed = landBranch(repo, "feature-rd");
+    new Autopilot({ stateDir: dir, now: () => NOW }).handleAsyncComplete(failedCompletion("run-one"), NOW);
+    expect(read(dir).items["AP-30"].status).toBe("ai-review");
+    expect(read(dir).items["AP-30"].landedEvidence?.sha).toBe(landed);
+
+    // the reviewer FAILs → the engine flips ai-review → active, then the
+    // harness re-dispatches run 2 with the findings
+    mutateStore(dir, (s) => updateItem(s, "AP-30", { status: "active", attempts: 1 }));
+    const { backend, spawns } = laneBackend(["run-two"]);
+    expect(await autoRedispatch(dir, backend, "AP-30", "findings: the merge is wrong")).toBe(true);
+    expect(spawns.length).toBe(1);
+    const redispatched = read(dir).items["AP-30"];
+    expect(redispatched.landedEvidence ?? null).toBeNull(); // run 1's proof is gone
+    expect(redispatched.finisherBaseline).toMatchObject({ sha: landed, runId: "run-two" }); // fresh, bound to run 2
+
+    // run 2 writes NOTHING — it must fail on its own merits
+    new Autopilot({ stateDir: dir, now: () => NOW + 1000 }).handleAsyncComplete(failedCompletion("run-two"), NOW + 1000);
+    const final = read(dir).items["AP-30"];
+    expect(final.status).toBe("failed");
+    expect(final.landedEvidence ?? null).toBeNull();
+    expect(final.overrides?.length ?? 0).toBe(1); // only run 1's override — nothing fabricated for run 2
+  });
+
+  test("recovery re-dispatch: the failed run's baseline never judges the recovery run", async () => {
+    const repo = initRepo();
+    const sourceSha = branchWithCommit(repo, "feature-rec");
+    const dir = dirWith([
+      item({
+        key: "AP-31",
+        status: "failed",
+        failCause: "verdict",
+        cwd: repo,
+        runId: null,
+        dispatchClass: "finisher",
+        finisherSource: "feature-rec",
+        finisherBaseline: baselineFor(repo, "feature-rec", sourceSha, "run-one"),
+        recoveryNotBefore: NOW - 1000,
+      }),
+    ]);
+    const { backend, spawns } = laneBackend(["run-two"]);
+
+    const out = await autoRecoverFails(dir, backend, { now: NOW, backoffMs: 1000 });
+    expect(out.recovered.map((r) => r.key)).toEqual(["AP-31"]); // nothing landed → a real recovery candidate
+    expect(spawns.length).toBe(1);
+    const recovered = read(dir).items["AP-31"];
+    expect(recovered.finisherBaseline).toMatchObject({ sha: g(repo, "rev-parse", "HEAD"), source: "feature-rec", sourceSha, runId: "run-two" });
+
+    // during the recovery run, a THIRD PARTY moves the same checkout — and the
+    // recovery run itself lands nothing
+    commit(repo, "someone-else.txt", "the shipping lane merging another item");
+    new Autopilot({ stateDir: dir, now: () => NOW + 1000 }).handleAsyncComplete(failedCompletion("run-two"), NOW + 1000);
+    const final = read(dir).items["AP-31"];
+    expect(final.status).toBe("failed");
+    expect(final.landedEvidence ?? null).toBeNull();
+    expect(final.overrides ?? []).toEqual([]);
+  });
+
+  test("harness auto-dispatch (approved → active) rebaselines too", async () => {
+    const repo = initRepo();
+    const sourceSha = branchWithCommit(repo, "feature-auto");
+    const dir = dirWith([
+      item({
+        key: "AP-32",
+        status: "approved",
+        runId: null,
+        cwd: repo,
+        dispatchClass: "finisher",
+        finisherSource: "feature-auto",
+        finisherBaseline: baselineFor(repo, "feature-auto", sourceSha, "run-one"),
+      }),
+    ]);
+    const landed = landBranch(repo, "feature-auto"); // the PREVIOUS run's landing
+    const { backend } = laneBackend(["run-two"]);
+
+    const dispatched = await autoDispatchEligible(dir, backend, 3);
+    expect(dispatched.map((d) => d.key)).toEqual(["AP-32"]);
+    const it = read(dir).items["AP-32"];
+    expect(it.finisherBaseline).toMatchObject({ sha: landed, runId: "run-two" });
+
+    // the new run lands nothing → no evidence from the old landing
+    new Autopilot({ stateDir: dir, now: () => NOW }).handleAsyncComplete(failedCompletion("run-two"), NOW);
+    expect(read(dir).items["AP-32"].status).toBe("failed");
+    expect(read(dir).items["AP-32"].landedEvidence ?? null).toBeNull();
   });
 });
 
@@ -261,7 +513,7 @@ describe("auto-recovery — landed work is never re-dispatched", () => {
 
   test("a failed finisher whose work LANDED is skipped, recorded and surfaced once — never re-dispatched", async () => {
     const repo = initRepo();
-    const baseSha = g(repo, "rev-parse", "HEAD");
+    const sourceSha = branchWithCommit(repo, "feature-6");
     const dir = dirWith([
       item({
         key: "AP-6",
@@ -270,11 +522,12 @@ describe("auto-recovery — landed work is never re-dispatched", () => {
         cwd: repo,
         runId: "run-fin-1",
         dispatchClass: "finisher",
-        finisherBaseline: { repo, ref: "main", sha: baseSha, runId: "run-fin-1", at: new Date(NOW - 60_000).toISOString() },
+        finisherSource: "feature-6",
+        finisherBaseline: baselineFor(repo, "feature-6", sourceSha, "run-fin-1"),
         recoveryNotBefore: NOW - 1000, // backoff already elapsed: without the evidence check this WOULD re-dispatch
       }),
     ]);
-    const landedSha = commit(repo, "shipped.txt", "the merge that already landed");
+    const landedSha = landBranch(repo, "feature-6");
     const { backend, spawns } = recordingBackend();
 
     const first = await autoRecoverFails(dir, backend, { now: NOW, backoffMs: 1000 });
@@ -296,7 +549,7 @@ describe("auto-recovery — landed work is never re-dispatched", () => {
 
   test("a failed finisher with NO landed evidence still recovers normally", async () => {
     const repo = initRepo();
-    const baseSha = g(repo, "rev-parse", "HEAD");
+    const sourceSha = branchWithCommit(repo, "feature-7");
     const dir = dirWith([
       item({
         key: "AP-7",
@@ -304,7 +557,8 @@ describe("auto-recovery — landed work is never re-dispatched", () => {
         failCause: "verdict",
         cwd: repo,
         dispatchClass: "finisher",
-        finisherBaseline: { repo, ref: "main", sha: baseSha, runId: "run-fin-1", at: new Date(NOW - 60_000).toISOString() },
+        finisherSource: "feature-7",
+        finisherBaseline: baselineFor(repo, "feature-7", sourceSha, "run-fin-1"),
         recoveryNotBefore: NOW - 1000,
       }),
     ]);
@@ -318,20 +572,33 @@ describe("auto-recovery — landed work is never re-dispatched", () => {
 });
 
 describe("the dispatch declares the class, and the override record persists", () => {
-  test("queue_dispatch with dispatchClass=finisher records the class + the cwd's HEAD baseline", async () => {
+  test("queue_dispatch with dispatchClass=finisher records the class, the source and the cwd's HEAD baseline", async () => {
     const repo = initRepo();
+    const sourceSha = branchWithCommit(repo, "feature-8");
     const baseSha = g(repo, "rev-parse", "HEAD");
     const dir = dirWith([item({ key: "AP-8", status: "approved", runId: null, cwd: repo })]);
     const spawns: string[] = [];
 
-    const res = await queueDispatch(ctxForDispatch(dir, spawns), { key: "AP-8", task: "land AP-4", cwd: repo, dispatchClass: "finisher" });
+    const res = await queueDispatch(ctxForDispatch(dir, spawns), {
+      key: "AP-8",
+      task: "land AP-4",
+      cwd: repo,
+      dispatchClass: "finisher",
+      finisherSource: "feature-8",
+    });
 
     expect(res.details.dispatchClass).toBe("finisher");
     expect(res.text).toContain("FINISHER-CLASS");
     const it = read(dir).items["AP-8"];
     expect(it.status).toBe("active");
     expect(it.dispatchClass).toBe("finisher");
-    expect(it.finisherBaseline).toMatchObject({ repo, ref: "main", sha: baseSha, runId: "run-dispatched" });
+    expect(it.finisherSource).toBe("feature-8");
+    expect(it.finisherBaseline).toMatchObject({ repo, ref: "main", sha: baseSha, source: "feature-8", sourceSha, runId: "run-dispatched" });
+
+    // the item's recorded source rides along when a later dispatch omits it
+    mutateStore(dir, (s) => updateItem(s, "AP-8", { status: "failed" }));
+    await queueDispatch(ctxForDispatch(dir, spawns), { key: "AP-8", task: "re-run", cwd: repo, dispatchClass: "finisher" });
+    expect(read(dir).items["AP-8"].finisherBaseline?.sourceSha).toBe(sourceSha);
   });
 
   test("queue_update records an orchestrator override on the item, and it survives a store round-trip", async () => {
