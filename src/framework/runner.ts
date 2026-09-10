@@ -276,6 +276,12 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
         `[orch-tick: recover] ${e.key} exhausted auto-recovery (${e.attempts} attempt${e.attempts === 1 ? "" : "s"}, ${e.cause}) — it STAYS failed. Verify its pi-parallel-* branch, then your call: re-dispatch manually with a bigger budget / apply findings / drop. Not a user request; respond ≤2 lines.`,
       );
     }
+    for (const l of outcome.landedSkipped) {
+      if (!l.surfaced) continue; // announced once, not on every sweep
+      sendTickText(
+        `[orch-tick: recover] ${l.key} is marked failed but its work is EVIDENCED AS LANDED (${l.repo} HEAD ${l.sha.slice(0, 8)}) — auto-recovery will NOT re-dispatch it (a re-run would duplicate a merge that already landed). Verify the landed commit, then close it out (failed → done) or re-open deliberately. Not a user request; respond ≤2 lines.`,
+      );
+    }
     if (outcome.heldNotice) {
       sendTickText(
         `[orch-tick: recover] DEGRADED WINDOW: ${outcome.spawnFailures} consecutive provider failures (bare 400 / empty api_error / hang-then-die) — auto-recovery is PAUSED for a cooldown instead of churning retries. Failed items are held, not lost; a probe resumes automatically. Tell the user the provider looks degraded. Not a user request; respond ≤2 lines.`,

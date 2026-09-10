@@ -434,6 +434,8 @@ export default function (pi: ExtensionAPI) {
       scope: Type.Optional(Type.String()),
       cwd: Type.Optional(Type.String()),
       timeoutMs: Type.Optional(Type.Number({ description: "requested wall-clock budget (ms) recorded on the item; every dispatch/review passes it to the spawned run" })),
+      dispatchClass: Type.Optional(Type.String({ description: "worker (default) | finisher — finisher declares the run writes OUTSIDE its worktree, into the declared cwd's checkout (merge finisher)" })),
+      overrideReason: Type.Optional(Type.String({ description: "RECORD an override of the run's failure verdict on the item (append-only overrides[]) instead of hand-writing it into notes — say WHY the failure is not believed" })),
       evidence: Type.Optional(Type.String()),
       value: Type.Optional(Type.String()),
       urgency: Type.Optional(Type.String()),
@@ -455,6 +457,7 @@ export default function (pi: ExtensionAPI) {
       task: Type.String({ description: "the scoped worker prompt (self-contained; KEY: <key> as first line is recommended)" }),
       cwd: Type.Optional(Type.String({ description: "repo the worker operates on (worktree isolation runs THERE). REQUIRED when the session cwd is not the target repo (e.g. dispatching from a parent dir into the repo the worker must touch)." })),
       timeoutMs: Type.Optional(Type.Number()),
+      dispatchClass: Type.Optional(Type.String({ description: "worker (default) | finisher — use 'finisher' for a MERGE FINISHER that writes into the cwd's checkout instead of its worktree; success is then judged on the cwd's HEAD moving, not on worktree edits" })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const r = await queueDispatch(opsFor(ctx), params as never);

@@ -29,6 +29,7 @@
 import { loadStore, mutateStore, updateItem, isFailCause, type QueueItem, type FailCause, type UpdatePatch } from "../queue-store.ts";
 import type { SubagentBackend } from "../backends/types.ts";
 import { workerTask } from "./auto-dispatch.ts";
+import { appendOverride, finisherLandedEvidence, landedOverride } from "../finisher-evidence.ts";
 import { preserveRunWorktree } from "./worktree-preservation.ts";
 import {
   loadRecoveryState,
@@ -129,8 +130,14 @@ export interface RecoveryOutcome {
   heldNotice: boolean;
   /** Consecutive provider failures at the end of this pass (for the message). */
   spawnFailures: number;
-  /** Soonest future due time (epoch ms) — the runner arms its recovery timer. */
+  /** Soonest future due time (epoch ms) — the runner arms its recovery timer.
+   */
   nextAt: number | null;
+  /** FINISHER-EVIDENCE (AUTOPILOT-34): failed items whose work is EVIDENCED AS
+   *  LANDED (the declared cwd's HEAD moved). Recovery refuses to re-dispatch
+   *  them — a re-run would duplicate a merge that already landed — and
+   *  surfaces them once for the human's close-out call. */
+  landedSkipped: Array<{ key: string; repo: string; sha: string; surfaced: boolean }>;
 }
 
 function appendNote(existing: string, note: string): string {
@@ -154,7 +161,7 @@ export async function autoRecoverFails(
   const threshold = opts.spawnFailureThreshold ?? SPAWN_FAILURE_THRESHOLD;
   const cooldownMs = opts.degradedCooldownMs ?? DEGRADED_COOLDOWN_MS;
   const maxSlots = opts.maxSlots ?? 3;
-  const outcome: RecoveryOutcome = { recovered: [], escalated: [], held: false, heldNotice: false, spawnFailures: 0, nextAt: null };
+  const outcome: RecoveryOutcome = { recovered: [], escalated: [], held: false, heldNotice: false, spawnFailures: 0, nextAt: null, landedSkipped: [] };
   const store = loadStore(stateDir);
   if (!store) return outcome;
   const state = loadRecoveryState(stateDir);
@@ -163,7 +170,7 @@ export async function autoRecoverFails(
 
   // Oldest failed first — the items waiting longest recover first (matches the
   // auto-dispatch ordering). Only items with a recorded, recoverable cause.
-  const failed = Object.values(store.items)
+  const allFailed = Object.values(store.items)
     .filter((i) => i.status === "failed" && !!i.failCause && isFailCause(i.failCause))
     .sort((a, b) => (a.updatedAt < b.updatedAt ? -1 : 1));
 
@@ -183,10 +190,39 @@ export async function autoRecoverFails(
     staged.push({ key, patch });
   };
 
+  let changed = false;
+
+  // Phase 0 — FINISHER-EVIDENCE (AUTOPILOT-34). A `failed` item whose work is
+  // EVIDENCED AS LANDED (a finisher-class dispatch whose declared cwd moved
+  // off its dispatch baseline) is NOT a recovery candidate: re-dispatching it
+  // would re-run a merge that already landed (duplicate cherry-pick, or a
+  // worker pointed at a moved main). The evidence + the override are RECORDED
+  // on the item and it is surfaced ONCE for the human's close-out call.
+  const failed: QueueItem[] = [];
+  for (const item of allFailed) {
+    const evidence = finisherLandedEvidence(item, now);
+    if (!evidence) {
+      failed.push(item);
+      continue;
+    }
+    const alreadySurfaced = !!item.landedEvidence && item.recoveryEscalated === true;
+    outcome.landedSkipped.push({ key: item.key, repo: evidence.repo, sha: evidence.sha, surfaced: !alreadySurfaced });
+    if (alreadySurfaced) continue; // recorded AND already ticked — never re-announce
+    stage(item.key, (fresh) => ({
+      landedEvidence: evidence,
+      ...(fresh.landedEvidence ? {} : { overrides: appendOverride(fresh, landedOverride(evidence, fresh.runId ?? item.runId, now)) }),
+      recoveryEscalated: true,
+      notes: appendNote(
+        fresh.notes,
+        `[recover-skip: landed] ${new Date(now).toISOString()} — auto-recovery will NOT re-dispatch this item: its work is EVIDENCED AS LANDED (${evidence.repo} ${evidence.ref ?? "HEAD"} ${(evidence.fromSha ?? "?").slice(0, 8)} → ${evidence.sha.slice(0, 8)}). A re-dispatch would duplicate a merge that already landed. Needs your call: verify the landed commit and close the item (failed → done), or re-open it deliberately.`,
+      ),
+    }));
+    changed = true;
+  }
+
   // Phase 1 — escalate exhausted items. This does NOT spawn, so it runs even
   // while the degraded window pauses attempts: an item that already spent its
   // budget must still be surfaced once.
-  let changed = false;
   for (const item of failed) {
     if (item.recoveryEscalated) continue;
     const cause = item.failCause as FailCause;

@@ -16,11 +16,13 @@ export const CONTRACTS = {
     "Update a queue item: status (validated transitions: proposal→approved/rejected/blocked (defer a candidate without approving), approved→active/rejected, " +
     "active→ai-review/failed, ai-review→human-review/failed/active, human-review→done/active/rejected, failed→active (recovery re-dispatch) | done (verified-complete despite the failure record), done→approved (human re-open — you found issues after approval)); " +
     "approved REQUIRES a complete scope + cwd; blocked REQUIRES a blocker reason (parked/serialized/merge/decision). " +
-    "active→ai-review/failed are event-driven — do NOT set them by hand.",
+    "active→ai-review/failed are event-driven — do NOT set them by hand. " +
+    "OVERRIDING A FAILURE VERDICT: pass `overrideReason` — it is RECORDED on the item (append-only overrides[]) instead of living as prose in notes, so a pattern of overrides stays visible.",
   queue_dispatch:
     "Dispatch a queue item: spawns the worker (same executor as the subagent tool; fresh context, worktree isolation) AND records " +
     "approved→active with the run id — atomically. Call with the key of an approved item and the scoped worker prompt. " +
-    "High-risk items: still surface the final checkpoint BEFORE calling this. Returns the run id.",
+    "High-risk items: still surface the final checkpoint BEFORE calling this. Returns the run id. " +
+    "MERGE FINISHERS: pass dispatchClass='finisher' when the run writes into the cwd's CHECKOUT (cherry-pick/merge into main) instead of its own worktree — the dispatch records the cwd's HEAD as a baseline and success is then judged on that HEAD moving, so a runtime 'no edits in the worktree' failure verdict is overridden (and the override recorded) instead of re-dispatching a merge that already landed.",
   queue_review:
     "Dispatch the reviewer for an `ai-review` item: spawns the reviewer subagent (read-only, no worktree) via the same executor, records the " +
     "reviewerRunId on the item, and emits orch:reviewer-dispatched. When the reviewer completes, the verdict line ('Verdict: PASS/FAIL') " +

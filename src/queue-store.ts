@@ -35,6 +35,68 @@ export function isFailCause(v: unknown): v is FailCause {
   return v === "budget-capped" || v === "verdict" || v === "zombie" || v === "spawn";
 }
 
+/** WHERE a dispatched run writes (FINISHER-EVIDENCE). `worker` (default): the
+ *  run writes ONLY inside its isolated worktree, so worktree edits are the
+ *  evidence of work. `finisher`: the run writes OUTSIDE its worktree — into
+ *  the DECLARED cwd's checkout (a merge finisher cherry-picks/merges an
+ *  approved branch into the target repo's main checkout) — so its worktree is
+ *  untouched BY DESIGN and a runtime 'no edits' heuristic misreads it as
+ *  "returned planning output". For that class the queue's own record is
+ *  authoritative: the evidence is a HEAD move in the declared cwd
+ *  (`landedEvidence`), not worktree file edits. */
+export type DispatchClass = "worker" | "finisher";
+
+export function isDispatchClass(v: unknown): v is DispatchClass {
+  return v === "worker" || v === "finisher";
+}
+
+/** The declared-cwd HEAD as it stood WHEN a finisher-class run was dispatched
+ *  — the baseline the landed check compares against. */
+export interface FinisherBaseline {
+  /** The checkout the finisher writes to (the item's declared cwd). */
+  repo: string;
+  /** The checked-out ref at dispatch (e.g. `main`), or null when detached. */
+  ref: string | null;
+  /** HEAD sha at dispatch; null when the repo could not be read. */
+  sha: string | null;
+  /** The run this baseline belongs to. */
+  runId: string | null;
+  at: string;
+}
+
+/** PROOF that a finisher-class run's work LANDED: the declared cwd's HEAD
+ *  moved off the dispatch baseline. This is the success evidence for work that
+ *  never touches its own worktree. */
+export interface LandedEvidence {
+  repo: string;
+  ref: string | null;
+  /** HEAD at dispatch (the baseline) — null when it could not be read. */
+  fromSha: string | null;
+  /** HEAD after the run — the landed commit. */
+  sha: string;
+  /** The run whose work this is. */
+  runId: string | null;
+  at: string;
+}
+
+/** A RECORDED override of a run-level failure verdict — the thing that used to
+ *  be hand-written prose in `notes`. Machine-readable so a PATTERN of
+ *  overrides is visible (many overrides = the runtime verdict is systematically
+ *  wrong, or the operator is waving failures through). */
+export interface FailureOverride {
+  at: string;
+  /** `framework` = the harness overrode a runtime verdict against recorded
+   *  evidence; `orchestrator` = a human/agent judgment call. */
+  by: "framework" | "orchestrator";
+  /** The run whose failure verdict was overridden. */
+  runId: string | null;
+  /** WHY the failure was not believed. */
+  reason: string;
+  /** The landed evidence that justified a framework override (null for a
+   *  judgment-only orchestrator override). */
+  evidence: LandedEvidence | null;
+}
+
 const STATUSES: QueueStatus[] = ["proposal", "approved", "blocked", "active", "ai-review", "human-review", "failed", "done", "rejected"];
 
 export function isValidStatus(s: unknown): s is QueueStatus {
@@ -92,6 +154,20 @@ export interface QueueItem {
    *  the item stays failed for the orchestrator/human to act on. Prevents a
    *  re-escalation tick on every sweep. */
   recoveryEscalated?: boolean;
+  /** WHERE this item's dispatched run writes (see DispatchClass). Absent =
+   *  `worker` (writes only inside its worktree). `finisher` declares that the
+   *  run writes into the DECLARED cwd's checkout, so an empty worktree is
+   *  expected and NEVER evidence of a run that did nothing. */
+  dispatchClass?: DispatchClass;
+  /** The declared cwd's HEAD when the current finisher run was dispatched. */
+  finisherBaseline?: FinisherBaseline | null;
+  /** Evidence that the work LANDED in the declared cwd (HEAD moved off the
+   *  baseline). Sticky: it records a historical fact about this item's work,
+   *  and auto-recovery refuses to re-dispatch an item that carries it (a
+   *  re-run would duplicate a merge that already landed). */
+  landedEvidence?: LandedEvidence | null;
+  /** Recorded overrides of run-level failure verdicts (append-only). */
+  overrides?: FailureOverride[];
   /** free-form notes/description — no schema constraints on content */
   notes: string;
   createdAt: string;
@@ -750,6 +826,12 @@ export interface UpdatePatch {
   /** SHIPPING MARKER (KEY: AUTO-SHIP-ON-DONE) — set by the merge-finisher
    *  when it ships; cleared when the item leaves `done` (re-open). */
   shippedAt?: string | null;
+  /** FINISHER-EVIDENCE: the dispatch class, the dispatch-time HEAD baseline,
+   *  the landed proof, and the append-only override log. */
+  dispatchClass?: DispatchClass;
+  finisherBaseline?: FinisherBaseline | null;
+  landedEvidence?: LandedEvidence | null;
+  overrides?: FailureOverride[];
 }
 
 /** Apply a validated update. Throws on an illegal transition. Returns the item. */

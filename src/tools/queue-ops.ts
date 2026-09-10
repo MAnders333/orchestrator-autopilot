@@ -10,7 +10,8 @@
 import type { SubagentBackend } from "../backends/types.ts";
 import type { Autopilot } from "../core.ts";
 import type { LoadedAutopilotConfig } from "../config.ts";
-import { loadStore, newStore, mutateStore, addItem, updateItem, queryItems, queueLengths, resolveSeries, recordSeries, type QueueStore } from "../queue-store.ts";
+import { loadStore, newStore, mutateStore, addItem, updateItem, queryItems, queueLengths, resolveSeries, recordSeries, isDispatchClass, type DispatchClass, type QueueStore } from "../queue-store.ts";
+import { appendOverride, captureFinisherBaseline } from "../finisher-evidence.ts";
 import { isAutoDispatchable } from "../framework/auto-dispatch.ts";
 import { reviewerRunAlive } from "../framework/run-liveness.ts";
 import { preserveRunWorktree } from "../framework/worktree-preservation.ts";
@@ -227,6 +228,24 @@ export async function queueUpdate(ctx: QueueOpsCtx, params: Record<string, unkno
       // the patch (resolveSeries excludes the item's own vote, so the rename
       // cannot resolve to its own provisional Q).
       const renamingProvisional = cur.provisionalKey === true && nextStatus === "approved" && !!nextCwd;
+      // FAILURE-OVERRIDE RECORD (AUTOPILOT-34): overriding a run's failure
+      // verdict used to be hand-written prose in `notes`, so a PATTERN of
+      // overrides was invisible. `overrideReason` records it on the item as
+      // structured, append-only history (and still writes the human line).
+      const overrideReason = typeof params.overrideReason === "string" ? params.overrideReason.trim() : "";
+      const override = overrideReason
+        ? {
+            at: new Date().toISOString(),
+            by: "orchestrator" as const,
+            runId: cur.runId,
+            reason: overrideReason,
+            evidence: cur.landedEvidence ?? null,
+          }
+        : null;
+      const overrideNote = override
+        ? `[override] ${override.at} — the run's failure verdict was OVERRIDDEN by the orchestrator: ${override.reason}`
+        : "";
+      const patchedNotes = params.notes as string | undefined;
       updateItem(store, key, {
         status: params.status as never,
         blocker: params.blocker as never,
@@ -239,11 +258,23 @@ export async function queueUpdate(ctx: QueueOpsCtx, params: Record<string, unkno
         risk: params.risk as string | undefined,
         // Explicit param wins; absent param leaves the recorded budget alone.
         ...(params.timeoutMs !== undefined ? { timeoutMs: normalizeTimeoutMs(params.timeoutMs) } : {}),
-        notes: params.notes as string | undefined,
+        ...(isDispatchClass(params.dispatchClass) ? { dispatchClass: params.dispatchClass } : {}),
+        ...(override ? { overrides: appendOverride(cur, override) } : {}),
+        notes: override
+          ? [patchedNotes ?? cur.notes, overrideNote].filter(Boolean).join("\n\n")
+          : patchedNotes,
       });
-      return { kind: "updated" as const, renamedTo: renamingProvisional ? renameProvisionalKey(ctx.stateDir, store, key) : null };
+      return {
+        kind: "updated" as const,
+        renamedTo: renamingProvisional ? renameProvisionalKey(ctx.stateDir, store, key) : null,
+        overrides: override ? (store.items[key].overrides?.length ?? 0) : 0,
+      };
     });
     if (outcome.kind === "missing") return { text: `queue_update: no item '${key}'`, details: {} };
+    const overrideNote =
+      outcome.kind === "updated" && outcome.overrides > 0
+        ? ` — failure-verdict OVERRIDE recorded on the item (${outcome.overrides} total; a pattern of overrides means the runtime verdict is systematically wrong for this class of work — or that failures are being waved through)`
+        : "";
     if (outcome.kind === "unready") {
       return { text: "queue_update: approval requires a complete scope + cwd (the scope is the worker prompt; cwd is the repo it runs in) — blocked items are for waiting, not dispatchable work", details: {} };
     }
@@ -251,7 +282,7 @@ export async function queueUpdate(ctx: QueueOpsCtx, params: Record<string, unkno
       const series = /^([A-Za-z0-9_-]+?)-\d+/.exec(outcome.renamedTo)?.[1] ?? outcome.renamedTo;
       return { text: `updated '${key}' → approved; provisional key renamed to '${outcome.renamedTo}' (series ${series})`, details: { renamedFrom: key, key: outcome.renamedTo } };
     }
-    return { text: `updated '${key}'`, details: {} };
+    return { text: `updated '${key}'${overrideNote}`, details: {} };
   } catch (e) {
     return err(e, "queue_update");
   }
@@ -282,13 +313,33 @@ export async function queueDispatch(ctx: QueueOpsCtx, params: Record<string, unk
     // and review inherit it too. Unset → undefined passthrough (runtime default).
     const requestedTimeout = normalizeTimeoutMs(params.timeoutMs);
     const timeoutMs = requestedTimeout ?? item.timeoutMs ?? undefined;
+    // FINISHER-EVIDENCE (AUTOPILOT-34): a dispatch may DECLARE that it writes
+    // OUTSIDE its worktree — a merge finisher lands an approved branch in the
+    // TARGET REPO'S CHECKOUT (`cwd`) and leaves its worktree untouched by
+    // design. Record the class + the cwd's HEAD as the dispatch BASELINE, so
+    // the completion path can judge that run on a HEAD move instead of on the
+    // runtime's "no worktree edits" signal (which always misreads this class).
+    const dispatchClass: DispatchClass = isDispatchClass(params.dispatchClass)
+      ? params.dispatchClass
+      : item.dispatchClass === "finisher"
+        ? "finisher"
+        : "worker";
+    const finisherBaseline = dispatchClass === "finisher" ? captureFinisherBaseline(cwd, null) : null;
     const runId = await ctx.backend.spawn(params.task as string, { cwd, timeoutMs });
     if (!runId) return { text: "queue_dispatch: spawned but no run id returned", details: {} };
     // The spawn happens OUTSIDE the mutation (mutateStore may re-run its apply
     // on a conflict; a spawn must happen exactly once). The store change that
     // records the run goes through the safe path.
     mutateStore(ctx.stateDir, (s) => {
-      if (s.items[key]) updateItem(s, key, { status: "active", runId, ...(requestedTimeout ? { timeoutMs: requestedTimeout } : {}) });
+      if (s.items[key]) {
+        updateItem(s, key, {
+          status: "active",
+          runId,
+          ...(requestedTimeout ? { timeoutMs: requestedTimeout } : {}),
+          dispatchClass,
+          ...(finisherBaseline ? { finisherBaseline: { ...finisherBaseline, runId } } : {}),
+        });
+      }
     });
     try {
       // Worktree handoff preservation starts AT DISPATCH: journal + keep-ref
@@ -305,7 +356,11 @@ export async function queueDispatch(ctx: QueueOpsCtx, params: Record<string, unk
     const autoNote = item.status === "approved" && isAutoDispatchable(item)
       ? " WARNING: auto-dispatchable (approved + scope + cwd + low/med) — the harness will dispatch this itself when a slot frees; manual dispatch risks a duplicate worker. Override ok, but only if you mean it."
       : "";
-    return { text: `dispatched '${key}' — run ${runId}.${autoNote}`, details: { runId } };
+    const finisherNote =
+      dispatchClass === "finisher"
+        ? ` FINISHER-CLASS: this dispatch writes into ${cwd} (not its worktree); success is judged on a HEAD move from baseline ${finisherBaseline?.sha ? finisherBaseline.sha.slice(0, 8) : "unreadable"}, so a runtime 'no edits' failure verdict is overridden (and recorded) when the work lands.`
+        : "";
+    return { text: `dispatched '${key}' — run ${runId}.${autoNote}${finisherNote}`, details: { runId, dispatchClass } };
   } catch (e) {
     return err(e, "queue_dispatch");
   }

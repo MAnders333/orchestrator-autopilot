@@ -37,6 +37,7 @@ import {
 import type { Tick, TickReason, CompletionEvent, DomainEvent, AutopilotResult } from "./types.ts";
 import type { AutopilotConfig } from "./config.ts";
 import { parseVerdict } from "./verdict.ts";
+import { appendOverride, finisherLandedEvidence, isFinisherItem, landedNote, landedOverride } from "./finisher-evidence.ts";
 import { collectRunIds } from "./run-ids.ts";
 import { formatDurationMs } from "./duration.ts";
 
@@ -131,11 +132,14 @@ export class Autopilot {
     this.logEvent("complete", { runId: topRunId, agent: ev.agent, success: ev.success, status: ev.status });
 
     const candidates = collectRunIds(ev);
-    const outcome: "failed" | "ai-review" = ev.success === false || ev.timedOut ? "failed" : "ai-review";
+    let outcome: "failed" | "ai-review" = ev.success === false || ev.timedOut ? "failed" : "ai-review";
 
     let flipped = false;
     let flippedKey = "";
     let failCause: FailCause | null = null;
+    /** FINISHER-EVIDENCE (AUTOPILOT-34): set when a runtime failure verdict was
+     *  overridden because the item's work is evidenced as LANDED. */
+    let landedOverrideNote: string | null = null;
     const store = loadStore(this.cfg.stateDir);
     if (store) {
       for (const cand of candidates) {
@@ -150,6 +154,37 @@ export class Autopilot {
           // The store change goes through mutateStore (load → apply → write,
           // serialized + CAS): a harness flip on a timer used to clobber a
           // concurrent tool write with its own whole-file snapshot.
+          // FINISHER-EVIDENCE (AUTOPILOT-34): a FINISHER-CLASS run writes into
+          // the declared cwd's checkout, NOT its worktree, so the runtime's
+          // "no edits in the worktree" signal cannot judge it. Before believing
+          // a failure verdict, ask the authoritative record: did the declared
+          // cwd's HEAD move off the dispatch baseline? If it did, the work
+          // LANDED — the verdict is overridden (and the override RECORDED, so
+          // a pattern of overrides is visible), and the item takes the normal
+          // success path. A finisher whose HEAD did NOT move has no evidence,
+          // so its failure stands — the real "wrote a plan and stopped" case.
+          if (outcome === "failed" && isFinisherItem(it)) {
+            const evidence = finisherLandedEvidence(it, now);
+            if (evidence) {
+              const note = landedNote(evidence, topRunId, now);
+              mutateStore(this.cfg.stateDir, (s) => {
+                const fresh = s.items[it.key];
+                if (!fresh || fresh.status !== "active") return;
+                updateItem(s, it.key, {
+                  status: "ai-review",
+                  landedEvidence: evidence,
+                  overrides: appendOverride(fresh, landedOverride(evidence, topRunId, now)),
+                  notes: fresh.notes ? `${fresh.notes}\n\n${note}` : note,
+                });
+              });
+              outcome = "ai-review";
+              landedOverrideNote = note;
+              flipped = true;
+              flippedKey = it.key;
+              this.logEvent("flip", { key: it.key, runId: cand, outcome, source: "finisher-landed" });
+              break;
+            }
+          }
           if (outcome === "failed") {
             failCause = workerFailCause(ev, it.timeoutMs, it.updatedAt, now);
             const capNote = failCause === "budget-capped"
@@ -219,6 +254,29 @@ export class Autopilot {
               budgetCapped: capped,
               ...(cap !== null ? { timeoutMs: cap } : {}),
             },
+          },
+          domainEvents,
+          flipped,
+          freedSlot,
+          reviewerCompleted: isReviewerRun,
+        };
+      }
+      // A FALSE FAILURE THAT THE QUEUE OVERRODE must be visible: the operator
+      // just saw the runtime report the run as failed, while the queue moved
+      // the item forward on landed evidence. Silence there is how the two
+      // views drift apart (and how a real failure eventually gets waved
+      // through). The override itself is already RECORDED on the item.
+      if (landedOverrideNote) {
+        const evidence = loadStore(this.cfg.stateDir)?.items[flippedKey]?.landedEvidence ?? null;
+        domainEvents.push({ name: "orch:failure-overridden", data: { key: flippedKey, runId: topRunId, evidence } });
+        return {
+          tick: {
+            reason: "review",
+            message:
+              `[orch-tick: review] ${flippedKey} — the runtime reported run ${topRunId.slice(0, 8)} UNSUCCESSFUL, but this is a FINISHER-CLASS dispatch (writes outside its worktree) and its work LANDED: ` +
+              `${evidence ? `${evidence.repo} ${evidence.ref ?? "HEAD"} ${String(evidence.fromSha ?? "?").slice(0, 8)} → ${evidence.sha.slice(0, 8)}` : "HEAD moved in the declared cwd"}. ` +
+              `The failure verdict was OVERRIDDEN (recorded in the item's overrides[]) and ${flippedKey} moved to ai-review — do NOT re-dispatch it; verify the landed commit. Respond ≤2 lines.`,
+            facts: { key: flippedKey, outcome: "ai-review", failureOverridden: true, ...(evidence ? { landedSha: evidence.sha, repo: evidence.repo } : {}) },
           },
           domainEvents,
           flipped,
