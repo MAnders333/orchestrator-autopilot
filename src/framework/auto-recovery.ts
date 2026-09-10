@@ -44,6 +44,8 @@ import type { SubagentBackend } from "../backends/types.ts";
 import { workerTask } from "./auto-dispatch.ts";
 import { appendOverride, finisherLandedEvidence, isFinisherItem, landedOverride } from "../finisher-evidence.ts";
 import { preserveRunWorktree } from "./worktree-preservation.ts";
+import { assessRequestedBudget, RUNTIME_STEP_BUDGET_CEILING_MS } from "./run-budget.ts";
+import { formatDurationMs } from "../duration.ts";
 import {
   loadRecoveryState,
   saveRecoveryState,
@@ -75,21 +77,42 @@ export interface RecoveryPlan {
   cause: FailCause;
   /** Attempts allowed for this cause (already clamped to the global cap). */
   maxAttempts: number;
-  /** The wall-clock budget the re-dispatch runs under (null = runtime default). */
+  /** The wall-clock budget the re-dispatch runs under (null = runtime default).
+   *  Already clamped to what the runtime will actually honour — see below. */
   budgetMs: number | null;
+  /** budget-capped only: did the budget ACTUALLY grow over the prior run's?
+   *  False when the ×1.5 escalation was absorbed by the runtime ceiling, which
+   *  is the normal case for a fleet with no per-agent `timeoutMs`. */
+  budgetGrew: boolean;
   /** The task block appended after KEY + scope (the P5 recovery context). */
   context: string;
 }
 
-/** The deterministic plan for one failed item: cap, budget, task context. */
+/** The deterministic plan for one failed item: cap, budget, task context.
+ *
+ *  AUTOPILOT-47 A: the ×1.5 escalation is CLAMPED to what the runtime will
+ *  honour. Escalating a capped item to a nominal 3h was pure fiction — the
+ *  runtime truncates every child to its per-step ceiling — and the fiction was
+ *  not harmless: `workerFailCause`'s deterministic cap backstop compares the
+ *  run's lifetime against the item's recorded `timeoutMs`, so an inflated
+ *  budget made a genuinely capped run look like a VERDICT failure (fewer
+ *  recovery attempts, and a note telling the operator "not budget-capped" about
+ *  a run the budget killed). Recording only an honourable number keeps that
+ *  classification correct and stops promising the worker time it will not get. */
 export function recoveryPlan(item: QueueItem, cause: FailCause, globalMax = MAX_RECOVERIES): RecoveryPlan {
   const maxAttempts = Math.max(1, Math.min(CAUSE_MAX_ATTEMPTS[cause] ?? globalMax, globalMax));
   if (cause === "budget-capped") {
     const base = item.timeoutMs && item.timeoutMs > 0 ? item.timeoutMs : DEFAULT_BUDGET_MS;
-    const budgetMs = Math.min(Math.round(base * BUDGET_MULTIPLIER), BUDGET_MAX_MS);
-    return { cause, maxAttempts, budgetMs, context: recoveryContext(cause, item.dispatchClass) };
+    const escalated = Math.min(Math.round(base * BUDGET_MULTIPLIER), BUDGET_MAX_MS);
+    const budgetMs = assessRequestedBudget(escalated).effectiveMs ?? escalated;
+    // Compared against `base`, which IS the budget the prior run effectively ran
+    // under — including the runtime default when nothing was recorded. Comparing
+    // against a null-as-0 would call the very first escalation "bigger" when it
+    // lands on the same wall the unbudgeted run already hit.
+    const budgetGrew = budgetMs > base;
+    return { cause, maxAttempts, budgetMs, budgetGrew, context: recoveryContext(cause, item.dispatchClass, budgetGrew) };
   }
-  return { cause, maxAttempts, budgetMs: item.timeoutMs ?? null, context: recoveryContext(cause, item.dispatchClass) };
+  return { cause, maxAttempts, budgetMs: item.timeoutMs ?? null, budgetGrew: false, context: recoveryContext(cause, item.dispatchClass) };
 }
 
 /** The P5 recovery context appended to a re-dispatch task. P5 is the
@@ -105,13 +128,19 @@ export function recoveryPlan(item: QueueItem, cause: FailCause, globalMax = MAX_
  *  HOLDS finisher-class items rather than re-dispatching them, so today this
  *  branch is reached only through this exported function; it exists so the
  *  text stays correct for the class if that hold is ever narrowed.) */
-export function recoveryContext(cause: FailCause, dispatchClass: DispatchClass = "worker"): string {
+export function recoveryContext(cause: FailCause, dispatchClass: DispatchClass = "worker", budgetGrew = false): string {
   const lines = [
     "## Recovery re-dispatch (P5)",
     `This item previously FAILED (cause: ${cause}); this is an automated recovery re-dispatch.`,
     ...(cause === "budget-capped"
       ? [
-          "The prior run was CUT OFF by its wall-clock budget mid-task — this re-dispatch runs with a BIGGER budget (see the launch). Land a committable increment EARLY (commit on your branch before long test/fix cycles), then continue.",
+          // AUTOPILOT-47 A: only claim a bigger budget when there IS one. The
+          // runtime ceiling normally absorbs the escalation, and telling a
+          // worker it has more time than it does is the exact failure this item
+          // exists to end — it plans work that cannot finish.
+          budgetGrew
+            ? "The prior run was CUT OFF by its wall-clock budget mid-task — this re-dispatch runs with a BIGGER budget (see the launch). Land a committable increment EARLY (commit on your branch before long test/fix cycles), then continue."
+            : `The prior run was CUT OFF by its wall-clock budget mid-task, and this re-dispatch gets THE SAME WALL — the runtime caps every spawned child at ${formatDurationMs(RUNTIME_STEP_BUDGET_CEILING_MS)} and no per-item budget can raise it. Do NOT plan a run longer than that. COMMIT EARLY AND OFTEN on your branch: a committed partial survives the cap and the next attempt resumes from it, an uncommitted worktree does not.`,
         ]
       : []),
     ...(cause === "spawn"
@@ -127,9 +156,11 @@ export function recoveryContext(cause: FailCause, dispatchClass: DispatchClass =
   return lines.join("\n");
 }
 
-/** Build the recovery task: the original worker task (KEY + scope) + context. */
+/** Build the recovery task: the original worker task (KEY + scope) + context.
+ *  The context comes from the PLAN so the budget the task describes and the
+ *  budget the spawn actually gets are one decision, not two that can drift. */
 export function recoveryTask(item: QueueItem, cause: FailCause): string {
-  return `${workerTask(item)}\n\n${recoveryContext(cause, item.dispatchClass)}`;
+  return `${workerTask(item)}\n\n${recoveryPlan(item, cause).context}`;
 }
 
 export interface RecoveryOptions {

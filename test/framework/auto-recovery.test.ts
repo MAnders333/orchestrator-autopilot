@@ -18,6 +18,7 @@ import {
   BUDGET_MAX_MS,
   DEFAULT_BUDGET_MS,
 } from "../../src/framework/auto-recovery.ts";
+import { RUNTIME_STEP_BUDGET_CEILING_MS } from "../../src/framework/run-budget.ts";
 import { loadRecoveryState, recordProviderFailure, saveRecoveryState } from "../../src/framework/recovery-state.ts";
 import { autoDispatchEligible } from "../../src/framework/auto-dispatch.ts";
 import { createFrameworkRunner } from "../../src/framework/runner.ts";
@@ -81,11 +82,40 @@ function recordingBackend(impl?: () => Promise<string>): { backend: SubagentBack
 }
 
 describe("recoveryPlan — the deterministic per-cause policy", () => {
-  test("budget-capped → timeoutMs ×1.5, capped at 3h", () => {
-    expect(recoveryPlan(item({ key: "A", timeoutMs: HOUR }), "budget-capped")).toMatchObject({ maxAttempts: 2, budgetMs: HOUR * 1.5 });
-    expect(recoveryPlan(item({ key: "B", timeoutMs: 4 * HOUR }), "budget-capped").budgetMs).toBe(BUDGET_MAX_MS);
-    // no recorded budget → grow from the observed runtime default
-    expect(recoveryPlan(item({ key: "C", timeoutMs: null }), "budget-capped").budgetMs).toBe(Math.round(DEFAULT_BUDGET_MS * 1.5));
+  // AUTOPILOT-47 A: the ×1.5 escalation is real ARITHMETIC but is clamped to
+  // what the runtime will honour. Recording a budget the runtime truncates does
+  // not buy time; it only breaks cap DETECTION (workerFailCause compares the
+  // run's lifetime against the recorded budget) and lies to the worker.
+  test("budget-capped → timeoutMs ×1.5, capped at 3h, then CLAMPED to what the runtime honours", () => {
+    expect(recoveryPlan(item({ key: "A", timeoutMs: HOUR }), "budget-capped")).toMatchObject({
+      maxAttempts: 2,
+      budgetMs: RUNTIME_STEP_BUDGET_CEILING_MS, // HOUR*1.5 is unhonourable
+      budgetGrew: false,
+    });
+    // the 3h outer bound is still unreachable in practice — the ceiling binds first
+    expect(recoveryPlan(item({ key: "B", timeoutMs: 4 * HOUR }), "budget-capped").budgetMs).toBe(RUNTIME_STEP_BUDGET_CEILING_MS);
+    expect(BUDGET_MAX_MS).toBeGreaterThan(RUNTIME_STEP_BUDGET_CEILING_MS);
+    // no recorded budget → the escalation from the runtime default is likewise clamped
+    expect(recoveryPlan(item({ key: "C", timeoutMs: null }), "budget-capped").budgetMs).toBe(RUNTIME_STEP_BUDGET_CEILING_MS);
+    expect(DEFAULT_BUDGET_MS * 1.5).toBeGreaterThan(RUNTIME_STEP_BUDGET_CEILING_MS);
+  });
+
+  test("budgetGrew is TRUE only when the clamped budget really exceeds the prior run's", () => {
+    // a sub-ceiling prior budget CAN still grow — the escalation is not a no-op
+    // everywhere, only where the ceiling absorbs it
+    const small = recoveryPlan(item({ key: "S1", timeoutMs: 10 * 60_000 }), "budget-capped");
+    expect(small.budgetMs).toBe(15 * 60_000);
+    expect(small.budgetGrew).toBe(true);
+    // already AT the ceiling → the re-dispatch gets the same wall, and says so
+    const atCeiling = recoveryPlan(item({ key: "S2", timeoutMs: RUNTIME_STEP_BUDGET_CEILING_MS }), "budget-capped");
+    expect(atCeiling.budgetMs).toBe(RUNTIME_STEP_BUDGET_CEILING_MS);
+    expect(atCeiling.budgetGrew).toBe(false);
+    // NO recorded budget → the prior run already ran under the runtime default,
+    // so landing on that same wall is NOT growth and must not be sold as one
+    const unbudgeted = recoveryPlan(item({ key: "S3", timeoutMs: null }), "budget-capped");
+    expect(unbudgeted.budgetMs).toBe(RUNTIME_STEP_BUDGET_CEILING_MS);
+    expect(unbudgeted.budgetGrew).toBe(false);
+    expect(unbudgeted.context).toContain("THE SAME WALL");
   });
   test("verdict + zombie → ONE recovery re-dispatch; spawn → retries up to the cap", () => {
     expect(recoveryPlan(item({ key: "V" }), "verdict").maxAttempts).toBe(1);
@@ -106,8 +136,19 @@ describe("recoveryTask — P5 context rides the re-dispatch", () => {
     expect(t).toContain("## Recovery re-dispatch (P5)");
     expect(t).toContain("pi-parallel-<runid>-0");
     expect(t).toContain("NEVER commit or merge to main");
-    expect(recoveryContext("budget-capped")).toContain("BIGGER budget");
+    expect(recoveryContext("budget-capped", "worker", true)).toContain("BIGGER budget");
     expect(recoveryContext("spawn")).toContain("rejected the previous run AT SPAWN");
+  });
+
+  test("a capped re-dispatch that gets NO extra time is told so, not promised a bigger budget (AUTOPILOT-47 A)", () => {
+    // Promising time the runtime will not grant is the exact failure this item
+    // exists to end: the worker plans work that cannot finish.
+    const same = recoveryContext("budget-capped", "worker", false);
+    expect(same).not.toContain("BIGGER budget");
+    expect(same).toContain("THE SAME WALL");
+    expect(same).toContain("COMMIT EARLY AND OFTEN");
+    // and the item's own plan drives it, so no call site has to remember
+    expect(recoveryTask(item({ key: "CAPX", timeoutMs: 2 * HOUR }), "budget-capped")).toContain("THE SAME WALL");
   });
 
   test("the main-write rule is DISPATCH-CLASS aware: a finisher is not told never to merge (AUTOPILOT-46)", () => {
@@ -137,14 +178,19 @@ describe("autoRecoverFails — capped → bigger budget", () => {
     // pass 2 (after the backoff): the re-dispatch runs with the bigger budget
     const p2 = await autoRecoverFails(f.dir, backend, { now: NOW + BACKOFF + 1, backoffMs: BACKOFF });
     expect(p2.recovered).toHaveLength(1);
-    expect(p2.recovered[0]).toMatchObject({ key: "CAP1", attempt: 1, cause: "budget-capped", budgetMs: Math.round(HOUR * 1.5) });
+    // AUTOPILOT-47 A: ×1.5 of an hour is 90m, which the runtime would truncate
+    // to its ceiling — so the recorded and dispatched budget is the HONOURABLE
+    // one. Recording 90m would not buy a minute; it would only stop the next
+    // cap from being recognised as a cap.
+    expect(p2.recovered[0]).toMatchObject({ key: "CAP1", attempt: 1, cause: "budget-capped", budgetMs: RUNTIME_STEP_BUDGET_CEILING_MS });
     expect(spawns).toHaveLength(1);
-    expect(spawns[0].timeoutMs).toBe(Math.round(HOUR * 1.5)); // the recorded budget rides the re-dispatch
+    expect(spawns[0].timeoutMs).toBe(RUNTIME_STEP_BUDGET_CEILING_MS); // the recorded budget rides the re-dispatch
     expect(spawns[0].task).toContain("KEY: CAP1");
+    expect(spawns[0].task).toContain("THE SAME WALL"); // and it is not promised time it will not get
     const after = read(f.dir).items["CAP1"];
     expect(after.status).toBe("active");
     expect(after.runId).toBe("run-1");
-    expect(after.timeoutMs).toBe(Math.round(HOUR * 1.5));
+    expect(after.timeoutMs).toBe(RUNTIME_STEP_BUDGET_CEILING_MS);
     expect(after.recoveries).toBe(1);
     expect(after.failCause).toBeNull(); // leaving failed clears the stale cause
     expect(after.recoveryNotBefore).toBeNull(); // and the scheduling gate
@@ -417,13 +463,15 @@ describe("AUTO-RECOVER-FAILS through the runner (delivery + announcement)", () =
     runner.onTimer(); // arms the backoff + schedules the recovery timer
     await new Promise((r) => setTimeout(r, 120));
     expect(spawns).toHaveLength(1);
-    expect(spawns[0].timeoutMs).toBe(Math.round(HOUR * 1.5));
+    // the announced budget is the one the runtime will honour, not the ×1.5
+    // fiction — the orchestrator must not report time the run will not get
+    expect(spawns[0].timeoutMs).toBe(RUNTIME_STEP_BUDGET_CEILING_MS);
     const tick = delivered.find((m) => m.includes("[orch-tick: recover]"));
     expect(tick).toBeTruthy();
     expect(tick).toContain("re-dispatched R1");
     expect(tick).toContain("attempt 1");
     expect(tick).toContain("budget-capped");
-    expect(tick).toContain("budget 1h30m");
+    expect(tick).toContain("budget 30m");
     runner.stop();
   });
 });

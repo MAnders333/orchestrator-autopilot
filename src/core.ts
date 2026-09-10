@@ -40,6 +40,7 @@ import { parseVerdict } from "./verdict.ts";
 import { appendOverride, finisherLandedEvidence, isFinisherItem, landedNote, landedOverride } from "./finisher-evidence.ts";
 import { collectRunIds } from "./run-ids.ts";
 import { formatDurationMs } from "./duration.ts";
+import { assessRequestedBudget } from "./framework/run-budget.ts";
 
 // The snapshot shape the tick engine consumes (derived from the queue store).
 // The legacy md parser (queue.ts) is RETIRED — state.md exists only as a
@@ -978,9 +979,18 @@ function deadRunFailCause(error: string | null): FailCause {
  *  are ever classified by elapsed. */
 function workerFailCause(ev: CompletionEvent, timeoutMs: number | null | undefined, updatedAt: string, now: number): FailCause {
   if (ev.timedOut === true) return "budget-capped";
-  if (timeoutMs && timeoutMs > 0) {
+  // The backstop compares the run's lifetime against the budget the RUNTIME
+  // WOULD HONOUR, not the one that was requested (AUTOPILOT-47 A). A request
+  // above the runtime's per-step ceiling is silently truncated, so a run asked
+  // for 2h is killed at 30m — comparing against the 2h request would never
+  // fire and the cap would be misfiled as a `verdict` failure (fewer recovery
+  // attempts, and a note telling the operator "not budget-capped" about a run
+  // the budget killed). That misclassification was observed on AUTOPILOT-47's
+  // own first attempt.
+  const honouredMs = assessRequestedBudget(timeoutMs).effectiveMs;
+  if (honouredMs && honouredMs > 0) {
     const startedAt = Date.parse(updatedAt || "");
-    if (Number.isFinite(startedAt) && now - startedAt >= timeoutMs) return "budget-capped";
+    if (Number.isFinite(startedAt) && now - startedAt >= honouredMs) return "budget-capped";
   }
   // PROVIDER/INFRA (AUTO-RECOVER-FAILS): a run that ended unsuccessful with NO
   // deliverable text at all — the provider returned an empty api_error / the

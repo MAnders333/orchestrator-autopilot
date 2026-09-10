@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { Autopilot } from "../../src/core.ts";
 import { loadAutopilotConfig } from "../../src/config.ts";
 import { newStore, addItem, loadStoreOrNew, saveStore, type QueueStore } from "../../src/queue-store.ts";
-import { queueDispatch, type QueueOpsCtx } from "../../src/tools/queue-ops.ts";
+import { queueAdd, queueDispatch, queueUpdate, type QueueOpsCtx } from "../../src/tools/queue-ops.ts";
 import type { SubagentBackend } from "../../src/backends/types.ts";
 import {
   RUNTIME_STEP_BUDGET_CEILING_MS,
@@ -141,6 +141,29 @@ describe("run budget — a budget the runtime cannot honour is never accepted in
       } finally {
         rmSync(dir2, { recursive: true, force: true });
       }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The operator plans against the number they SET, so the dispatch receipt is
+  // already too late: by then the plan is written against time that does not
+  // exist. queue_add / queue_update warn where the promise is made.
+  test("queue_add and queue_update warn where the budget is RECORDED, not only where it is spent", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "orch-run-budget-record-"));
+    try {
+      const ctx = opsCtx(dir, backendStub().backend);
+      const added = await queueAdd(ctx, { title: "t", scope: "do the thing", cwd: tmpdir(), risk: "low", timeoutMs: INCIDENT_REQUEST_MS });
+      expect(added.text).toContain("BUDGET NOT HONOURED");
+
+      const key = loadStoreOrNew(dir).items ? Object.keys(loadStoreOrNew(dir).items)[0]! : "";
+      const raised = await queueUpdate(ctx, { key, timeoutMs: INCIDENT_REQUEST_MS });
+      expect(raised.text).toContain("BUDGET NOT HONOURED");
+
+      // an honourable budget is silent …
+      expect((await queueUpdate(ctx, { key, timeoutMs: 900_000 })).text).not.toContain("BUDGET NOT HONOURED");
+      // … and an update that does not touch the budget is not nagged about one
+      expect((await queueUpdate(ctx, { key, notes: "unrelated" })).text).not.toContain("BUDGET NOT HONOURED");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
