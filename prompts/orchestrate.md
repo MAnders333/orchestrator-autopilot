@@ -159,6 +159,7 @@ repo/workstream: read the **queue-id-series** skill.
 - `queue_add` — new proposal/approved item
 - `queue_update` — status (validated transitions), `blocker`, notes — free-form
 - `queue_dispatch` — spawn worker (same executor as subagent; fresh context, worktree isolation) + record `approved→active` + runId — ONE call
+- `queue_dispatch(..., dispatchClass: "finisher", finisherSource: "<branch/sha to land>")` — **dispatching a MERGE FINISHER**: it writes into the TARGET repo's checkout, not its worktree, so the runtime reports "no edits / planning output" even when the merge landed. Declaring the class + source lets the framework override that false failure against the recorded baseline (skill → dispatch contract). Evidence covers a merge/fast-forward or a clean cherry-pick/rebase (patch-equivalent) ONLY — a conflict-resolved cherry-pick, a multi-commit squash, or an MR-only (`mrs`) landing yield none, and closing those is your explicit `queue_update(key, {overrideReason})` call.
 
 **Deterministic facts the extension knows (for ticks and /autopilot status):**
 approved length (approved = dispatchable), fleet occupancy (event ledger), completions.

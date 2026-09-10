@@ -221,6 +221,99 @@ incident root). The policy lives in `autopilot.config.json`:
   sha right now AND the recorded baseline is that sha's first parent (the
   `merge --no-ff` shape), so any other main write still raises the violation.
 
+## Finisher-class dispatches — evidence for work that lands OUTSIDE the worktree
+
+A normal worker writes only inside its isolated worktree, so "did this run
+touch any files?" is a fair proxy for "did it do anything?". A **merge
+finisher** does not: it lands an approved branch in the TARGET REPO'S CHECKOUT
+(its declared `cwd`) and leaves its worktree untouched by design. A runtime
+that judges by worktree edits therefore reports the class whose success matters
+most as *"returned planning or scratchpad output instead of applying changes"*
+— observed live, on a merge that had already landed with a green suite. That is
+not only noise: auto-recovery treats `failed` as a re-dispatch candidate, so a
+false failure can RE-RUN A MERGE THAT ALREADY LANDED.
+
+For that class the queue's own record is authoritative:
+
+- **The dispatch declares the class AND what it lands**: `queue_dispatch(...,
+  dispatchClass: "finisher", finisherSource: "<branch/tag/sha>")` records
+  `dispatchClass` + `finisherSource` on the item and captures the declared cwd's
+  HEAD *and* that source's commit as `finisherBaseline` (repo, ref, sha, source,
+  sourceSha, run). Default is `worker` — nothing about plain workers changes.
+- **Success evidence is the declared source LANDING, not file edits and not a
+  bare HEAD move**: on completion, a finisher-class run reported unsuccessful is
+  checked against the baseline. Evidence requires all of: the baseline belongs to
+  THIS run, a source was declared and resolved, HEAD ADVANCED from the baseline
+  (baseline is an ancestor of HEAD), and the source is IN the checkout's history
+  now but was NOT at dispatch. Then the work LANDED: the item takes the normal
+  success path (`active → ai-review`, so the reviewer still verifies the commit),
+  the proof is stored as `landedEvidence`
+  (repo/ref/fromSha/sha/source/sourceSha/run), and an `[orch-tick: review]` tick
+  tells the operator the runtime verdict was overridden. A bare HEAD move is
+  deliberately NOT enough: the same checkout is written by the shipping lane's
+  `merge --no-ff` for other items, by a second finisher, and by humans.
+- **Which landing shapes count — exactly**: "IN the history" means EITHER the
+  declared commits are ancestors of HEAD (`merge --no-ff`, fast-forward) OR
+  every source commit has a PATCH-EQUIVALENT commit in HEAD's history
+  (`git cherry`, i.e. patch-id equality: clean cherry-pick, rebase, squash of a
+  single-commit source). Patch equivalence is not optional garnish: finishers in
+  this project routinely CHERRY-PICK because the approved branch's base is
+  stale, which creates new commits, so an ancestry-only check would evidence
+  almost nothing. The recorded evidence names the shape it found
+  (`landing: "ancestor" | "patch-equivalent"`).
+- **What produces NO evidence — say it out loud**: a **conflict-resolved**
+  cherry-pick/rebase (resolving the conflict rewrites the patch, so patch-id
+  equality fails; deciding it landed needs content judgment, which is the
+  reviewer's call, not a git predicate), a **squash of a multi-commit source**
+  (one combined patch matches none of the source patch-ids), and any landing
+  that never moves the declared checkout — notably the shipping lane's **`mrs`
+  flow**, which pushes the branch and opens an MR, leaving the local HEAD where
+  it was. In all of those the runtime's failure verdict STANDS: the operator
+  verifies the commit and overrides deliberately with
+  `queue_update(..., overrideReason: "…")`. That is the fail-closed side of the
+  trade — a check that quietly covered these would be worse than no check.
+- **Overrides are RECORDED, not folklore**: every override of a failure verdict
+  appends to the item's `overrides[]` (`by: framework` with the evidence, or
+  `by: orchestrator` via `queue_update(..., overrideReason: "…")`). A PATTERN of
+  overrides is then visible — either the runtime verdict is systematically wrong
+  for a class of work, or failures are being waved through.
+- **Auto-recovery refuses landed work**: a `failed` item whose work is evidenced
+  as landed is never re-dispatched. It is recorded, surfaced ONCE
+  (`[orch-tick: recover] … EVIDENCED AS LANDED`), and left for the human's
+  close-out call (`failed → done`) — a re-run would duplicate the merge.
+- **The real case still fails**: a finisher that did not land its declared
+  source has no evidence, so its failure stands — as does one dispatched with no
+  `finisherSource` at all (no source → no evidence path, by design).
+- **Every run is judged on its own**: entering `active` clears BOTH the previous
+  run's `landedEvidence` and its `finisherBaseline`, on the lifecycle edge in
+  `updateItem`, so every lane that re-activates an item is covered (queue
+  dispatch, harness auto-dispatch, review-FAIL re-dispatch, recovery
+  re-dispatch). Each of those lanes captures a FRESH baseline for the run it
+  spawns, and the landed check additionally refuses a baseline whose `runId` is
+  not the item's current run — which the item only HAS while it is active: on a
+  terminal status `runId` is null, and there the baseline is that item's most
+  recent dispatch BY CONSTRUCTION (entering `active` clears it, and only a
+  dispatch lane writes one), so there is no foreign baseline to refuse.
+  `finisherSource` is sticky (it describes the item's work, not one run) and the override LOG keeps the history.
+
+**Residual, stated plainly**: the evidence proves THE DECLARED SOURCE IS IN the
+target's history, not WHO put it there. A human (or another lane) merging the
+same branch during the run satisfies it too. The consequence is bounded on
+purpose: the item is moved off the failure path and LEFT FOR A HUMAN —
+auto-recovery declines to re-dispatch, and nothing closes the item — which is
+also the right handling when someone else landed it, because a re-run would
+still duplicate the merge. Everything else fails closed (unreadable repo,
+unresolvable source, missing/foreign baseline, non-advancing HEAD, a git
+question git cannot answer, or a landing shape outside the two above → no
+evidence).
+
+**Where this belongs eventually**: the pi runtime has a per-agent
+`completionGuard` flag — the right home for "this class of child writes outside
+its worktree". Using it needs an agent identity plus a spawn-time selector on
+`SubagentBackend.spawn`, and it would only fix the pi host. The queue-side lane
+above stays authoritative across hosts; a spawn-time `completionGuard` selector
+upstream is the cheaper host-specific complement, not a replacement.
+
 ## Worker-time budget governance (timeoutMs)
 
 Every item can carry a requested wall-clock budget (`timeoutMs`, set via
