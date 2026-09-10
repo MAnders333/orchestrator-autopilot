@@ -24,6 +24,7 @@ import {
 } from "../../src/queue-store.ts";
 import { buildPanelDoc } from "../../src/framework/panels.ts";
 import { formatDurationMs } from "../../src/duration.ts";
+import { RUNTIME_STEP_BUDGET_CEILING_MS } from "../../src/framework/run-budget.ts";
 
 const NOW = 1_800_000_000_000; // fixed clock — deterministic elapsed math
 const CAP = 43_200_000; // 12h — the observed incident request
@@ -129,6 +130,28 @@ describe("engine — a failed worker is never silent and its cause is explicit",
     const r = make(dir).handleAsyncComplete({ runId: "371d1bb9-aaaa-bbbb", agent: "worker", success: false });
     expect(r.tick?.facts.failCause).toBe("budget-capped");
     expect(read(dir).items["W-13"].failCause).toBe("budget-capped");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("AUTOPILOT-47: a run killed at the RUNTIME CEILING is a cap, even though its recorded budget is far larger", () => {
+    // THE MISCLASSIFICATION: the item asked for 12h, but the runtime truncates
+    // every child to its per-step ceiling and killed this run at 30m. Comparing
+    // the run's lifetime against the 12h REQUEST never fires, so the cap used to
+    // be filed as a `verdict` failure — fewer recovery attempts, and a note
+    // telling the operator "not budget-capped" about a run the budget killed.
+    // AUTOPILOT-47's own first attempt was mis-filed exactly this way.
+    const dir = dirWith([
+      item({
+        key: "W-47",
+        status: "active",
+        runId: "371d1bb9",
+        timeoutMs: CAP, // 12h requested
+        updatedAt: new Date(NOW - RUNTIME_STEP_BUDGET_CEILING_MS - 500).toISOString(), // died at the 30m wall
+      }),
+    ]);
+    const r = make(dir).handleAsyncComplete({ runId: "371d1bb9-aaaa-bbbb", agent: "worker", success: false });
+    expect(r.tick?.facts.failCause).toBe("budget-capped");
+    expect(read(dir).items["W-47"].failCause).toBe("budget-capped");
     rmSync(dir, { recursive: true, force: true });
   });
 
