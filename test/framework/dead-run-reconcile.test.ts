@@ -38,10 +38,13 @@ function runDirBackend(root: string, runs: Record<string, unknown | null>): { as
   return { asyncDirFor: (id) => (Object.hasOwn(runs, id) ? join(root, id) : null) };
 }
 
-function seed(stateDir: string, items: Array<Partial<Parameters<typeof addItem>[1]> & { key: string }>): void {
+type Seed = { key: string; runId?: string | null; updatedAt: string };
+
+function seed(stateDir: string, items: Seed[]): void {
   const store: QueueStore = newStore();
   for (const over of items) {
     addItem(store, {
+      key: over.key,
       title: over.key,
       status: "active",
       blocker: null,
@@ -56,14 +59,12 @@ function seed(stateDir: string, items: Array<Partial<Parameters<typeof addItem>[
       timeoutMs: null,
       attempts: 0,
       notes: "",
-      ...over,
-    } as Parameters<typeof addItem>[1]);
+      ...(over.runId !== undefined ? { runId: over.runId } : {}),
+    });
   }
   // addItem stamps updatedAt at wall-clock now and updateItem re-stamps it, so
   // the intended staleness is written straight onto the record.
-  for (const over of items) {
-    if (typeof over.updatedAt === "string") store.items[over.key]!.updatedAt = over.updatedAt;
-  }
+  for (const over of items) store.items[over.key]!.updatedAt = over.updatedAt;
   saveStore(stateDir, store);
 }
 

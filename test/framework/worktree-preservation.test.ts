@@ -32,6 +32,8 @@ import {
   reviewPointersFor,
   webUrlForCommit,
   deliverablePathsFor,
+  runWorktreePath,
+  recordActiveWorktrees,
 } from "../../src/framework/worktree-preservation.ts";
 import type { SubagentBackend } from "../../src/backends/types.ts";
 
@@ -121,6 +123,71 @@ const backendIdle: SubagentBackend = {
   steer: async () => "req-1",
   asyncDirFor: () => null,
 };
+
+// AUTOPILOT-47 C: keep refs save COMMITTED work. A reaped run's UNCOMMITTED
+// changes live only in its worktree DIRECTORY, and nothing recorded which one —
+// today's salvage matched run ids to pi-worktree-* paths by hand.
+describe("worktree path recording — post-mortem salvage without archaeology", () => {
+  test("runWorktreePath resolves the directory holding the run's pi-parallel branch", () => {
+    const repo = initRepo();
+    const runId = "run-wtpath-1";
+    makeParallelBranch(repo, runId, "work.txt", "partial");
+    const wt = mkdtempSync(join(tmpdir(), "orch-pi-worktree-"));
+    rmSync(wt, { recursive: true, force: true }); // git demands a non-existent path
+    g(repo, "worktree", "add", "-q", wt, `pi-parallel-${runId}-0`);
+    try {
+      expect(runWorktreePath(repo, runId)).toMatchObject({ branch: `pi-parallel-${runId}-0` });
+      // realpath: macOS tmpdir is a /var → /private/var symlink
+      expect(runWorktreePath(repo, runId)!.path).toContain("orch-pi-worktree-");
+      expect(runWorktreePath(repo, "run-that-never-ran")).toBeNull();
+    } finally {
+      g(repo, "worktree", "remove", "--force", wt);
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test("recordActiveWorktrees writes the path onto the ACTIVE item (and only for its current run)", () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "orch-wt-state-"));
+    const repo = initRepo();
+    const runId = "run-wtpath-2";
+    makeParallelBranch(repo, runId, "work.txt", "partial");
+    const wt = mkdtempSync(join(tmpdir(), "orch-pi-worktree-"));
+    rmSync(wt, { recursive: true, force: true });
+    g(repo, "worktree", "add", "-q", wt, `pi-parallel-${runId}-0`);
+    const store = newStore();
+    addItem(store, { key: "K-WT", title: "k", status: "active", blocker: null, scope: "s", cwd: repo, evidence: "", value: "", urgency: "", risk: "low", runId, reviewerRunId: null, timeoutMs: null, attempts: 0, notes: "" });
+    addItem(store, { key: "K-IDLE", title: "k2", status: "approved", blocker: null, scope: "s", cwd: repo, evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: null, timeoutMs: null, attempts: 0, notes: "" });
+    saveStore(stateDir, store);
+    try {
+      const recorded = recordActiveWorktrees(stateDir);
+      expect(recorded.map((r) => r.key)).toEqual(["K-WT"]);
+      const after = loadStore(stateDir)!;
+      expect(after.items["K-WT"].runWorktree).toMatchObject({ runId, branch: `pi-parallel-${runId}-0` });
+      expect(after.items["K-IDLE"].runWorktree ?? null).toBeNull();
+      // idempotent — a second pass finds nothing new to write
+      expect(recordActiveWorktrees(stateDir)).toEqual([]);
+    } finally {
+      g(repo, "worktree", "remove", "--force", wt);
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a run with no worktree records nothing — no invented path", () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "orch-wt-state-"));
+    const repo = initRepo();
+    const store = newStore();
+    addItem(store, { key: "K-NOWT", title: "k", status: "active", blocker: null, scope: "s", cwd: repo, evidence: "", value: "", urgency: "", risk: "low", runId: "run-no-worktree", reviewerRunId: null, timeoutMs: null, attempts: 0, notes: "" });
+    saveStore(stateDir, store);
+    try {
+      expect(recordActiveWorktrees(stateDir)).toEqual([]);
+      expect(loadStore(stateDir)!.items["K-NOWT"].runWorktree ?? null).toBeNull();
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("worktree preservation — module (success-path mechanics)", () => {
   test("a committed-but-unpushed parallel branch survives simulated runtime cleanup", () => {

@@ -21,7 +21,7 @@ import { createTickRouter, type TickHostState } from "./tick-router.ts";
 import { autoDispatchEligible, autoRedispatch, autoReview } from "./auto-dispatch.ts";
 import { autoRecoverFails } from "./auto-recovery.ts";
 import { decisionTick } from "./panels.ts";
-import { humanReviewTargetsFor, preserveActiveItems, prunePreservedRefs, preserveRunWorktree } from "./worktree-preservation.ts";
+import { humanReviewTargetsFor, preserveActiveItems, prunePreservedRefs, preserveRunWorktree, recordActiveWorktrees } from "./worktree-preservation.ts";
 import { checkMainWrites } from "./main-write-guard.ts";
 import { runShippingPass } from "./shipping.ts";
 import { runStateEvidence } from "./run-liveness.ts";
@@ -339,6 +339,10 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     // commits late still gets captured at the next state change. Best-effort.
     try {
       preserveActiveItems(opts.stateDir);
+      // AUTOPILOT-47 C: and record WHERE each active run's worktree is, so a
+      // reaped run's UNCOMMITTED changes are found by reading the item instead
+      // of matching run ids to pi-worktree-* directories by hand.
+      recordActiveWorktrees(opts.stateDir);
     } catch {
       // preservation must never break the sweep
     }

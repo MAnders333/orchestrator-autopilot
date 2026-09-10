@@ -31,7 +31,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { loadStore } from "../queue-store.ts";
+import { loadStore, mutateStore, updateItem } from "../queue-store.ts";
 
 /** Durable keep-ref namespace (gc-safe, hidden from `git branch`). */
 export const KEEP_REF_PREFIX = "refs/orchestrator/keep/";
@@ -133,6 +133,71 @@ export function preserveRunWorktree(input: {
     }
   }
   return entries;
+}
+
+/**
+ * WHERE this run's managed worktree lives on disk, from `git worktree list`.
+ *
+ * AUTOPILOT-47 C: keep-refs preserve COMMITTED work; a reaped run's UNCOMMITTED
+ * changes survive only in its worktree directory, and nothing recorded which
+ * directory that was — salvage meant matching run ids to `pi-worktree-*` paths
+ * by hand. The link is the branch: the runtime checks `pi-parallel-<runId>-*`
+ * out in exactly one worktree. Returns null when no worktree carries one of
+ * this run's parallel branches (best-effort, like every git call here).
+ */
+export function runWorktreePath(repo: string, runId: string): { path: string; branch: string } | null {
+  const branches = new Set(parallelBranches(repo, runId));
+  if (branches.size === 0) return null;
+  const out = git(repo, ["worktree", "list", "--porcelain"]);
+  if (!out) return null;
+  let path: string | null = null;
+  for (const line of out.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      path = line.slice("worktree ".length).trim();
+      continue;
+    }
+    if (!line.startsWith("branch ") || !path) continue;
+    const branch = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
+    if (branches.has(branch)) return { path, branch };
+  }
+  return null;
+}
+
+/**
+ * Record each ACTIVE item's worktree path on the item, so a post-mortem reads
+ * it instead of reconstructing it. Runs in the sweep because the worktree does
+ * NOT exist yet when dispatch returns — the runtime creates it after the spawn
+ * — so the first sweep after dispatch is the earliest honest moment.
+ * Idempotent: writes only when the resolved path differs from what is recorded.
+ */
+export function recordActiveWorktrees(stateDir: string): Array<{ key: string; path: string }> {
+  const store = loadStore(stateDir);
+  if (!store) return [];
+  const resolved: Array<{ key: string; runId: string; path: string; branch: string }> = [];
+  for (const it of Object.values(store.items)) {
+    if (it.status !== "active" || !it.runId || !it.cwd) continue;
+    if (it.runWorktree && it.runWorktree.runId === it.runId) continue; // already recorded for THIS run
+    let found: { path: string; branch: string } | null = null;
+    try {
+      found = runWorktreePath(it.cwd, it.runId);
+    } catch {
+      continue; // best-effort per item
+    }
+    if (found) resolved.push({ key: it.key, runId: it.runId, ...found });
+  }
+  if (resolved.length === 0) return [];
+  try {
+    mutateStore(stateDir, (s) => {
+      for (const r of resolved) {
+        const it = s.items[r.key];
+        if (!it || it.runId !== r.runId) continue; // the run moved on between read and write
+        updateItem(s, r.key, { runWorktree: { runId: r.runId, path: r.path, branch: r.branch } });
+      }
+    });
+  } catch {
+    return []; // recording a path must never break the sweep
+  }
+  return resolved.map((r) => ({ key: r.key, path: r.path }));
 }
 
 /** Preserve every ACTIVE item's run (the sweep's per-tick capture pass). */

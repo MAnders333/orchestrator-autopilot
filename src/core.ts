@@ -592,7 +592,11 @@ export class Autopilot {
           `dead-run reconciliation ${new Date(now).toISOString()} — run ${c.runId} reports state '${c.phase}' in its own status.json ` +
           `while this item sat active ~${Math.round(c.idleMs / 60_000)}m past update: the completion event was lost.` +
           (c.error ? ` Run error: ${c.error}` : "") +
-          ` Partial work may exist on pi-parallel-* branches — verify before re-dispatch.`;
+          ` Partial work may exist on pi-parallel-* branches — verify before re-dispatch.` +
+          // AUTOPILOT-47 C: UNCOMMITTED work survives only in the run's worktree
+          // directory; naming it here is the difference between a mechanical
+          // salvage and matching run ids to pi-worktree-* paths by hand.
+          (it.runWorktree?.path ? ` Uncommitted work (if any) is in the run's worktree: ${it.runWorktree.path}` : "");
         updateItem(s, key, {
           status: "failed",
           failCause: deadRunFailCause(c.error),
