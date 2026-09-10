@@ -238,6 +238,18 @@ conflict/non-forced failure, or the manual-mode nudge).
     cannot flip a LIVE parent on an undercount-to-0 (a genuine 0 requires the
     RPC AND the inventory to both report idle). Tests isolate the inventory
     scan via AUTOPILOT_PI_ASYNC_ROOT / the backend's asyncDirRoot seam.
+  - **A failing fleet RPC DEGRADES, it does not stop the sweep (AUTOPILOT-24)**:
+    a `fleetStatus()` that THROWS is contained — the sweep continues with an
+    UNKNOWN fleet, so auto-dispatch and auto-recovery still run off the
+    store/ledger inventory and zombie reconciliation is SUSPENDED (unknown is
+    passed as `undefined`, never coerced to 0, so an RPC blip can never flip a
+    live item to `failed`). The degradation is announced with ONE
+    `[orch-tick: harness]` tick when the episode starts and ONE when the RPC
+    recovers (`fleet-rpc` telemetry records every transition) — never silent,
+    never per-sweep. Every sweep trigger is `.catch`-guarded, so a sweep that
+    fails for any other reason is recorded (`sweep-failure` telemetry + one
+    tick per failing episode) instead of escaping as an unhandled rejection in
+    the host process.
 - **intake** — approved count < `queueLowThreshold` (2) → "run a full intake
   scan, propose the next batch".
   - **Intake suppression**: while ANY proposal is pending (the user is

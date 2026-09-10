@@ -13,7 +13,7 @@ import type { SubagentBackend } from "../backends/types.ts";
 import { join } from "node:path";
 import { storeToSnapshot, type Autopilot } from "../core.ts";
 import type { CompletionEvent, Tick } from "../types.ts";
-import { loadAutopilotConfig } from "../config.ts";
+import { loadAutopilotConfig, appendTelemetry } from "../config.ts";
 import { loadStore, itemByRunId } from "../queue-store.ts";
 import { formatDurationMs } from "../duration.ts";
 import { flagForReview } from "./flag-review.ts";
@@ -290,6 +290,13 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
   // lost. The orchestrator learns what the harness DID without any gate bypass.
   let pendingHarness: string[] = [];
   let pendingFleet: number | undefined;
+  /** FLEET-RPC DEGRADED EPISODE (AUTOPILOT-24): true while `backend.fleetStatus()`
+   *  is THROWING. One-shot like `heldNotified` in recovery-state.ts — the
+   *  orchestrator learns the harness went fleet-blind once per episode and once
+   *  when it recovers, not on every sweep. Silent degradation ('the
+   *  orchestrator just stopped doing anything') is the failure class this
+   *  framework keeps getting bitten by. */
+  let fleetRpcDegraded = false;
   const harnessTick = (parts: string[], fleetTotalActive?: number): void => {
     pendingHarness.push(...parts);
     if (fleetTotalActive !== undefined) pendingFleet = fleetTotalActive;
@@ -371,7 +378,36 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     // The authoritative fleet, fetched ONCE — both the auto-dispatch (A) and
     // the engine sweep use it (one RPC, and the request is emitted synchronously
     // so hosts/replies see it immediately).
-    const fleet = await opts.backend.fleetStatus();
+    // GUARDED (AUTOPILOT-24): this was the ONE bare await in sweep(). A throwing
+    // status RPC used to skip EVERYTHING below it (zombie reconciliation,
+    // auto-dispatch, recovery, the engine sweep) AND escape as an unhandled
+    // rejection in the host process. A throw now degrades to the UNKNOWN fleet
+    // (`null`) — a state every consumer below already handles — so the rest of
+    // the sweep still runs off the store/ledger inventory. A `null` RETURN is a
+    // modelled backend answer ("I cannot tell you"), not a crash: it degrades
+    // exactly as before and does NOT open a degraded episode.
+    let fleet: { totalActive: number } | null = null;
+    try {
+      fleet = await opts.backend.fleetStatus();
+      if (fleetRpcDegraded) {
+        fleetRpcDegraded = false;
+        appendTelemetry(opts.stateDir, JSON.stringify({ t: new Date().toISOString(), type: "fleet-rpc", state: "recovered", source }));
+        sendTickText(
+          `[orch-tick: harness] fleet RPC RECOVERED: backend.fleetStatus() answers again (fleet ${fleet ? fleet.totalActive : "unknown"} active) — fleet-aware sweeps resume, including zombie reconciliation. Not a user request; respond ≤2 lines.`,
+        );
+      }
+    } catch (e) {
+      // UNKNOWN fleet, never a fake 0 — zombieReconcile(undefined) refuses to flip.
+      fleet = null;
+      const reason = (e instanceof Error ? e.message : String(e)).slice(0, 200);
+      appendTelemetry(opts.stateDir, JSON.stringify({ t: new Date().toISOString(), type: "fleet-rpc", state: "failed", source, error: reason }));
+      if (!fleetRpcDegraded) {
+        fleetRpcDegraded = true;
+        sendTickText(
+          `[orch-tick: harness] DEGRADED: backend.fleetStatus() THREW (${reason}) — the sweep CONTINUES with an unknown fleet: auto-dispatch + recovery still run off the store/ledger inventory, and zombie reconciliation is SUSPENDED (unknown is never read as 0, so no live item is flipped to failed by an RPC blip). One notice per degraded episode; a recovery tick follows when the RPC answers again. Not a user request; respond ≤2 lines.`,
+        );
+      }
+    }
     // FLEET-vS-INVENTORY PARITY (AUTOPILOT-6): the RPC count is the floor, never
     // a replacement for what the engine's own view (event ledger + store)
     // knows is running — a transient undercount (status RPC lagging a
@@ -447,12 +483,50 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     // re-dispatches by policy AFTER the backoff; running it after auto-dispatch
     // lets the engine's slot math see the just-filled slots. The pass arms its
     // own backoff timer for the next due attempt.
-    await runRecoveryPass(effectiveTotalActive);
+    // Guarded at the CALL SITE too: runRecoveryPass's own try/catch covers the
+    // autoRecoverFails engine call, but the tick delivery AFTER it (sendTickText
+    // → the deferral flush → refreshTickFacts against the live store) is outside
+    // that guard, so a failure there would still abort the engine sweep below.
+    try {
+      await runRecoveryPass(effectiveTotalActive);
+    } catch {
+      // recovery announcements must never break the sweep
+    }
     const result = autopilot.sweep(source, Date.now(), fleet ? { totalActive: fleet.totalActive } : undefined);
     if (result.tick) sendTick(result.tick);
     // timer/activate safety net: stuck ai-review items get a review nudge —
     // the "stuck" wording (reviewers may still be running; never claim completion)
     else if (source === "timer" || source === "activate") sendTick(autopilot.reviewTick(undefined, "stuck"));
+  };
+
+  /** One-shot dedupe for the sweep-failure tick (same episode discipline as
+   *  `fleetRpcDegraded`): cleared by the next sweep that completes. */
+  let sweepFailureNotified = false;
+  /** EVERY sweep trigger goes through here (AUTOPILOT-24). A rejected sweep
+   *  used to be a bare `void sweep(...)` — an UNHANDLED PROMISE REJECTION
+   *  inside the host process (pi extension / opencode plugin), which can take
+   *  the host down or vanish silently depending on the runtime. The guarded
+   *  fleet RPC above removed today's known thrower; this records tomorrow's
+   *  unknown one instead of losing it. */
+  const runSweep = (source: "settled" | "activate" | "timer" | "worker-done"): void => {
+    void sweep(source)
+      .then(() => {
+        sweepFailureNotified = false; // a completed sweep ends the failing episode
+      })
+      .catch((e: unknown) => {
+        try {
+          const reason = (e instanceof Error ? e.message : String(e)).slice(0, 200);
+          appendTelemetry(opts.stateDir, JSON.stringify({ t: new Date().toISOString(), type: "sweep-failure", source, error: reason }));
+          if (sweepFailureNotified) return; // one notice per failing episode, not per sweep
+          sweepFailureNotified = true;
+          sendTickText(
+            `[orch-tick: harness] SWEEP FAILED (${source}): ${reason} — the harness caught it instead of losing it to an unhandled rejection, but THIS sweep did no work (dispatch, recovery and ticks were skipped). Later triggers retry; if it repeats, the harness is effectively stopped. Not a user request; respond ≤2 lines.`,
+          );
+        } catch {
+          // the failure recorder itself must never reject — that would recreate
+          // the very unhandled rejection this wrapper exists to prevent
+        }
+      });
   };
 
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -564,7 +638,7 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       if (result.freedSlot) {
         // ANY run completing frees a slot → dispatch sweep with the
         // authoritative fleet count.
-        void sweep("worker-done");
+        runSweep("worker-done");
       }
       if (result.reviewerCompleted) {
         sendTick(autopilot.reviewTick());
@@ -576,19 +650,15 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       // just settled — the busy gate is clear), then the sweep's nudges.
       flushDeferred();
       flushHarness();
-      void sweep("settled");
+      runSweep("settled");
     },
     onTimer() {
       flushDeferred(); // backstop if the agent never settles
       flushHarness();
-      try {
-        void sweep("timer");
-      } catch {
-        // never let the timer break the host
-      }
+      runSweep("timer"); // never lets the timer break the host (sync or async)
     },
     activate() {
-      void sweep("activate");
+      runSweep("activate");
     },
     start() {
       if (opts.sweepIntervalMs > 0 && !timer) {

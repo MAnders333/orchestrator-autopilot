@@ -511,6 +511,147 @@ describe("AUTOPILOT-6: deferred ticks recompute FLEET/QUEUE facts at delivery (n
   });
 });
 
+describe("AUTOPILOT-24: a THROWING fleetStatus() degrades the sweep instead of aborting it", () => {
+  // The bare `await opts.backend.fleetStatus()` used to skip zombie
+  // reconciliation, auto-dispatch, recovery AND the engine sweep, then escape
+  // as an unhandled rejection in the host process.
+  interface ThrowFixture {
+    dir: string;
+    delivered: string[];
+    engineLog: string[];
+    spawns: string[];
+    autopilot: Autopilot;
+    runner: FrameworkRunner;
+    fleet: { throws: boolean };
+  }
+  function throwingSetup(): ThrowFixture {
+    const dir = mkdtempSync(join(tmpdir(), "orch-runner-a24-"));
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(newStore()));
+    const delivered: string[] = [];
+    const engineLog: string[] = [];
+    const spawns: string[] = [];
+    const fleet = { throws: true };
+    const autopilot = new Autopilot({ stateDir: dir, log: (l) => engineLog.push(l) });
+    const runner = createFrameworkRunner({
+      stateDir: dir,
+      autopilot,
+      backend: {
+        spawn: async (task) => { spawns.push(String(task)); return `run-${spawns.length}`; },
+        fleetStatus: async () => {
+          if (fleet.throws) throw new Error("status RPC exploded");
+          return { totalActive: 0 };
+        },
+        steer: async () => "req",
+        asyncDirFor: () => null,
+      },
+      host: { interactive: () => true, loaded: () => true, busy: () => false, compacting: () => false },
+      deliver: (m) => delivered.push(m),
+      enabled: () => true,
+      sweepIntervalMs: 0,
+    });
+    return { dir, delivered, engineLog, spawns, autopilot, runner, fleet };
+  }
+  const readStore = (dir: string) => JSON.parse(readFileSync(join(dir, "queue.json"), "utf8"));
+  const writeItems = (dir: string, items: Array<Record<string, unknown>>) => {
+    const s = readStore(dir);
+    for (const it of items) addItem(s, it as never);
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(s));
+  };
+
+  test("the RPC throws → auto-dispatch, recovery AND the engine sweep all still run in that SAME sweep", async () => {
+    const f = throwingSetup();
+    writeItems(f.dir, [
+      { key: "A1", title: "a1", status: "approved", blocker: null, scope: "do the thing", cwd: "/tmp/repo", evidence: "", value: "", urgency: "", risk: "low", runId: null, reviewerRunId: null, attempts: 0, notes: "" },
+      { key: "F1", title: "f1", status: "failed", blocker: null, scope: "redo the thing", cwd: "/tmp/repo", evidence: "", value: "", urgency: "", risk: "low", runId: "dead-run", reviewerRunId: null, attempts: 0, notes: "", failCause: "verdict", recoveries: 0, recoveryNotBefore: Date.now() - 60_000, recoveryEscalated: false },
+    ]);
+    f.runner.onTimer();
+    await new Promise((r) => setTimeout(r, 120));
+    const after = readStore(f.dir);
+    expect(after.items["A1"].status).toBe("active"); // auto-dispatch ran past the failed RPC
+    expect(after.items["F1"].status).toBe("active"); // runRecoveryPass ran too
+    expect(f.spawns.some((t) => t.includes("KEY: A1"))).toBe(true);
+    expect(f.spawns.some((t) => t.includes("KEY: F1") && t.includes("Recovery re-dispatch (P5)"))).toBe(true);
+    // the engine sweep itself reached its own telemetry line — nothing below
+    // the RPC was skipped
+    expect(f.engineLog.some((l) => JSON.parse(l).type === "sweep")).toBe(true);
+  });
+
+  test("SAFETY: a throwing RPC never causes a zombie flip — unknown is UNKNOWN, never a fake 0", async () => {
+    const f = throwingSetup();
+    writeItems(f.dir, [
+      { key: "Z1", title: "z1", status: "active", blocker: null, scope: "s", cwd: "/tmp/repo", evidence: "", value: "", urgency: "", risk: "low", runId: "live-run", reviewerRunId: null, attempts: 0, notes: "" },
+    ]);
+    const s = readStore(f.dir);
+    s.items["Z1"].updatedAt = new Date(Date.now() - 60 * 60_000).toISOString(); // 60m idle >> 30m grace
+    writeFileSync(join(f.dir, "queue.json"), JSON.stringify(s));
+    f.runner.onTimer(); // timer = the only source that runs the zombie net
+    await new Promise((r) => setTimeout(r, 120));
+    expect(readStore(f.dir).items["Z1"].status).toBe("active"); // a transient blip must never destroy run attribution
+    expect(f.delivered.some((m) => m.includes("zombie reconciliation flipped"))).toBe(false);
+    expect(f.delivered.some((m) => m.includes("[orch-tick: decision]"))).toBe(false);
+    // and the engine primitive itself: undefined refuses, a genuine 0 flips
+    expect(f.autopilot.zombieReconcile(undefined).flippedKeys).toEqual([]);
+    expect(readStore(f.dir).items["Z1"].status).toBe("active");
+    expect(f.autopilot.zombieReconcile(0).flippedKeys).toEqual(["Z1"]); // the guard is unknown-vs-zero, not "never flip"
+  });
+
+  test("the degradation is VISIBLE but not spammy: one tick per episode + one on recovery", async () => {
+    const f = throwingSetup();
+    f.runner.onTimer();
+    await new Promise((r) => setTimeout(r, 80));
+    f.runner.onTimer(); // still failing — same episode
+    await new Promise((r) => setTimeout(r, 80));
+    const degraded = f.delivered.filter((m) => m.includes("DEGRADED: backend.fleetStatus() THREW"));
+    expect(degraded.length).toBe(1); // ONE notice for the whole episode
+    expect(degraded[0]).toContain("status RPC exploded"); // the RPC failure is NAMED
+    expect(degraded[0]).toContain("[orch-tick: harness]");
+    f.fleet.throws = false; // the backend comes back
+    f.runner.onTimer();
+    await new Promise((r) => setTimeout(r, 80));
+    expect(f.delivered.filter((m) => m.includes("fleet RPC RECOVERED")).length).toBe(1);
+    expect(f.delivered.filter((m) => m.includes("DEGRADED: backend.fleetStatus() THREW")).length).toBe(1);
+    // both transitions are on the telemetry trail too
+    const lines = readFileSync(join(f.dir, "autopilot.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines.filter((l) => l.type === "fleet-rpc" && l.state === "failed").length).toBe(2); // every failure logged
+    expect(lines.filter((l) => l.type === "fleet-rpc" && l.state === "recovered").length).toBe(1);
+  });
+
+  test("a sweep that throws internally is CAUGHT at the call site — no unhandled rejection", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "orch-runner-a24-catch-"));
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(newStore()));
+    const delivered: string[] = [];
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown): void => { unhandled.push(e); };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const runner = createFrameworkRunner({
+        stateDir: dir,
+        autopilot: new Autopilot({ stateDir: dir }),
+        backend,
+        host: { interactive: () => true, loaded: () => true, busy: () => false, compacting: () => false },
+        deliver: (m) => delivered.push(m),
+        enabled: () => { throw new Error("gate blew up"); }, // the first statement in sweep()
+        sweepIntervalMs: 0,
+      });
+      runner.onTimer();
+      runner.onSettled();
+      runner.activate();
+      await new Promise((r) => setTimeout(r, 120));
+      expect(unhandled.length).toBe(0); // the host process never sees a stray rejection
+      const failures = delivered.filter((m) => m.includes("SWEEP FAILED"));
+      expect(failures.length).toBe(1); // recorded once per failing episode, not per trigger
+      expect(failures[0]).toContain("gate blew up");
+      const lines = readFileSync(join(dir, "autopilot.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      const recorded = lines.filter((l) => l.type === "sweep-failure");
+      expect(recorded.length).toBe(3); // EVERY call site records — timer, settled, activate
+      expect(recorded.map((l) => l.source).sort()).toEqual(["activate", "settled", "timer"]);
+      runner.stop();
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+});
+
 describe("the shared autopilot gate (toggle off → harness idle)", () => {
   test("enabled=false → completions are IGNORED: no flip, no auto-review, no ticks", async () => {
     const dir = mkdtempSync(join(tmpdir(), "orch-runner-gate-"));
