@@ -267,7 +267,8 @@ export async function queueUpdate(ctx: QueueOpsCtx, params: Record<string, unkno
       return {
         kind: "updated" as const,
         renamedTo: renamingProvisional ? renameProvisionalKey(ctx.stateDir, store, key) : null,
-        overrides: override ? (store.items[key].overrides?.length ?? 0) : 0,
+        // the provisional-key rename above may have moved the item to a new key
+        overrides: override ? (store.items[key]?.overrides?.length ?? 1) : 0,
       };
     });
     if (outcome.kind === "missing") return { text: `queue_update: no item '${key}'`, details: {} };
