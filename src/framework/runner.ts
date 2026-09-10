@@ -276,6 +276,12 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
         `[orch-tick: recover] ${e.key} exhausted auto-recovery (${e.attempts} attempt${e.attempts === 1 ? "" : "s"}, ${e.cause}) — it STAYS failed. Verify its pi-parallel-* branch, then your call: re-dispatch manually with a bigger budget / apply findings / drop. Not a user request; respond ≤2 lines.`,
       );
     }
+    for (const h of outcome.finisherHeld) {
+      if (!h.surfaced) continue; // announced once, not on every sweep
+      sendTickText(
+        `[orch-tick: recover] ${h.key} is FINISHER-CLASS and failed (${h.cause}) — auto-recovery will NOT re-dispatch it (a finisher re-run can duplicate a landing, and a conflict-resolved cherry-pick or multi-commit squash leaves no evidence to detect). It STAYS failed. Check the target checkout (git log / git cherry): if the work is IN, close it out (failed → done with an overrideReason); if it is not, re-dispatch it deliberately. Not a user request; respond ≤2 lines.`,
+      );
+    }
     for (const l of outcome.landedSkipped) {
       if (!l.surfaced) continue; // announced once, not on every sweep
       sendTickText(

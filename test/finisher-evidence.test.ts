@@ -39,7 +39,7 @@ import {
   type QueueItem,
   type QueueStore,
 } from "../src/queue-store.ts";
-import { captureFinisherBaseline, finisherLandedEvidence, readRepoHead } from "../src/finisher-evidence.ts";
+import { captureFinisherBaseline, finisherLandedEvidence, landedNote, landedOverride, readRepoHead } from "../src/finisher-evidence.ts";
 import { autoDispatchEligible, autoRedispatch } from "../src/framework/auto-dispatch.ts";
 import { autoRecoverFails } from "../src/framework/auto-recovery.ts";
 import { queueDispatch, queueUpdate, type QueueOpsCtx } from "../src/tools/queue-ops.ts";
@@ -96,6 +96,25 @@ function landBranch(repo: string, branch: string): string {
  *  sha never becomes an ancestor. */
 function cherryPickBranch(repo: string, branch: string): string {
   g(repo, "cherry-pick", "-x", branch);
+  return g(repo, "rev-parse", "HEAD");
+}
+
+/** The approved work as a MULTI-COMMIT branch: the shape a squash cannot
+ *  evidence — one combined patch matches none of the source patch-ids. */
+function branchWithCommits(repo: string, branch: string, files: string[]): string {
+  const base = g(repo, "rev-parse", "--abbrev-ref", "HEAD");
+  g(repo, "checkout", "-q", "-b", branch);
+  let tip = "";
+  for (const f of files) tip = commit(repo, f, `work on ${branch}: ${f}`);
+  g(repo, "checkout", "-q", base);
+  return tip;
+}
+
+/** A SQUASH landing: `git merge --squash` collapses the branch into ONE new
+ *  commit on the checkout (never a fast-forward). */
+function squashBranch(repo: string, branch: string): string {
+  g(repo, "merge", "--squash", branch);
+  g(repo, "commit", "-q", "-m", `squash ${branch}`);
   return g(repo, "rev-parse", "HEAD");
 }
 
@@ -283,6 +302,17 @@ describe("finisher-class evidence — the declared source landing in the declare
     expect(finisherLandedEvidence(withRecord, NOW)).toEqual(recorded);
     // finisher without a baseline: nothing to compare against → no evidence
     expect(finisherLandedEvidence(item({ key: "AP-5", cwd: repo, dispatchClass: "finisher" }), NOW)).toBeNull();
+
+    // AUTOPILOT-46: `landing` is optional (evidence recorded before the shape
+    // was), and evidence with no recorded shape must not be described as one —
+    // the phrasing stays NEUTRAL instead of asserting merge/fast-forward.
+    expect(recorded).not.toHaveProperty("landing");
+    expect(landedNote(recorded, "run-old", NOW)).toContain("in that history");
+    expect(landedNote(recorded, "run-old", NOW)).not.toContain("merge/fast-forward");
+    expect(landedOverride(recorded, "run-old", NOW).reason).toContain("in that history");
+    // … while a RECORDED shape is still named exactly
+    expect(landedNote({ ...recorded, landing: "ancestor" }, "run-old", NOW)).toContain("merge/fast-forward");
+    expect(landedNote({ ...recorded, landing: "patch-equivalent" }, "run-old", NOW)).toContain("patch-equivalent commits");
   });
 
   test("a re-dispatch drops the previous run's landed evidence — the new run is judged on its own", async () => {
@@ -440,6 +470,90 @@ describe("finisher evidence is bound to this run AND to the declared source", ()
     expect(it.overrides ?? []).toEqual([]);
   });
 
+  test("a SQUASH of a SINGLE-commit source is evidence — one commit, one patch, patch-equivalent", () => {
+    const repo = initRepo();
+    const sourceSha = branchWithCommit(repo, "feature-squash1"); // exactly ONE commit
+    commit(repo, "moved-on.txt", "main advanced");
+    const baseSha = g(repo, "rev-parse", "HEAD");
+    const dir = dirWith([
+      item({
+        key: "AP-43",
+        cwd: repo,
+        dispatchClass: "finisher",
+        finisherSource: "feature-squash1",
+        finisherBaseline: baselineFor(repo, "feature-squash1", sourceSha, "run-fin-1"),
+      }),
+    ]);
+    const landedSha = squashBranch(repo, "feature-squash1"); // the finisher's only output
+    expect(landedSha).not.toBe(sourceSha);
+
+    new Autopilot({ stateDir: dir, now: () => NOW }).handleAsyncComplete(failedCompletion("run-fin-1"), NOW);
+
+    const it = read(dir).items["AP-43"];
+    expect(it.status).toBe("ai-review"); // NOT failed
+    expect(it.landedEvidence?.sha).toBe(landedSha);
+    expect(it.landedEvidence?.fromSha).toBe(baseSha);
+    expect(it.landedEvidence?.landing).toBe("patch-equivalent"); // the shape the five surfaces name
+  });
+
+  test("a SQUASH of a MULTI-commit source yields NO evidence — the combined patch matches none of them", () => {
+    const repo = initRepo();
+    const sourceSha = branchWithCommits(repo, "feature-squashN", ["a.txt", "b.txt"]); // TWO commits
+    commit(repo, "moved-on.txt", "main advanced");
+    const dir = dirWith([
+      item({
+        key: "AP-44",
+        cwd: repo,
+        dispatchClass: "finisher",
+        finisherSource: "feature-squashN",
+        finisherBaseline: baselineFor(repo, "feature-squashN", sourceSha, "run-fin-1"),
+      }),
+    ]);
+    const landedSha = squashBranch(repo, "feature-squashN");
+    expect(landedSha).not.toBe(sourceSha); // it DID land the content
+
+    new Autopilot({ stateDir: dir, now: () => NOW }).handleAsyncComplete(failedCompletion("run-fin-1"), NOW);
+
+    // DECIDED AND DOCUMENTED: patch-id equality cannot settle a combined patch,
+    // so this fails CLOSED — the verdict stands and the close-out is the
+    // operator's deliberate call.
+    const it = read(dir).items["AP-44"];
+    expect(it.status).toBe("failed");
+    expect(it.landedEvidence ?? null).toBeNull();
+    expect(it.overrides ?? []).toEqual([]);
+  });
+
+  test("a baseline sourceSha git cannot resolve yields NO evidence — the unanswerable question fails CLOSED", () => {
+    // The SAFETY PROPERTY the docs rest on: isAncestor/sourceLandingIn answer
+    // `null` when git cannot answer (bad object, unreadable repo, timeout), and
+    // null is NEVER read as a yes. Exercised here, not merely asserted in prose.
+    const repo = initRepo();
+    const sourceSha = branchWithCommit(repo, "feature-bogus");
+    const baseline = baselineFor(repo, "feature-bogus", sourceSha, "run-fin-1");
+    landBranch(repo, "feature-bogus"); // a REAL landing: only the bogus sha stops the evidence
+    expect(finisherLandedEvidence(item({ key: "AP-45", cwd: repo, dispatchClass: "finisher", finisherSource: "feature-bogus", finisherBaseline: baseline }), NOW)).not.toBeNull();
+
+    const bogus = "cafecafecafecafecafecafecafecafecafecafe"; // resolves to nothing
+    expect(() => g(repo, "cat-file", "-e", bogus)).toThrow();
+    const dir = dirWith([
+      item({
+        key: "AP-45",
+        cwd: repo,
+        dispatchClass: "finisher",
+        finisherSource: "feature-bogus",
+        finisherBaseline: { ...baseline, sourceSha: bogus },
+      }),
+    ]);
+    expect(finisherLandedEvidence(read(dir).items["AP-45"], NOW)).toBeNull();
+
+    // …and through the completion path: the runtime's failure verdict stands.
+    new Autopilot({ stateDir: dir, now: () => NOW }).handleAsyncComplete(failedCompletion("run-fin-1"), NOW);
+    const it = read(dir).items["AP-45"];
+    expect(it.status).toBe("failed");
+    expect(it.landedEvidence ?? null).toBeNull();
+    expect(it.overrides ?? []).toEqual([]);
+  });
+
   test("a source CHERRY-PICKED before the dispatch is not evidence — patch-presence is checked at the baseline too", () => {
     const repo = initRepo();
     const sourceSha = branchWithCommit(repo, "feature-cp-old");
@@ -533,7 +647,7 @@ describe("every re-activation lane rebaselines the finisher", () => {
     expect(final.overrides?.length ?? 0).toBe(1); // only run 1's override — nothing fabricated for run 2
   });
 
-  test("recovery re-dispatch: the failed run's baseline never judges the recovery run", async () => {
+  test("recovery re-dispatch is NO LONGER a lane for this class (AUTOPILOT-46): the failed finisher is HELD, so no run of it is ever judged against another run's baseline", async () => {
     const repo = initRepo();
     const sourceSha = branchWithCommit(repo, "feature-rec");
     const dir = dirWith([
@@ -546,25 +660,21 @@ describe("every re-activation lane rebaselines the finisher", () => {
         dispatchClass: "finisher",
         finisherSource: "feature-rec",
         finisherBaseline: baselineFor(repo, "feature-rec", sourceSha, "run-one"),
-        recoveryNotBefore: NOW - 1000,
+        recoveryNotBefore: NOW - 1000, // the backoff HAS elapsed: before the hold this re-dispatched
       }),
     ]);
     const { backend, spawns } = laneBackend(["run-two"]);
 
     const out = await autoRecoverFails(dir, backend, { now: NOW, backoffMs: 1000 });
-    expect(out.recovered.map((r) => r.key)).toEqual(["AP-31"]); // nothing landed → a real recovery candidate
-    expect(spawns.length).toBe(1);
-    const recovered = read(dir).items["AP-31"];
-    expect(recovered.finisherBaseline).toMatchObject({ sha: g(repo, "rev-parse", "HEAD"), source: "feature-rec", sourceSha, runId: "run-two" });
-
-    // during the recovery run, a THIRD PARTY moves the same checkout — and the
-    // recovery run itself lands nothing
-    commit(repo, "someone-else.txt", "the shipping lane merging another item");
-    new Autopilot({ stateDir: dir, now: () => NOW + 1000 }).handleAsyncComplete(failedCompletion("run-two"), NOW + 1000);
-    const final = read(dir).items["AP-31"];
-    expect(final.status).toBe("failed");
-    expect(final.landedEvidence ?? null).toBeNull();
-    expect(final.overrides ?? []).toEqual([]);
+    expect(out.recovered).toEqual([]); // no automatic re-run of a merge finisher, ever
+    expect(spawns).toEqual([]);
+    const held = read(dir).items["AP-31"];
+    expect(held.status).toBe("failed");
+    // run-one's baseline is left exactly as it was — nothing rebaselined it,
+    // because no new run was started to rebaseline for.
+    expect(held.finisherBaseline).toMatchObject({ source: "feature-rec", sourceSha, runId: "run-one" });
+    expect(held.landedEvidence ?? null).toBeNull();
+    expect(held.overrides ?? []).toEqual([]);
   });
 
   test("harness auto-dispatch (approved → active) rebaselines too", async () => {
@@ -647,27 +757,51 @@ describe("auto-recovery — landed work is never re-dispatched", () => {
     expect(read(dir).items["AP-6"].overrides?.length).toBe(1);
   });
 
-  test("a failed finisher with NO landed evidence still recovers normally", async () => {
+  // AUTOPILOT-46. The evidence check only skips landings it can SEE. A
+  // CONFLICT-RESOLVED cherry-pick (and a multi-commit squash) leaves none by
+  // design — so before the hold, the item fell through as an ordinary verdict
+  // failure and auto-recovery RE-DISPATCHED it once the backoff elapsed,
+  // re-running a merge that had already landed, before the operator could
+  // close it out. The whole class is held instead.
+  test("a failed finisher whose landing is UNDETECTABLE is not re-dispatched — it is held and surfaced once", async () => {
     const repo = initRepo();
-    const sourceSha = branchWithCommit(repo, "feature-7");
+    const sourceSha = branchWithCommit(repo, "feature-conflict-rec"); // writes feature-conflict-rec.txt
+    commit(repo, "feature-conflict-rec.txt", "a different line on main"); // so the pick conflicts
     const dir = dirWith([
       item({
         key: "AP-7",
         status: "failed",
         failCause: "verdict",
         cwd: repo,
+        runId: null,
         dispatchClass: "finisher",
-        finisherSource: "feature-7",
-        finisherBaseline: baselineFor(repo, "feature-7", sourceSha, "run-fin-1"),
-        recoveryNotBefore: NOW - 1000,
+        finisherSource: "feature-conflict-rec",
+        finisherBaseline: baselineFor(repo, "feature-conflict-rec", sourceSha, "run-fin-1"),
+        recoveryNotBefore: NOW - 1000, // the backoff HAS elapsed
       }),
     ]);
+    // the finisher DID land the work — with a hand-resolved conflict, so the
+    // patch changed and no git predicate can evidence it
+    const landedSha = cherryPickWithConflict(repo, "feature-conflict-rec", "feature-conflict-rec.txt", "a hand-merged resolution\n");
     const { backend, spawns } = recordingBackend();
 
     const out = await autoRecoverFails(dir, backend, { now: NOW, backoffMs: 1000 });
-    expect(spawns.length).toBe(1);
-    expect(out.recovered.map((r) => r.key)).toEqual(["AP-7"]);
-    expect(out.landedSkipped).toEqual([]);
+
+    expect(spawns).toEqual([]); // the merge is NOT re-run
+    expect(out.recovered).toEqual([]);
+    expect(out.landedSkipped).toEqual([]); // no evidence — this is the hold, not the evidence skip
+    expect(out.finisherHeld).toEqual([{ key: "AP-7", cause: "verdict", attempts: 0, surfaced: true }]);
+    const it = read(dir).items["AP-7"];
+    expect(it.status).toBe("failed"); // the verdict stands — the operator closes it out
+    expect(it.recoveryEscalated).toBe(true);
+    expect(it.notes).toContain("[recover-hold: finisher]");
+    expect(g(repo, "rev-parse", "HEAD")).toBe(landedSha); // nothing touched the checkout
+
+    // announced ONCE: the next pass still holds, without re-surfacing
+    const second = await autoRecoverFails(dir, backend, { now: NOW + 5_000, backoffMs: 1000 });
+    expect(second.finisherHeld).toEqual([{ key: "AP-7", cause: "verdict", attempts: 0, surfaced: false }]);
+    expect(spawns).toEqual([]);
+    expect(read(dir).items["AP-7"].notes.match(/recover-hold: finisher/g)?.length).toBe(1);
   });
 });
 

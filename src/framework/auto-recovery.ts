@@ -25,11 +25,24 @@
 // other dispatch lane, and the item still flows active → ai-review →
 // human-review. Recovery NEVER short-circuits the approval gate and NEVER
 // touches main — shipping stays the post-`done` merge-finisher lane.
+//
+// FINISHER-CLASS ITEMS ARE NEVER AUTO-RE-DISPATCHED (KEY: AUTOPILOT-46). The
+// landed-evidence check (AUTOPILOT-34, phase 0) can only skip landings it can
+// SEE — an ancestor merge/fast-forward, or a patch-equivalent copy. A
+// conflict-resolved cherry-pick and a squash of a multi-commit source produce
+// NO evidence by design (patch-id equality cannot settle a rewritten patch),
+// and for those a recovery re-dispatch would RE-RUN A MERGE THAT ALREADY
+// LANDED — automatically, before the operator can close the item out. Since a
+// finisher re-run is the single action that can duplicate a landing whether or
+// not there is evidence, the whole class is HELD and handed to the human
+// instead (same posture as phase 0), with a visible one-time escalation. The
+// cost is stated: a genuinely failed finisher gets NO automatic retry — it is
+// announced and waits for a deliberate re-dispatch.
 
-import { loadStore, mutateStore, updateItem, isFailCause, type QueueItem, type FailCause, type UpdatePatch } from "../queue-store.ts";
+import { loadStore, mutateStore, updateItem, isFailCause, type DispatchClass, type QueueItem, type FailCause, type UpdatePatch } from "../queue-store.ts";
 import type { SubagentBackend } from "../backends/types.ts";
 import { workerTask } from "./auto-dispatch.ts";
-import { appendOverride, captureFinisherBaseline, finisherLandedEvidence, isFinisherItem, landedOverride } from "../finisher-evidence.ts";
+import { appendOverride, finisherLandedEvidence, isFinisherItem, landedOverride } from "../finisher-evidence.ts";
 import { preserveRunWorktree } from "./worktree-preservation.ts";
 import {
   loadRecoveryState,
@@ -74,15 +87,25 @@ export function recoveryPlan(item: QueueItem, cause: FailCause, globalMax = MAX_
   if (cause === "budget-capped") {
     const base = item.timeoutMs && item.timeoutMs > 0 ? item.timeoutMs : DEFAULT_BUDGET_MS;
     const budgetMs = Math.min(Math.round(base * BUDGET_MULTIPLIER), BUDGET_MAX_MS);
-    return { cause, maxAttempts, budgetMs, context: recoveryContext(cause) };
+    return { cause, maxAttempts, budgetMs, context: recoveryContext(cause, item.dispatchClass) };
   }
-  return { cause, maxAttempts, budgetMs: item.timeoutMs ?? null, context: recoveryContext(cause) };
+  return { cause, maxAttempts, budgetMs: item.timeoutMs ?? null, context: recoveryContext(cause, item.dispatchClass) };
 }
 
 /** The P5 recovery context appended to a re-dispatch task. P5 is the
  *  fleet-health rule (prompts/orchestrate.md): CHECK RECOVERABILITY BEFORE A
- *  FULL REDO — the prior attempt's commits may live on its parallel branch. */
-export function recoveryContext(cause: FailCause): string {
+ *  FULL REDO — the prior attempt's commits may live on its parallel branch.
+ *
+ *  The main-write rule is DISPATCH-CLASS AWARE (AUTOPILOT-46): "NEVER commit or
+ *  merge to main" is the rule for a worker and a contradiction for a finisher,
+ *  whose entire scope is to land an approved branch in the target checkout —
+ *  telling it not to merge would instruct it to fail. The finisher wording is
+ *  the class's real rule instead: land ONLY the declared source, and check
+ *  first whether the previous attempt already landed it. (autoRecoverFails
+ *  HOLDS finisher-class items rather than re-dispatching them, so today this
+ *  branch is reached only through this exported function; it exists so the
+ *  text stays correct for the class if that hold is ever narrowed.) */
+export function recoveryContext(cause: FailCause, dispatchClass: DispatchClass = "worker"): string {
   const lines = [
     "## Recovery re-dispatch (P5)",
     `This item previously FAILED (cause: ${cause}); this is an automated recovery re-dispatch.`,
@@ -97,14 +120,16 @@ export function recoveryContext(cause: FailCause): string {
         ]
       : []),
     "P5 — CHECK RECOVERABILITY BEFORE REDOING ANYTHING: the prior attempt ran in an isolated worktree and pushed to its own parallel branch (pi-parallel-<runid>-0). Its commits may exist there, unmerged. Check `git log --all`, `git branch -a`, and the run's session log; if the work is present, RESTORE/reconcile it ON THE BRANCH instead of re-implementing it.",
-    "NEVER commit or merge to main — main is touched ONLY by the human-approved merge-finisher AFTER review. Commit early on your branch; this item still goes through the normal AI review + human approval.",
+    dispatchClass === "finisher"
+      ? "This item is FINISHER-CLASS: landing the declared source in the target checkout IS its scope, so the usual 'never merge to main' rule does not apply to that landing. CHECK FIRST whether the previous attempt already landed it (`git log`, `git cherry <target> <source>`) — including as a conflict-resolved or squashed commit, which no automatic check can recognise; if it is already in, land NOTHING and report that. Land ONLY the declared source; any other work still goes on your branch."
+      : "NEVER commit or merge to main — main is touched ONLY by the human-approved merge-finisher AFTER review. Commit early on your branch; this item still goes through the normal AI review + human approval.",
   ];
   return lines.join("\n");
 }
 
 /** Build the recovery task: the original worker task (KEY + scope) + context. */
 export function recoveryTask(item: QueueItem, cause: FailCause): string {
-  return `${workerTask(item)}\n\n${recoveryContext(cause)}`;
+  return `${workerTask(item)}\n\n${recoveryContext(cause, item.dispatchClass)}`;
 }
 
 export interface RecoveryOptions {
@@ -139,6 +164,12 @@ export interface RecoveryOutcome {
    *  them — a re-run would duplicate a merge that already landed — and
    *  surfaces them once for the human's close-out call. */
   landedSkipped: Array<{ key: string; repo: string; sha: string; surfaced: boolean }>;
+  /** FINISHER HOLD (AUTOPILOT-46): failed FINISHER-CLASS items recovery refuses
+   *  to re-dispatch even without landed evidence — the undetectable landing
+   *  shapes (conflict-resolved cherry-pick, multi-commit squash) make an
+   *  automatic re-run the one action that can duplicate a merge. They stay
+   *  `failed` and are surfaced ONCE for the human. */
+  finisherHeld: Array<{ key: string; cause: FailCause; attempts: number; surfaced: boolean }>;
 }
 
 function appendNote(existing: string, note: string): string {
@@ -162,7 +193,7 @@ export async function autoRecoverFails(
   const threshold = opts.spawnFailureThreshold ?? SPAWN_FAILURE_THRESHOLD;
   const cooldownMs = opts.degradedCooldownMs ?? DEGRADED_COOLDOWN_MS;
   const maxSlots = opts.maxSlots ?? 3;
-  const outcome: RecoveryOutcome = { recovered: [], escalated: [], held: false, heldNotice: false, spawnFailures: 0, nextAt: null, landedSkipped: [] };
+  const outcome: RecoveryOutcome = { recovered: [], escalated: [], held: false, heldNotice: false, spawnFailures: 0, nextAt: null, landedSkipped: [], finisherHeld: [] };
   const store = loadStore(stateDir);
   if (!store) return outcome;
   const state = loadRecoveryState(stateDir);
@@ -213,7 +244,7 @@ export async function autoRecoverFails(
       landedEvidence: evidence,
       ...(fresh.landedEvidence ? {} : { overrides: appendOverride(fresh, landedOverride(evidence, fresh.runId ?? item.runId, now)) }),
       // `recoveryEscalated` here means BOTH "already announced" (the skip is
-      // surfaced once, never re-ticked) and "phases 1-2 stay off this item".
+      // surfaced once, never re-ticked) and "the later phases stay off this item".
       // Entering `active` does NOT clear it, so a deliberate human re-open
       // keeps auto-recovery hands-off even if the new run fails — INTENDED:
       // this item's declared source is already in the target's history, so an
@@ -228,10 +259,44 @@ export async function autoRecoverFails(
     changed = true;
   }
 
-  // Phase 1 — escalate exhausted items. This does NOT spawn, so it runs even
+  // Phase 1 — FINISHER HOLD (AUTOPILOT-46). Phase 0 skips the landings it can
+  // SEE; the shapes it cannot see (a conflict-resolved cherry-pick, a squash of
+  // a multi-commit source) produce no evidence BY DESIGN, and without this hold
+  // they fall through as ordinary verdict failures and get RE-DISPATCHED once
+  // the backoff elapses — re-running a merge that already landed, before the
+  // operator can close the item out. A finisher re-run is the single action
+  // that can duplicate a landing, evidence or not, so the whole class is held
+  // and handed to the human (phase 0's posture) instead. Finishers are
+  // PARTITIONED OUT here, so the phases below cannot reach one at all.
+  // The cost, stated: a finisher that genuinely failed gets NO automatic retry.
+  // It is never dropped silently — the hold is recorded on the item and ticked
+  // once, and a deliberate re-dispatch (queue_dispatch) is always available.
+  const recoverable: QueueItem[] = [];
+  for (const item of failed) {
+    if (!isFinisherItem(item)) {
+      recoverable.push(item);
+      continue;
+    }
+    const cause = item.failCause as FailCause;
+    const attempts = item.recoveries ?? 0;
+    outcome.finisherHeld.push({ key: item.key, cause, attempts, surfaced: !item.recoveryEscalated });
+    if (item.recoveryEscalated) continue; // already announced — never re-nag
+    stage(item.key, (fresh) => ({
+      // Same meaning as phase 0's flag: announced once, and the phases below
+      // stay off this item.
+      recoveryEscalated: true,
+      notes: appendNote(
+        fresh.notes,
+        `[recover-hold: finisher] ${new Date(now).toISOString()} — auto-recovery will NOT re-dispatch this item: it is FINISHER-CLASS (cause: ${cause}, ${attempts} attempt(s) spent) and an automatic re-run is the one action that can DUPLICATE a landing — including landings this framework cannot detect (a conflict-resolved cherry-pick, a squash of a multi-commit source), which leave no evidence by design. The item STAYS failed. Needs your call: check the target checkout (\`git log\`, \`git cherry\`) — if the work is IN, close it out (failed → done with an overrideReason); if it is not, re-dispatch deliberately.`,
+      ),
+    }));
+    changed = true;
+  }
+
+  // Phase 2 — escalate exhausted items. This does NOT spawn, so it runs even
   // while the degraded window pauses attempts: an item that already spent its
   // budget must still be surfaced once.
-  for (const item of failed) {
+  for (const item of recoverable) {
     if (item.recoveryEscalated) continue;
     const cause = item.failCause as FailCause;
     const attempts = item.recoveries ?? 0;
@@ -249,13 +314,16 @@ export async function autoRecoverFails(
     }
   }
 
-  // Phase 2 — attempt recovery (paused while degraded). Recovery spawns are
+  // Phase 3 — attempt recovery (paused while degraded). Recovery spawns are
   // slot-bounded so the failed lane can never over-spawn past capacity.
+  // FINISHER-CLASS ITEMS NEVER GET HERE (phase 1 partitioned them out), which
+  // is why this lane needs no finisher baseline: the only class that lands
+  // outside its worktree is not re-dispatched by recovery at all.
   if (!degraded) {
     const storeActive = Object.values(store.items).filter((i) => i.status === "active").length;
     const occupied = Math.max(opts.totalActive ?? 0, storeActive);
     let free = Math.max(0, maxSlots - occupied);
-    for (const item of failed) {
+    for (const item of recoverable) {
       if (item.recoveryEscalated) continue;
       const cause = item.failCause as FailCause;
       const attempts = item.recoveries ?? 0;
@@ -285,10 +353,6 @@ export async function autoRecoverFails(
         continue;
       }
       const attempt = attempts + 1;
-      // FINISHER-EVIDENCE (AUTOPILOT-34): a recovery re-dispatch is a NEW run,
-      // so it gets its own baseline (captured before the spawn) — never the
-      // failed run's, which would make that run's commits look like this one's.
-      const baseline = item.cwd && isFinisherItem(item) ? captureFinisherBaseline(item.cwd, null, item.finisherSource ?? null) : null;
       let runId: string | null = null;
       try {
         runId = await backend.spawn(recoveryTask(item, cause), { cwd: item.cwd ?? undefined, timeoutMs: plan.budgetMs ?? undefined });
@@ -301,7 +365,6 @@ export async function autoRecoverFails(
           runId,
           recoveries: attempt,
           recoveryNotBefore: null,
-          ...(baseline ? { finisherBaseline: { ...baseline, runId } } : {}),
           ...(plan.budgetMs !== null ? { timeoutMs: plan.budgetMs } : {}),
           notes: appendNote(
             fresh.notes,

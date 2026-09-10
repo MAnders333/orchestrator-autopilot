@@ -143,9 +143,15 @@ skeleton. The tag is ADVISORY — it never blocks approval.
   patch, so patch-id equality legitimately fails — no git predicate can settle
   it), a **squash of a multi-commit source**, and any landing that never moves
   the declared checkout — notably shipping flow **`mrs`**, which pushes the
-  branch and opens an MR without a local landing. **Omit
-  `finisherSource` and there is no evidence path** — the run fails as before (a
-  bare HEAD move is not accepted: shipping merges and human commits move the same
+  branch and opens an MR without a local landing. **Because those shapes are
+  undetectable, auto-recovery never re-dispatches a FAILED finisher at all**
+  (KEY: AUTOPILOT-46): whatever the cause, the item is HELD in `failed`, the
+  hold is written to its notes and ticked once, and re-running it is your
+  deliberate act — a finisher re-run is the one action that can duplicate a
+  landing. The flip side is on you: a finisher that genuinely failed gets NO
+  automatic retry, so close it out or re-dispatch it when the tick arrives.
+  **Omit `finisherSource` and there is no evidence path** — the run fails as
+  before (a bare HEAD move is not accepted: shipping merges and human commits move the same
   checkout). Overriding a failure verdict yourself: use
   `queue_update(key, {overrideReason: "…"})` instead of hand-writing prose into
   notes — a pattern of overrides must stay visible.
