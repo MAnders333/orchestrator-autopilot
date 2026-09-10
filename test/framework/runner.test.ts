@@ -511,6 +511,79 @@ describe("AUTOPILOT-6: deferred ticks recompute FLEET/QUEUE facts at delivery (n
   });
 });
 
+describe("AUTOPILOT-24: a NULL fleetStatus() degrades too — once the backend has PROVEN it can answer", () => {
+  // The pi backend's rpc() NEVER rejects: a timeout resolves
+  // {success:false,error} and fleetStatus() turns that into `null`
+  // (src/backends/pi.ts). So the production failure mode is a null RETURN, not
+  // a throw — but null is ALSO how the seam spells "I have no fleet view", so
+  // the two are told apart by learned capability.
+  interface NullFixture {
+    dir: string;
+    delivered: string[];
+    runner: FrameworkRunner;
+    fleet: { answer: { totalActive: number } | null };
+  }
+  function nullSetup(initial: { totalActive: number } | null): NullFixture {
+    const dir = mkdtempSync(join(tmpdir(), "orch-runner-a24-null-"));
+    writeFileSync(join(dir, "queue.json"), JSON.stringify(newStore()));
+    const delivered: string[] = [];
+    const fleet = { answer: initial };
+    const runner = createFrameworkRunner({
+      stateDir: dir,
+      autopilot: new Autopilot({ stateDir: dir, log: () => {} }),
+      backend: { ...backend, fleetStatus: async () => fleet.answer },
+      host: { interactive: () => true, loaded: () => true, busy: () => false, compacting: () => false },
+      deliver: (m) => delivered.push(m),
+      enabled: () => true,
+      sweepIntervalMs: 0,
+    });
+    return { dir, delivered, runner, fleet };
+  }
+  const telemetry = (dir: string): Array<Record<string, unknown>> => {
+    const f = join(dir, "autopilot.jsonl");
+    if (!existsSync(f)) return [];
+    return readFileSync(f, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+  };
+  const sweepOnce = async (r: FrameworkRunner): Promise<void> => {
+    r.onTimer();
+    await new Promise((res) => setTimeout(res, 60));
+  };
+
+  test("answered ONCE, then null forever: exactly ONE degraded tick, telemetry on EVERY failing sweep, ONE recovery tick", async () => {
+    const f = nullSetup({ totalActive: 1 });
+    await sweepOnce(f.runner); // the backend proves it has a fleet view
+    f.fleet.answer = null; // … and then the status RPC starts timing out
+    await sweepOnce(f.runner);
+    await sweepOnce(f.runner);
+    await sweepOnce(f.runner);
+    const degraded = f.delivered.filter((m) => m.includes("DEGRADED: backend.fleetStatus()"));
+    expect(degraded.length).toBe(1); // ONE notice for the whole episode, not one per sweep
+    expect(degraded[0]).toContain("returned NULL"); // the null mode is NAMED, not reported as a throw
+    expect(degraded[0]).toContain("zombie reconciliation is SUSPENDED");
+    const failures = telemetry(f.dir).filter((l) => l.type === "fleet-rpc" && l.state === "failed");
+    expect(failures.length).toBe(3); // every failing sweep is on the trail
+    expect(failures.every((l) => l.mode === "null")).toBe(true);
+    f.fleet.answer = { totalActive: 2 }; // the RPC comes back
+    await sweepOnce(f.runner);
+    expect(f.delivered.filter((m) => m.includes("fleet RPC RECOVERED")).length).toBe(1);
+    expect(telemetry(f.dir).filter((l) => l.type === "fleet-rpc" && l.state === "recovered").length).toBe(1);
+    // and a second failure AFTER recovery opens a NEW episode (the one-shot re-arms)
+    f.fleet.answer = null;
+    await sweepOnce(f.runner);
+    expect(f.delivered.filter((m) => m.includes("DEGRADED: backend.fleetStatus()")).length).toBe(2);
+    f.runner.stop();
+  });
+
+  test("ANTI-SPAM: a backend that ALWAYS returns null is UNSUPPORTED, not degraded — never a tick, never a telemetry line", async () => {
+    const f = nullSetup(null); // never answers: the seam's legitimate 'no fleet view'
+    for (let i = 0; i < 5; i++) await sweepOnce(f.runner);
+    expect(f.delivered.filter((m) => m.includes("DEGRADED: backend.fleetStatus()"))).toEqual([]);
+    expect(f.delivered.filter((m) => m.includes("fleet RPC RECOVERED"))).toEqual([]);
+    expect(telemetry(f.dir).filter((l) => l.type === "fleet-rpc")).toEqual([]); // not even a growing jsonl
+    f.runner.stop();
+  });
+});
+
 describe("AUTOPILOT-24: a THROWING fleetStatus() degrades the sweep instead of aborting it", () => {
   // The bare `await opts.backend.fleetStatus()` used to skip zombie
   // reconciliation, auto-dispatch, recovery AND the engine sweep, then escape
@@ -613,6 +686,10 @@ describe("AUTOPILOT-24: a THROWING fleetStatus() degrades the sweep instead of a
     // both transitions are on the telemetry trail too
     const lines = readFileSync(join(f.dir, "autopilot.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
     expect(lines.filter((l) => l.type === "fleet-rpc" && l.state === "failed").length).toBe(2); // every failure logged
+    expect(lines.filter((l) => l.type === "fleet-rpc" && l.state === "failed").every((l) => l.mode === "threw")).toBe(true);
+    // a THROW degrades even though this backend never answered successfully:
+    // the seam spells 'unsupported' as null, never as an exception
+    expect(degraded[0]).toContain("THREW");
     expect(lines.filter((l) => l.type === "fleet-rpc" && l.state === "recovered").length).toBe(1);
   });
 

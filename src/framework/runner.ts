@@ -291,12 +291,22 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
   let pendingHarness: string[] = [];
   let pendingFleet: number | undefined;
   /** FLEET-RPC DEGRADED EPISODE (AUTOPILOT-24): true while `backend.fleetStatus()`
-   *  is THROWING. One-shot like `heldNotified` in recovery-state.ts — the
+   *  cannot tell us the fleet — it THREW, or it returned NULL after having
+   *  answered before. One-shot like `heldNotified` in recovery-state.ts — the
    *  orchestrator learns the harness went fleet-blind once per episode and once
    *  when it recovers, not on every sweep. Silent degradation ('the
    *  orchestrator just stopped doing anything') is the failure class this
    *  framework keeps getting bitten by. */
   let fleetRpcDegraded = false;
+  /** LEARNED CAPABILITY (AUTOPILOT-24): flipped by the first fleetStatus() that
+   *  actually answers. The seam's type is `Promise<{totalActive}|null>`, so a
+   *  backend that does not implement a fleet view answers `null` FOREVER and is
+   *  UNSUPPORTED, not degraded — ticking every sweep for it would be pure spam.
+   *  A backend that answered once and now returns null is BROKEN, and that is
+   *  the real-world failure mode: the pi backend's `rpc()` resolves a timeout as
+   *  `{success:false}` (backends/pi.ts) → fleetStatus() returns null, it never
+   *  rejects. Capability is therefore learned at runtime instead of declared. */
+  let fleetRpcEverAnswered = false;
   const harnessTick = (parts: string[], fleetTotalActive?: number): void => {
     pendingHarness.push(...parts);
     if (fleetTotalActive !== undefined) pendingFleet = fleetTotalActive;
@@ -383,12 +393,33 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     // auto-dispatch, recovery, the engine sweep) AND escape as an unhandled
     // rejection in the host process. A throw now degrades to the UNKNOWN fleet
     // (`null`) — a state every consumer below already handles — so the rest of
-    // the sweep still runs off the store/ledger inventory. A `null` RETURN is a
-    // modelled backend answer ("I cannot tell you"), not a crash: it degrades
-    // exactly as before and does NOT open a degraded episode.
+    // the sweep still runs off the store/ledger inventory.
+    //
+    // WHAT COUNTS AS DEGRADED: "could not determine the fleet", not just
+    // "threw". The pi backend NEVER rejects — `rpc()` resolves a timeout as
+    // `{success:false, error}` and fleetStatus() turns that into `null`
+    // (backends/pi.ts) — so a null RETURN is the failure mode that actually
+    // happens in production and the throw path is close to unreachable there.
+    // But `null` is ALSO the seam's legitimate "I have no fleet view" answer,
+    // and a backend that never implements one would tick every single sweep.
+    // The two are told apart by LEARNED CAPABILITY (`fleetRpcEverAnswered`):
+    // null degrades only once this runner has seen the backend answer at least
+    // once (or an episode is already open). A throw always degrades — the seam
+    // spells "unsupported" as null, never as an exception.
     let fleet: { totalActive: number } | null = null;
+    let fleetFailure: string | null = null; // null = the RPC answered
+    let fleetThrew = false;
     try {
       fleet = await opts.backend.fleetStatus();
+      if (!fleet) fleetFailure = "returned NULL (no fleet answer — a failed/timed-out status RPC resolves null instead of rejecting)";
+    } catch (e) {
+      // UNKNOWN fleet, never a fake 0 — zombieReconcile(undefined) refuses to flip.
+      fleet = null;
+      fleetThrew = true;
+      fleetFailure = `THREW (${(e instanceof Error ? e.message : String(e)).slice(0, 200)})`;
+    }
+    if (fleetFailure === null) {
+      fleetRpcEverAnswered = true; // capability proven — nulls from here on are BREAKAGE
       if (fleetRpcDegraded) {
         fleetRpcDegraded = false;
         appendTelemetry(opts.stateDir, JSON.stringify({ t: new Date().toISOString(), type: "fleet-rpc", state: "recovered", source }));
@@ -396,15 +427,17 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
           `[orch-tick: harness] fleet RPC RECOVERED: backend.fleetStatus() answers again (fleet ${fleet ? fleet.totalActive : "unknown"} active) — fleet-aware sweeps resume, including zombie reconciliation. Not a user request; respond ≤2 lines.`,
         );
       }
-    } catch (e) {
-      // UNKNOWN fleet, never a fake 0 — zombieReconcile(undefined) refuses to flip.
-      fleet = null;
-      const reason = (e instanceof Error ? e.message : String(e)).slice(0, 200);
-      appendTelemetry(opts.stateDir, JSON.stringify({ t: new Date().toISOString(), type: "fleet-rpc", state: "failed", source, error: reason }));
+    } else if (fleetThrew || fleetRpcEverAnswered || fleetRpcDegraded) {
+      // Not the never-answered (UNSUPPORTED) backend: this one lost a fleet
+      // view it demonstrably had, so the blindness is worth saying out loud.
+      appendTelemetry(
+        opts.stateDir,
+        JSON.stringify({ t: new Date().toISOString(), type: "fleet-rpc", state: "failed", source, mode: fleetThrew ? "threw" : "null", error: fleetFailure }),
+      );
       if (!fleetRpcDegraded) {
         fleetRpcDegraded = true;
         sendTickText(
-          `[orch-tick: harness] DEGRADED: backend.fleetStatus() THREW (${reason}) — the sweep CONTINUES with an unknown fleet: auto-dispatch + recovery still run off the store/ledger inventory, and zombie reconciliation is SUSPENDED (unknown is never read as 0, so no live item is flipped to failed by an RPC blip). One notice per degraded episode; a recovery tick follows when the RPC answers again. Not a user request; respond ≤2 lines.`,
+          `[orch-tick: harness] DEGRADED: backend.fleetStatus() ${fleetFailure} — the sweep CONTINUES with an unknown fleet: auto-dispatch + recovery still run off the store/ledger inventory, and zombie reconciliation is SUSPENDED (unknown is never read as 0, so no live item is flipped to failed by an RPC blip). One notice per degraded episode; a recovery tick follows when the RPC answers again. Not a user request; respond ≤2 lines.`,
         );
       }
     }

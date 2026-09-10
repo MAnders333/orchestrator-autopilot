@@ -239,17 +239,26 @@ conflict/non-forced failure, or the manual-mode nudge).
     RPC AND the inventory to both report idle). Tests isolate the inventory
     scan via AUTOPILOT_PI_ASYNC_ROOT / the backend's asyncDirRoot seam.
   - **A failing fleet RPC DEGRADES, it does not stop the sweep (AUTOPILOT-24)**:
-    a `fleetStatus()` that THROWS is contained — the sweep continues with an
-    UNKNOWN fleet, so auto-dispatch and auto-recovery still run off the
+    a `fleetStatus()` that cannot answer is contained — the sweep continues with
+    an UNKNOWN fleet, so auto-dispatch and auto-recovery still run off the
     store/ledger inventory and zombie reconciliation is SUSPENDED (unknown is
     passed as `undefined`, never coerced to 0, so an RPC blip can never flip a
-    live item to `failed`). The degradation is announced with ONE
-    `[orch-tick: harness]` tick when the episode starts and ONE when the RPC
-    recovers (`fleet-rpc` telemetry records every transition) — never silent,
-    never per-sweep. Every sweep trigger is `.catch`-guarded, so a sweep that
-    fails for any other reason is recorded (`sweep-failure` telemetry + one
-    tick per failing episode) instead of escaping as an unhandled rejection in
-    the host process.
+    live item to `failed`). "Cannot answer" is BOTH a throw and a `null`
+    return: the pi backend's `rpc()` never rejects (a timeout resolves
+    `{success:false}` → `fleetStatus()` returns `null`), so null is the failure
+    mode that actually happens in production. `null` is also the seam's
+    legitimate "this backend has no fleet view", so the two are told apart by
+    LEARNED CAPABILITY: null degrades only after the runner has seen that
+    backend answer at least once. A backend that never answers stays silent
+    (unsupported, not broken); one that stops answering raises exactly once.
+    A throw always degrades — the seam spells unsupported as null, never as an
+    exception. The degradation is announced with ONE `[orch-tick: harness]`
+    tick when the episode starts and ONE when the RPC recovers (`fleet-rpc`
+    telemetry records every failing sweep with `mode: threw|null` plus the
+    recovery) — never silent, never per-sweep. Every sweep trigger is
+    `.catch`-guarded, so a sweep that fails for any other reason is recorded
+    (`sweep-failure` telemetry + one tick per failing episode) instead of
+    escaping as an unhandled rejection in the host process.
 - **intake** — approved count < `queueLowThreshold` (2) → "run a full intake
   scan, propose the next batch".
   - **Intake suppression**: while ANY proposal is pending (the user is
