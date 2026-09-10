@@ -11,7 +11,7 @@ import { execFileSync } from "node:child_process";
 import { createOpenCodeFramework } from "../../src/hosts/opencode-plugin.ts";
 import { newStore, addItem, updateItem, saveStore as _save } from "../../src/queue-store.ts";
 import { loadStore } from "../../src/queue-store.ts";
-import { writeSessionAutopilotState, autopilotCommand, isAutopilotOn } from "../../src/config.ts";
+import { writeSessionAutopilotState, autopilotCommand, isAutopilotOn, probeStateDir } from "../../src/config.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -121,6 +121,31 @@ describe("opencode host framework (hermetic, fake oc)", () => {
     fw.dispose();
     rmSync(f.root, { recursive: true, force: true });
   });
+
+  test("ACTIVATION SWEEP is FAIL-OPEN (AUTOPILOT-3): an UNHEALTHY state dir still fills free slots", async () => {
+    const f = setup();
+    // The same unhealthy shape the `/autopilot on` path probes: an
+    // orchestrate.md projection with NO STATE_DIR line — findings, not health.
+    const commandFile = join(f.root, "command/orchestrate.md");
+    mkdirSync(join(f.root, "command"), { recursive: true });
+    writeFileSync(commandFile, "# orchestrate\nno Workspace block, so no STATE_DIR line\n");
+    expect(probeStateDir({ stateDir: f.stateDir, commandFile }).ok).toBe(false);
+    const fw = createOpenCodeFramework({ stateDir: f.stateDir, runsDir: f.runsDir, ocBin: f.ocBin, sweepIntervalMs: 0, delivery: delivery(f), commandFile });
+    seedItem(f, "ACT1", { scope: "SLEEP-1200 do the thing", cwd: f.repo });
+    // A probe finding must never cost the activation sweep ("never a throw,
+    // never a block" — docs/queue-model.md): the free slot is filled anyway.
+    fw.activate();
+    expect(await waitFor(() => store(f).items["ACT1"].status === "active", 4000)).toBe(true);
+    fw.dispose();
+    rmSync(f.root, { recursive: true, force: true });
+  });
+
+  // The `autopilot` TOOL path (plugin adapter) asserts the same fall-through
+  // one layer up — blocked on AUTOPILOT-WORKTREE-PRESERVATION-2's adapter
+  // repair (the adapter assigns tools.autopilot before `const tools` and reads
+  // bare stateDir/backend/schedules, so OrchestratorAutopilot cannot load).
+  // Enable this once that lands.
+  test.todo("autopilot tool: `on` with an UNHEALTHY state dir logs the probe AND still reaches schedules.cancel + fw.activate()");
 
   test("queue_add + queue_list mutate the store", async () => {
     const f = setup();

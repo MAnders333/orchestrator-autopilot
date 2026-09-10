@@ -386,15 +386,19 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
         }
         const r = autopilotCommand(action, String(args.value ?? "").trim() || undefined, { stateDir, sessionId: sid ?? "" });
         if (!r.ok) return r.message;
+        let probeNote = "";
         if (r.mode === "on") {
           // STATE-DIR PROBE (AUTOPILOT-3) at ACTIVATION: the ON message points
           // the orchestrator at this state dir for workspace facts — verify it
-          // is REAL before the harness relies on it. Fail-open: ONE telemetry
-          // log; findings ride the tool return (the opencode notify channel).
+          // is REAL before the harness relies on it. Fail-open, EXACTLY like
+          // the pi host (hosts/pi-extension.ts): ONE telemetry log, findings
+          // ride the tool return, and control FALLS THROUGH — a finding must
+          // never cost the schedule handling or the activation sweep below
+          // ("never a throw, never a block", docs/queue-model.md).
           const probe = probeStateDir({ stateDir, commandFile });
           if (!probe.ok) {
             logStateDirProbe(stateDir, probe, { hook: "autopilot-on" });
-            return `STATE-DIR PROBE: ${probe.findings.join(" | ")}\n\n${r.message}`;
+            probeNote = `STATE-DIR PROBE: ${probe.findings.join(" | ")}\n\n`;
           }
         }
         if (r.scheduledOffAt !== undefined && sid) {
@@ -406,7 +410,7 @@ export const OrchestratorAutopilot: Plugin = async (ctx) => {
         // free slots immediately instead of waiting for the first idle/timer
         // (AUTOPILOT-9). Tick delivery is gated on the session, so pre-idle it
         // only dispatches.
-        return r.message;
+        return `${probeNote}${r.message}`;
       } catch (err) {
         return `autopilot failed: ${err instanceof Error ? err.message : String(err)}`;
       }

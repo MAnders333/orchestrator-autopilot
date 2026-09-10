@@ -323,6 +323,9 @@ start (pi host):
 Findings are **one telemetry line** (`state-dir-probe` in `autopilot.jsonl`)
 plus **one notify** — never a throw, never a block (fail-open: a spurious
 warning costs a notify; silently operating on the wrong/empty queue compounds).
+Both hosts *continue the activation* after reporting: pi notifies and still runs
+the sweep; the opencode host prepends the findings to the tool's ON message and
+still arms/cancels the schedule and runs the sweep.
 The probe exists to make future drift loud at activation instead of silent.
 
 ## Provisional-linger surface
