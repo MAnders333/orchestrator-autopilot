@@ -175,7 +175,13 @@ export async function queueAdd(ctx: QueueOpsCtx, params: Record<string, unknown>
     const provisionalNote = provisional
       ? ` — NOTE: '${key}' is a PROVISIONAL handle (no cwd — repo-less proposal). At approval, where cwd becomes mandatory, the key is RENAMED into the repo's real series (registry → history → slug). Pass cwd (git rev-parse --show-toplevel of the target repo) to queue_add to get a stable real-series key now.`
       : "";
-    return { text: `added '${key}' (${status})${provisionalNote}`, details: {} };
+    // BUDGET REALITY (AUTOPILOT-47 A): warn where the budget is RECORDED, not
+    // only where it is spent. The operator plans against the number they set,
+    // so the earliest honest moment to say "the runtime will not honour this"
+    // is right here — waiting for the dispatch receipt means the plan is
+    // already written against time that does not exist.
+    const addBudgetNote = budgetCeilingWarning(assessRequestedBudget(normalizeTimeoutMs(params.timeoutMs)), formatDurationMs);
+    return { text: `added '${key}' (${status})${provisionalNote}${addBudgetNote}`, details: {} };
   } catch (e) {
     return err(e, "queue_add");
   }
@@ -285,11 +291,18 @@ export async function queueUpdate(ctx: QueueOpsCtx, params: Record<string, unkno
     if (outcome.kind === "unready") {
       return { text: "queue_update: approval requires a complete scope + cwd (the scope is the worker prompt; cwd is the repo it runs in) — blocked items are for waiting, not dispatchable work", details: {} };
     }
+    // BUDGET REALITY (AUTOPILOT-47 A): only when the caller EXPLICITLY set a
+    // budget here — an update that leaves timeoutMs alone is not making a
+    // promise and must not be nagged about one.
+    const updateBudgetNote =
+      params.timeoutMs !== undefined
+        ? budgetCeilingWarning(assessRequestedBudget(normalizeTimeoutMs(params.timeoutMs)), formatDurationMs)
+        : "";
     if (outcome.renamedTo) {
       const series = /^([A-Za-z0-9_-]+?)-\d+/.exec(outcome.renamedTo)?.[1] ?? outcome.renamedTo;
-      return { text: `updated '${key}' → approved; provisional key renamed to '${outcome.renamedTo}' (series ${series})`, details: { renamedFrom: key, key: outcome.renamedTo } };
+      return { text: `updated '${key}' → approved; provisional key renamed to '${outcome.renamedTo}' (series ${series})${updateBudgetNote}`, details: { renamedFrom: key, key: outcome.renamedTo } };
     }
-    return { text: `updated '${key}'${overrideNote}`, details: {} };
+    return { text: `updated '${key}'${overrideNote}${updateBudgetNote}`, details: {} };
   } catch (e) {
     return err(e, "queue_update");
   }
