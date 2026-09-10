@@ -157,16 +157,16 @@ describe("autoReview (C)", () => {
     expect(spawned.task).toContain("Verdict: PASS"); // the contract
   });
 
-  test("refuses when not reviewing / reviewer already running / missing scope or cwd", async () => {
+  // The reviewer-already-running refusal is now LIVENESS-based (a dead ref is
+  // re-dispatched past): see test/framework/run-liveness.test.ts.
+  test("refuses when not reviewing / missing scope or cwd", async () => {
     const f = setup();
     seed(f, [
-      item("A1", { status: "approved" }),                     // not reviewing
-      item("R2", { status: "ai-review", reviewerRunId: "x" }), // reviewer already running
-      item("R3", { status: "ai-review", scope: "  " }),        // no scope
-      item("R4", { status: "ai-review", cwd: null }),          // no cwd
+      item("A1", { status: "approved" }),               // not reviewing
+      item("R3", { status: "ai-review", scope: "  " }),  // no scope
+      item("R4", { status: "ai-review", cwd: null }),    // no cwd
     ]);
     expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "A1")).toBeNull();
-    expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "R2")).toBeNull();
     expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "R3")).toBeNull();
     expect(await autoReview(f.dir, f.backend, "orchestrator-reviewer", "R4")).toBeNull();
     expect(f.spawns.length).toBe(0);

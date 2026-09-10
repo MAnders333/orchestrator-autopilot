@@ -12,6 +12,7 @@ import type { Autopilot } from "../core.ts";
 import type { LoadedAutopilotConfig } from "../config.ts";
 import { loadStore, saveStore, newStore, addItem, updateItem, queryItems, queueLengths, resolveSeries, recordSeries, type QueueStore } from "../queue-store.ts";
 import { isAutoDispatchable } from "../framework/auto-dispatch.ts";
+import { reviewerRunAlive } from "../framework/run-liveness.ts";
 import { preserveRunWorktree } from "../framework/worktree-preservation.ts";
 
 export interface ToolResult {
@@ -299,8 +300,20 @@ export async function queueReview(ctx: QueueOpsCtx, params: Record<string, unkno
     if (item.status !== "ai-review") {
       return { text: `queue_review: '${key}' is ${item.status}, not reviewing`, details: {} };
     }
+    // STALE-REF GUARD: refuse only for a reviewer that is genuinely in flight.
+    // A dead reviewer's id used to block this item forever (crash, stop, engine
+    // restart, lost completion) — the liveness check clears it and proceeds.
+    // reviewerRunAlive FAILS OPEN (see run-liveness.ts): undeterminable → not
+    // alive → dispatch. A duplicate read-only reviewer costs tokens; a false
+    // block costs a manual bypass, which breaks verdict attribution.
+    let clearedStaleReviewerRunId: string | null = null;
     if (item.reviewerRunId) {
-      return { text: `queue_review: a reviewer is ALREADY running for '${key}' (run ${item.reviewerRunId.slice(0, 8)}…) — steer it or wait for its completion`, details: {} };
+      if (reviewerRunAlive(ctx.backend, item.reviewerRunId)) {
+        return { text: `queue_review: a reviewer is ALREADY running for '${key}' (run ${item.reviewerRunId.slice(0, 8)}…) — steer it or wait for its completion`, details: {} };
+      }
+      clearedStaleReviewerRunId = item.reviewerRunId;
+      updateItem(store, key, { reviewerRunId: null });
+      saveStore(ctx.stateDir, store); // de-stale durably, even if the spawn below fails
     }
     const task = (params.task as string | undefined)?.trim()
       ? (params.task as string)
@@ -317,7 +330,10 @@ export async function queueReview(ctx: QueueOpsCtx, params: Record<string, unkno
     updateItem(store, key, { reviewerRunId: runId });
     saveStore(ctx.stateDir, store);
     ctx.emit([{ name: "orch:reviewer-dispatched", data: { key, reviewerRunId: runId } }]);
-    return { text: `reviewer dispatched for '${key}' — run ${runId}`, details: { runId } };
+    const staleNote = clearedStaleReviewerRunId
+      ? ` (cleared a STALE reviewer ref ${clearedStaleReviewerRunId.slice(0, 8)}… — that run is gone/terminal)`
+      : "";
+    return { text: `reviewer dispatched for '${key}' — run ${runId}${staleNote}`, details: { runId, ...(clearedStaleReviewerRunId ? { clearedStaleReviewerRunId } : {}) } };
   } catch (e) {
     return err(e, "queue_review");
   }

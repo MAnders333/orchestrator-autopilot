@@ -25,6 +25,7 @@ import { loadStore, saveStore, updateItem, type QueueItem } from "../queue-store
 import type { SubagentBackend } from "../backends/types.ts";
 import { preserveRunWorktree } from "./worktree-preservation.ts";
 import { isProviderDegraded, recordProviderFailure, recordProviderSuccess } from "./recovery-state.ts";
+import { reviewerRunAlive } from "./run-liveness.ts";
 
 /** B26 rule as a testable PREDICATE: a subagent tool call is a worker spawn
  *  WITHOUT worktree isolation — the class that breaks parallel workers (B20's
@@ -193,7 +194,14 @@ export async function autoReview(
   try {
     const store = loadStore(stateDir);
     const item = store?.items[key];
-    if (!item || item.status !== "ai-review" || item.reviewerRunId) return null;
+    if (!item || item.status !== "ai-review") return null;
+    // STALE-REF GUARD: a live reviewer is never duplicated, but a DEAD one must
+    // not wedge the lane. This skip is SILENT (no error surface), so a stale id
+    // used to stop auto-review for this item forever. reviewerRunAlive FAILS
+    // OPEN (see run-liveness.ts): undeterminable → not alive → re-dispatch. A
+    // duplicate read-only reviewer costs tokens; a permanent silent skip costs
+    // a manual bypass, which breaks verdict attribution.
+    if (item.reviewerRunId && reviewerRunAlive(backend, item.reviewerRunId)) return null;
     if (!(item.scope ?? "").trim() || !item.cwd) return null; // safety net — the approval gate guarantees these
     const runId = await backend.spawn(reviewTask(item), {
       agent: reviewerAgent,

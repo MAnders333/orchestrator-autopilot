@@ -479,6 +479,13 @@ export function updateItem(store: QueueStore, key: string, patch: UpdatePatch, n
     clean.runId = null;
     clean.reviewerRunId = null;
   }
+  // ENTERING ai-review starts a NEW review round, so the previous round's
+  // reviewer ref must not survive into it (a stale id blocks queue_review and
+  // silently stops the harness's auto-review). Only on an ACTUAL entry: an
+  // ai-review → ai-review re-statement (a metadata patch that repeats the
+  // status) must NOT drop the reviewer that is running right now. An explicit
+  // reviewerRunId in the same patch wins — the caller is stamping the dispatch.
+  if (to === "ai-review" && from !== "ai-review" && clean.reviewerRunId === undefined) clean.reviewerRunId = null;
   // blocked must say WHY (parked/serialized/merge/decision) — a blocker-less
   // block would be indistinguishable from a rejected proposal.
   if (to === "blocked" && !clean.blocker) {

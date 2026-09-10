@@ -105,6 +105,17 @@ only your own backend's notes.
   apply the findings directly / review the work as-is / drop.
 - `queue_review(key, task?)` remains the tool for dispatching the reviewer on
   an `ai-review` item.
+- **Dispatching a reviewer OUTSIDE `queue_review` — record the run id.** If you
+  spawn a reviewer yourself (raw subagent call, custom review harness),
+  immediately `queue_update(key, { reviewerRunId: "<run id>" })`. That ref is
+  what attributes the completion back to the item, so the verdict line is
+  parsed and routed automatically (PASS → `human-review` + auto-flag, FAIL →
+  re-dispatch with findings). Skip it and the verdict lands nowhere: the item
+  sits in `ai-review` until you move it by hand.
+- A STALE reviewer ref no longer blocks re-review: `queue_review` (and the
+  harness auto-review) check whether the recorded run is actually in flight and
+  clear a dead ref instead of refusing forever. "A reviewer is ALREADY running"
+  now means it really is — steer it or wait, do not bypass the queue.
 - **PASS** → the item moves to **`human-review`** (the tracked HUMAN-review
   stage — NOT done), the harness auto-flags it for you, and the
   `flag_for_review` handover (below) follows. Never hand off before agent

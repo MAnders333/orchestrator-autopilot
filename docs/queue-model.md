@@ -52,6 +52,31 @@ item there, the harness auto-flags it for you, and your
 `done` is NOT a dead end: if you later find issues, re-open via `done → approved`
 (attempts reset — a fresh agent review loop starts with your findings).
 
+## The reviewer run ref (`reviewerRunId`) — record it or lose the verdict
+
+`reviewerRunId` is how a reviewer completion is ATTRIBUTED back to its item: the
+completion handler matches the finished run against the `ai-review` items
+(`itemByReviewerRunId`), parses the `Verdict: PASS/FAIL` line, and auto-routes
+(PASS → `human-review` + auto-flag, FAIL → re-dispatch with findings, cap →
+`failed`). `queue_review` and the harness's auto-review stamp the ref
+themselves.
+
+**If you dispatch a reviewer OUTSIDE `queue_review`** (a raw subagent spawn, a
+custom review harness), RECORD the run id immediately:
+`queue_update(key, { reviewerRunId: "<run id>" })`. Without it the verdict is
+unattributable — the run completes into nothing and the item sits in `ai-review`
+until you route it by hand, which is exactly the drift the queue exists to
+prevent.
+
+A stale ref no longer wedges the lane. Both review-dispatch paths check whether
+the recorded run is genuinely in flight (the backend's run dir + status.json:
+`queued`/`running` = alive) before refusing; a dead ref is cleared and the
+dispatch proceeds. The check FAILS OPEN — undeterminable liveness dispatches
+anyway, because reviewers are read-only (a duplicate costs tokens) while a false
+block forces a manual bypass (which breaks the attribution above). Entering
+`ai-review` from any other status also clears the previous round's ref; an
+`ai-review → ai-review` re-statement does not (it would drop a LIVE reviewer).
+
 ## Shipping (the merge-finisher lane) — `done` is NOT the merge
 
 `done` means **human-approved**, nothing more: it unlocks shipping but does NOT
