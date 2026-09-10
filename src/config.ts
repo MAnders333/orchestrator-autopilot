@@ -155,6 +155,9 @@ export interface AutopilotConfigFile {
    *  this many hours (the user deliberates), then the suppression lapses so a
    *  STALE proposal cannot starve the refill nudge forever. Default 24. */
   intakeSuppressionHours?: number;
+  /** SHIPPING POLICY (KEY: AUTO-SHIP-ON-DONE) — the per-repo merge-finisher
+   *  gate. See ShippingConfig. */
+  shipping?: ShippingConfig;
 }
 
 /** The intake source vocabulary is deliberately OPEN: `type` is the label the
@@ -175,6 +178,38 @@ export interface WorkspaceConfig {
    *  hours, escalation paths, whatever). */
   notes?: string;
 }
+
+/** SHIPPING POLICY (KEY: AUTO-SHIP-ON-DONE). The deterministic post-approval
+ *  merge-finisher lane is gated by a PER-REPO shipping policy. NO FALLBACK:
+ *  a repo without a policy never gets a guessed flow/base — the shipping run
+ *  NOTICES, asks the user once (policy-inquiry), and stays paused until the
+ *  one-time answer is written. */
+export type ShippingFlow = "mrs" | "merge";
+export interface ShippingRepoPolicy {
+  /** `mrs` = one MR per baseBranch (a remote exists); `merge` = merge the
+   *  approved work into the LOCAL base branch (no remote). */
+  flow: ShippingFlow;
+  /** Base branches — ORDER = MR sequence. `["main"]` = one MR;
+   *  `["dev","master"]` = two MRs. Any strings. For `merge`, the first is the
+   *  local target (default `main`). */
+  baseBranches: string[];
+}
+export interface ShippingConfig {
+  /** `auto` (default) runs the merge-finisher as soon as an item hits `done`;
+   *  `manual` only nudges — batch finishers stay an explicit orchestrator act. */
+  mergeMode?: "auto" | "manual";
+  /** Per-repo policies, keyed by origin-slug (`owner/repo` or `repo`) or the
+   *  repo's basename. An unknown repo → policy-inquiry, never a guess. */
+  repos?: Record<string, ShippingRepoPolicy>;
+}
+
+/** The fully-resolved config `loadAutopilotConfig` returns (defaults applied).
+ *  `workspace`/`shipping` stay optional — their ABSENCE is meaningful (no
+ *  workspace facts / no shipping policy), never defaulted away. */
+export type LoadedAutopilotConfig = Omit<Required<AutopilotConfigFile>, "workspace" | "shipping"> & {
+  workspace?: WorkspaceConfig;
+  shipping?: ShippingConfig;
+};
 
 /** The autopilot TOGGLE — ONE implementation, both hosts (pi /autopilot + the
  *  opencode autopilot tool used to carry the same switch twice). on/off write
@@ -313,7 +348,7 @@ export function autopilotConfigPath(stateDir: string): string {
  * AUTOPILOT_QUEUE_LOW, AUTOPILOT_WORKER_AGENTS) win over the file; the file
  * wins over built-in defaults.
  */
-export function loadAutopilotConfig(stateDir: string, env: NodeJS.ProcessEnv = process.env): Omit<Required<AutopilotConfigFile>, "workspace"> & { workspace?: WorkspaceConfig } {
+export function loadAutopilotConfig(stateDir: string, env: NodeJS.ProcessEnv = process.env): LoadedAutopilotConfig {
   let file: AutopilotConfigFile = {};
   try {
     const p = autopilotConfigPath(stateDir);
@@ -345,6 +380,7 @@ export function loadAutopilotConfig(stateDir: string, env: NodeJS.ProcessEnv = p
     sweepIntervalMs: Number.isFinite(sweepIntervalMs) && sweepIntervalMs >= 0 ? sweepIntervalMs : 600_000,
     zombieGraceMinutes: Number.isFinite(zombieGraceMinutes) && zombieGraceMinutes >= 0 ? zombieGraceMinutes : 30,
     ...(file.workspace ? { workspace: file.workspace } : {}),
+    ...(file.shipping ? { shipping: file.shipping } : {}),
   };
 }
 

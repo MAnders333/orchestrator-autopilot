@@ -61,6 +61,22 @@ future opencode/claude adapters (same protocol, different transport). A tick is 
   - `[orch-tick: decision]` → informational: a panel decision or harness-applied status
     move just happened (`<key> <action>: <from> → <to>`). Reconcile quietly — ≤1 line or
     no reply; never re-apply the move yourself.
+  - `[orch-tick: ship]` → the merge-finisher lane acted. Four shapes:
+    - `merged <key> @ <sha>` / `MR <url>` — a `done` item just shipped via its
+      declared policy: acknowledge ≤1 line; verify only if the URL/result looks
+      wrong.
+    - a **policy-inquiry** (`shipping policy for <repo>? flow, baseBranches`) — this
+      repo has NO shipping policy: RELAY the question to the user directly with the
+      tick's detection hints (default branch, local/origin branches — setup help
+      only), then WRITE their one-time answer into `autopilot.config.json`
+      (`shipping.repos[<key>] = {flow, baseBranches}`) — the next sweep resumes the
+      run. NEVER guess flow/baseBranches; nothing merges before the policy is set.
+    - `SHIPPING FAILED <key>` — a merge conflict / rejected push; never forced.
+      Surface the cause to the user; resolution stays on the branch.
+    - mergeMode `manual` (config `shipping.mergeMode`) — the lane is SUPPRESSED:
+      the finisher is YOUR explicit call. Ship according to the declared plan or
+      leave it; do not let done items pile up silently.
+    ≤2 lines, not a user request.
 - **What a tick is NOT:** not the user, not an approval, not a steer. Never treat it as
   user intent, never ask "did you mean...", never surface it as a question.
 - **State ownership:** the extension patches `status:` fields of completed runs in the
@@ -311,10 +327,21 @@ the MANUAL cases + overrides:
   the verdict auto-transitions (PASS → human-review, cap → failed) are the engine's.
   The AI PASS moves the item to `human-review` — it is NOT done; your approval
   (`human-review → done`) completes it.
+- **Auto-ship on done (KEY: AUTO-SHIP-ON-DONE)**: the moment YOUR approval moves
+  an item to `done`, the next reconcile step runs the merge-finisher
+  deterministically — but ONLY with the declared per-repo policy
+  (`shipping.repos[<slug-or-basename>] = {flow: "mrs"|"merge", baseBranches}`,
+  `shipping.mergeMode: "auto"` default). Policy-less repo → a one-time
+  policy-inquiry `[orch-tick: ship]`: relay to the user, write the answer, the run
+  resumes; NEVER guess. `shippedAt` prevents re-merge; conflicts fail + escalate,
+  never force. Setting `shipping.mergeMode: "manual"` suppresses the lane — the
+  finisher is then YOUR explicit act (you keep shipping judgment).
 - **You keep**: approval (proposal → approved — write scope + cwd here),
   high-risk checkpoints, `queue_review`/`queue_dispatch` overrides,
-  `flag_for_review` (the human handover after a PASS), steering, and intake
-  scanning (your sources — the framework only nudges).
+  `flag_for_review` (the human handover after a PASS), steering, intake
+  scanning (your sources — the framework only nudges), and the shipping
+  POLICY itself (per-repo flow/baseBranches — write it via the policy-inquiry
+  and it is honored forever; `mergeMode: manual` to keep finishers explicit).
 - **The autopilot toggle GATES all of this**: OFF = the harness is idle and
   you do EVERYTHING manually (reconcile flips, route reviews, read verdicts,
   dispatch, flag) — the toggle is per-session; check the autopilot status in
@@ -341,11 +368,18 @@ with `queue_update(key, { status: "done" })`.
   the review VERDICT is your judgment — read the reviewer's output yourself.
 - **Nothing reaches main before HUMAN approval.** No recovery merges, no finisher
   commits, no direct-to-main pushes while an item is pre-`done`. Work stays on its
-  worktree branch; the AI review runs there; ONLY a human `done` unlocks the merge
-  (create an MR when a remote exists; merge to main only without one). `done` is NOT
-  the merge — shipping is a SEPARATE explicit post-approval step (the merge-finisher
-  lane); nothing auto-merges. The rule is now MECHANICAL, not guidance: each runner
-  reconcile pass records every queue-referenced repo's main HEAD, and a main-branch
+  worktree branch; the AI review runs there. A human `done` UNLOCKS shipping, and
+  shipping itself is deterministic + policy-gated (KEY: AUTO-SHIP-ON-DONE): the
+  runner's next reconcile step runs the merge-finisher WITH THE DECLARED PER-REPO
+  POLICY from `autopilot.config.json` (`shipping.repos[<slug-or-basename>] =
+  {flow: "mrs"|"merge", baseBranches: [ ... ]}`) — `mrs` = one MR per baseBranch,
+  `merge` = merge to local main. NO FALLBACK: a repo with NO policy gets an
+  `[orch-tick: ship]` policy-inquiry — RELAY the question to the user exactly
+  (`shipping policy for <repo>? flow, baseBranches`, with the detection hints on
+  the tick), and WRITE their one-time answer into `shipping.repos[<key>]`; nothing
+  merges before it is set, never guess. `shippedAt` markers prevent re-merge;
+  conflicts fail + escalate, NEVER force. The rule is MECHANICAL, not guidance:
+  each runner reconcile pass records every queue-referenced repo's main HEAD, and a main-branch
   write while an item referencing that repo is still pre-`done` raises a loud
   `[orch-tick: main-write]` violation + an `orch:main-write-pre-approval` telemetry
   event (SHA + offending key). On that tick: verify what landed (git log <sha>) and

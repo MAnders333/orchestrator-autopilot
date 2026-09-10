@@ -9,7 +9,7 @@
 
 import type { SubagentBackend } from "../backends/types.ts";
 import type { Autopilot } from "../core.ts";
-import type { AutopilotConfigFile } from "../config.ts";
+import type { LoadedAutopilotConfig } from "../config.ts";
 import { loadStore, saveStore, newStore, addItem, updateItem, queryItems, queueLengths, resolveSeries, recordSeries, type QueueStore } from "../queue-store.ts";
 import { isAutoDispatchable } from "../framework/auto-dispatch.ts";
 import { preserveRunWorktree } from "../framework/worktree-preservation.ts";
@@ -25,7 +25,7 @@ export interface QueueOpsCtx {
   backend: SubagentBackend;
   storeOrNew(): QueueStore;
   autopilot(): Autopilot;
-  cfg(): Required<AutopilotConfigFile>;
+  cfg(): LoadedAutopilotConfig;
   /** Domain-event sink (orch:reviewer-dispatched, ...) — host-local bus. */
   emit(events: Array<{ name: string; data?: Record<string, unknown> }>): void;
   /** Fail-closed repo check for dispatch cwd (git toplevel + dirty tree). */

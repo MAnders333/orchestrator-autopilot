@@ -83,7 +83,15 @@ only your own backend's notes.
   there, stop the redo worker and keep the work ON ITS BRANCH — never
   re-implement recoverable work and NEVER merge/commit it to main: **main is
   touched ONLY by the merge-finisher AFTER the human's approval** (create an
-  MR when a remote exists; merge to main only without one). Recoverable work
+  MR when a remote exists; merge to main only without one), **and that step is
+  now automatic + policy-gated (KEY: AUTO-SHIP-ON-DONE)**: a `done` item ships
+  on the next reconcile sweep with the DECLARED policy in `autopilot.config.json`
+  (`shipping.repos[<slug-or-basename>] = {flow: "mrs"|"merge", baseBranches}`;
+  `shipping.mergeMode: "auto"` default, `"manual"` keeps finishers explicit).
+  No policy → a one-time `[orch-tick: ship]` policy-inquiry: relay flow /
+  baseBranches to the user, write the answer, the run resumes — NEVER guess;
+  nothing merges before the policy is set. `shippedAt` prevents re-merge;
+  conflicts fail + escalate, never forced. Recoverable work
   goes through the NORMAL review loop: the re-dispatch/checked version is
   handed to review on the branch, the AI review runs there, and only a human
   `done` unlocks the merge. Treating a delivery-channel failure (file not

@@ -55,14 +55,67 @@ item there, the harness auto-flags it for you, and your
 ## Shipping (the merge-finisher lane) — `done` is NOT the merge
 
 `done` means **human-approved**, nothing more: it unlocks shipping but does NOT
-ship. Moving work to main is a SEPARATE, EXPLICIT, post-approval step — the
-**merge-finisher** (create an MR when a remote exists; merge to main only
-without one). Nothing auto-merges: the harness never merges, never pushes to
-main, never moves a branch into main — the only main-branch write the
-framework ever welcomes is the merge-finisher's shipping of an item the human
-already marked `done` (or the human's own merge). Work stays on its worktree
-branch through the whole review loop; a recovery re-dispatch re-commits on the
-branch, never on main.
+ship by itself. Moving work into a base branch is a SEPARATE post-approval step
+— the **merge-finisher lane** (merge to main when the policy says so, one MR per
+base branch when a remote exists). Work stays on its worktree branch through the
+whole review loop; a recovery re-dispatch re-commits on the branch, never on
+main. The ONLY main-branch write the framework ever welcomes is the
+merge-finisher's shipping of an item the human already marked `done` (or the
+human's own merge).
+
+**The lane is AUTOMATIC, and gated by a PER-REPO SHIPPING POLICY (KEY:
+AUTO-SHIP-ON-DONE).** When an item reaches `human-review → done`, the runner's
+next reconcile step ships it deterministically with the DECLARED policy — and
+NEVER with a guessed one (no fallback: guessing flow/base-branches is the msf
+incident root). The policy lives in `autopilot.config.json`:
+
+```json
+{
+  "shipping": {
+    "mergeMode": "auto",              // "auto" (default) | "manual"
+    "repos": {
+      "<origin-slug-or-basename>": { "flow": "mrs",   "baseBranches": ["dev", "master"] },
+      "<other-repo>":              { "flow": "merge", "baseBranches": ["main"] }
+    }
+  }
+}
+```
+
+- **Per-repo key**: the repo's origin slug (`owner/repo` or `repo`) or its
+  basename — any match resolves the policy. A repo with NO matching entry is
+  POLICY-LESS: the shipping run NOTICES, asks the user directly ONE time
+  (intercom policy-inquiry: `shipping policy for <repo>? flow, baseBranches`
+  + detection-based candidate hints — remote default branch, local/origin
+  branch names; branch protection is a named blind spot, setup help only),
+  and stays PAUSED. The orchestrator relays the answer and writes it into
+  `shipping.repos[<key>]`; the NEXT sweep resolves it and ships. **Nothing
+  merges before the policy is set** — a policy-less repo never receives a
+  guessed flow/base.
+- **`flow: "mrs"`** (a remote exists): one MR per `baseBranch`, in the order
+  listed (`["dev","master"]` = two MRs, listed first ships first;
+  `["main"]` = one MR). The approved work's tip is pushed to origin for each
+  base (never `--force`); the tick reports the MR/create URL when the remote's
+  web layout is derivable, else the pushed ref. **`flow: "merge"`** (local /
+  no remote): merges the approved work into the LOCAL base branch (default
+  `main`).
+- **`mergeMode: "manual"`** suppresses the automatic lane: a done item gets ONE
+  nudge naming the declared plan and stays YOUR explicit act (batch finishers
+  are never silently auto-run). Default is **`auto`**.
+- **`shippedAt` marker prevents re-merge**: the shipping step stamps the item
+  `shippedAt` (ISO ts) and the lane skips it forever after. A human re-open
+  (`done → approved`) clears the marker — the next approval ships again.
+- **Skip when nothing new**: a tip already on the base (ancestor) is a
+  legitimate no-op — marked shipped, never re-evaluated forever.
+- **Conflicts are failures, never forced**: a merge conflict (or a rejected,
+  non-fast-forward push) ABORTS the merge, leaves the base untouched, keeps the
+  item unshipped (no shippedAt), and escalates once
+  (`[orch-tick: ship] SHIPPING FAILED …` + `orch:ship-failed` with
+  conflict/reason). Resolution stays on the branch; nothing is force-pushed.
+- **Telemetry**: every lane action lands as a `[orch-tick: ship]` tick —
+  `merged <key> @ <sha>` / `MR <url>` — plus a domain event
+  (`orch:item-shipped`, `orch:shipping-policy-inquiry`, `orch:ship-failed`).
+  The policy-inquiry + escalation events ride the shared gate like every
+  harness tick.
 
 - **Pre-`done` main writes are flagged, mechanically.** The runner's reconcile
   step records each queue-referenced repo's main HEAD every sweep and compares
@@ -118,7 +171,10 @@ Reason vocabulary: ticks arrive as `[orch-tick: <reason>]` — `dispatch` /
 escalated / degraded-window hold; see below) /
 `main-write` (a main-branch write landed while an item referencing that repo
 was not yet human-approved — a MAIN-IMMUTABILITY violation; SHA + offending
-key in the message).
+key in the message) /
+`ship` (the merge-finisher lane acted — shipped `done` work (merged @ sha /
+MR url), a policy-inquiry ask for a policy-less repo, an escalation on a
+conflict/non-forced failure, or the manual-mode nudge).
 
 ## Tick behavior (what the orchestrator is nudged to do)
 
@@ -188,6 +244,19 @@ key in the message).
   human-approved). The orchestrator verifies what landed (`git log <sha>`)
   and who wrote it, and keeps recovery on the branch — the only legitimate
   main-write path is the post-approval merge-finisher (see Shipping above).
+- **ship** — the merge-finisher lane acted, always informational:
+  - `merged <key> @ <sha>` / `MR <url>` — a `done` item shipped via its
+    declared policy (the shippedAt marker is set; nothing to do),
+  - **policy-inquiry** — `<repo>` has NO shipping policy: RELAY the question
+    to the user exactly (`shipping policy for <repo>? flow, baseBranches` +
+    the detection hints) and write the one-time answer into
+    `autopilot.config.json` `shipping.repos[<key>]`. Nothing ships and
+    nothing merges until it is set — never guess,
+  - `SHIPPING FAILED <key>` — a merge conflict / rejected push: NEVER forced;
+    resolve on the branch; the item stays done-but-unshipped,
+  - mergeMode `manual` — the plan is declared; the finisher stays YOUR call.
+  > The lane runs on every reconcile step; batch finishers stay explicit
+  > under `mergeMode: manual` (auto is the default). Response ≤2 lines.
 - **blocked** items never trigger ticks (they are waiting by design).
 
 ## Automatic recovery of failed items (AUTO-RECOVER-FAILS)

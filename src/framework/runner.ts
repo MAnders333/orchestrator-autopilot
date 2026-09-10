@@ -23,6 +23,7 @@ import { autoRecoverFails } from "./auto-recovery.ts";
 import { decisionTick } from "./panels.ts";
 import { humanReviewTargetsFor, preserveActiveItems, prunePreservedRefs, preserveRunWorktree } from "./worktree-preservation.ts";
 import { checkMainWrites } from "./main-write-guard.ts";
+import { runShippingPass } from "./shipping.ts";
 
 export interface RunnerOptions {
   stateDir: string;
@@ -341,6 +342,26 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       }
     } catch {
       // the guard must never break the sweep
+    }
+    // SHIPPING LANE (KEY: AUTO-SHIP-ON-DONE) — the deterministic post-approval
+    // merge-finisher. `done` is human-approved, NOT merged; this reconcile step
+    // reacts to done: a done item with a declared PER-REPO policy ships by
+    // itself (MRs per baseBranch / merge to local main); a done item WITHOUT a
+    // policy fires the ONE-TIME policy-inquiry ask and stays paused — nothing
+    // merges before the policy is set (NO FALLBACK, never guess); mergeMode
+    // manual suppresses the lane (batch finishers stay explicit). mergeMode
+    // auto is the default. Every action lands as a `[orch-tick: ship]` tick +
+    // a domain event; shippedAt markers prevent re-merge. Best-effort like the
+    // guard above: a git/store failure must never break the sweep.
+    try {
+      for (const o of runShippingPass(opts.stateDir)) {
+        if (o.event && opts.emit) opts.emit([o.event]);
+        const r = router.send(o.message, { bypassCooldown: true });
+        if (r === "deferred") queueDeferred(o.message, "tick");
+      }
+    } catch {
+      // the shipping lane must never break the sweep — a failure inside is
+      // already an outcome of the pass, not an exception
     }
     // The authoritative fleet, fetched ONCE — both the auto-dispatch (A) and
     // the engine sweep use it (one RPC, and the request is emitted synchronously

@@ -63,6 +63,13 @@ export interface QueueItem {
   timeoutMs: number | null;
   /** re-dispatch attempt counter (review-FAIL cap is 5) */
   attempts: number;
+  /** SHIPPING MARKER (KEY: AUTO-SHIP-ON-DONE): the ISO timestamp when the
+   *  merge-finisher shipped this item (merged into main / MRs created).
+   *  absent/null = not shipped yet — a `done` item without this marker is
+   *  still waiting for the shipping lane. The marker prevents re-merge:
+   *  once set, the shipping lane skips the item. Cleared when the item
+   *  leaves `done` (a human re-open starts a fresh approval + ship cycle). */
+  shippedAt?: string | null;
   /** Why this item reached `failed` (see FailCause). null when not failed or
    *  a legacy failure with no recorded cause. Set by the event-driven flips
    *  (worker completion, review-cap, zombie reconciliation) and cleared on any
@@ -159,6 +166,7 @@ export function loadStore(stateDir: string): QueueStore | null {
         if (it.runId === undefined) it.runId = null;
         if (it.cwd === undefined) it.cwd = null;
         if (it.blocker === undefined) it.blocker = null;
+        if (it.shippedAt === undefined) it.shippedAt = null;
         // The ready boolean was folded into the status: approved = dispatchable,
         // approved+!ready → blocked. Normalize old stores on read.
         if (it.status === "approved" && (it as { ready?: boolean }).ready === false) it.status = "blocked";
@@ -269,6 +277,7 @@ export function queryItems(store: QueueStore, q: QueueQuery = {}): Array<Partial
       // a verdict without loading notes.
       timeoutMs: i.timeoutMs,
       failCause: i.failCause ?? null,
+      shippedAt: i.shippedAt ?? null,
       updatedAt: i.updatedAt,
     };
     if (q.includeNotes) {
@@ -433,6 +442,9 @@ export interface UpdatePatch {
   urgency?: string;
   risk?: string;
   notes?: string;
+  /** SHIPPING MARKER (KEY: AUTO-SHIP-ON-DONE) — set by the merge-finisher
+   *  when it ships; cleared when the item leaves `done` (re-open). */
+  shippedAt?: string | null;
 }
 
 /** Apply a validated update. Throws on an illegal transition. Returns the item. */
@@ -472,6 +484,12 @@ export function updateItem(store: QueueStore, key: string, patch: UpdatePatch, n
   if (to === "blocked" && !clean.blocker) {
     throw new Error(`queue: blocked requires a blocker reason (parked/serialized/merge/decision) for '${key}'`);
   }
+  // SHIPPING MARKER lifecycle: the marker is only meaningful while the item is
+  // `done`. ANY transition OUT of done (re-open to approved, re-dispatch to
+  // active, drop to rejected) clears it — a re-approved item starts a fresh
+  // approval → shipping cycle and must ship again. Re-stating done (or a
+  // metadata-only patch) leaves it alone.
+  if (to !== undefined && to !== "done") clean.shippedAt = null;
   if (to !== undefined && to !== from && !validTransition(from, to)) {
     // allow REPAIR of a corrupt item (status missing/invalid) to any valid status
     if (!isValidStatus(from) && isValidStatus(to)) {
