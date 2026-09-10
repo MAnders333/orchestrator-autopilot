@@ -27,20 +27,59 @@ parameter; `config.timeoutMs` does not reach it either. Raising it for real
 needs a per-agent `timeoutMs:` in the agent definition (a static, fleet-wide
 change) or an upstream fix.
 
-**So dispatch warns loudly instead of pretending** (`src/framework/run-budget.ts`,
-surfaced by `queue_dispatch`). It does not refuse: refusing would strand every
-item whose recorded budget exceeds 30 minutes — including auto-recovery's
-escalated re-dispatches — and a truncated run still does 30 minutes of real
-work. What must never happen again is the operator planning two hours of work
-against a budget the runtime silently halves.
+The trace above was re-verified line by line against the installed
+`pi-subagents@0.66.0` source:
+`src/runs/background/async-execution.ts:156` (`DEFAULT_ASYNC_TIMEOUT_MS = 30 * 60 * 1000`),
+`:1048` (`timeoutMs: a.defaultTimeoutMs ?? DEFAULT_ASYNC_TIMEOUT_MS` — the step
+budget never consults the caller's request), and
+`src/runs/background/subagent-runner.ts:1892-1895`
+(`Math.min(step.timeoutMs, parentRemainingMs)`, with the kill message formatted
+from `step.timeoutMs`). `a.defaultTimeoutMs` comes from an agent definition's
+`timeoutMs:` key (`src/agents/agents.ts:2031-2037`); no agent in this fleet sets
+one, so the 30-minute ceiling is real here.
+
+**So the framework refuses to record or promise a budget it cannot honour, and
+warns loudly wherever one is stated** (`src/framework/run-budget.ts`):
+
+- `queue_add` / `queue_update` warn when an explicitly-set `timeoutMs` exceeds
+  the ceiling — the operator plans against the number they SET, so the dispatch
+  receipt is already too late.
+- `queue_dispatch` warns on the receipt, and reports `budgetTruncated` in details.
+- auto-recovery **clamps** its ×1.5 escalation to the honourable budget and tells
+  the worker the truth (see below).
+
+Operator-supplied budgets are warned, not rejected: rejecting would strand an
+item whose recorded budget is merely optimistic, and a truncated run still does
+30 minutes of real work. What is refused is the framework's own manufacture of a
+fictional number.
+
+### The escalation was worse than cosmetic
+
+Auto-recovery grew a capped item's budget ×1.5 toward a nominal 3h. The runtime
+truncates that to 30 minutes, so the extra bought nothing — but the inflated
+number was then written onto the item, and `workerFailCause`'s deterministic cap
+backstop compares the run's lifetime against the item's RECORDED `timeoutMs`. A
+run asked for 12h and killed at 30m never trips that comparison, so **a run the
+budget killed was filed as a `verdict` failure**: fewer recovery attempts, and a
+note telling the operator "not budget-capped" about a capped run.
+
+AUTOPILOT-47's own first attempt was mis-filed exactly this way
+(`autopilot.jsonl`: `"outcome":"failed","failCause":"verdict"`).
+
+So `recoveryPlan` clamps the escalation to the honourable budget and reports
+`budgetGrew`; `recoveryContext` promises a BIGGER budget only when there is one,
+and otherwise names the wall and says COMMIT EARLY — the advice that would have
+saved both of today's runs. `workerFailCause` compares against the honoured
+budget, so a cap is recognised as a cap whatever was requested.
 
 ## B — why no sweep noticed, and the AUTOPILOT-20 trade
 
 `zombieReconcile` is gated on the fleet being AUTHORITATIVELY IDLE
-(`fleetTotalActive === 0`). On a busy queue that is never true: **one live
-worker anywhere makes every dead run in the store immune.** Three runs sat
-dead-but-`active`/`ai-review` for 117 and 287 minutes and more while other
-workers ran. The gate was not a bug in itself — without a per-run signal,
+(`src/core.ts:506` — `if (fleetTotalActive > 0) return { flippedKeys: [] }`). On
+a busy queue that is never true: **one live worker anywhere makes every dead run
+in the store immune.** Three runs sat dead-but-`active`/`ai-review` for 117 and
+287 minutes and more while other workers ran. The incident-day telemetry records
+the gate holding shut: `{"type":"sweep","fleetTotalActive":6}`. The gate was not a bug in itself — without a per-run signal,
 "nothing is running anywhere" was the only evidence strong enough to condemn an
 item — but it made the net impossible to fire exactly when it was needed.
 
@@ -96,10 +135,18 @@ evidence note names it.
 
 ## Known gaps
 
-- The budget warning is on the `queue_dispatch` receipt. The harness lanes
-  (auto-dispatch, auto-recovery, auto-review) pass the same unhonourable budget
-  without a per-dispatch warning; auto-recovery still escalates a capped item's
-  budget ×1.5 up to 3h, which the runtime will keep truncating to 30 minutes.
+- The ceiling is a CONSTANT (`RUNTIME_STEP_BUDGET_CEILING_MS`) mirroring the
+  runtime's `DEFAULT_ASYNC_TIMEOUT_MS`, not a value read from the runtime. If an
+  agent definition gains its own `timeoutMs:`, or the runtime changes its
+  default, this constant must be updated or the warning becomes a false positive.
+  It is pinned to `pi-subagents@0.66.0` as verified above.
+- `auto-dispatch` still passes an operator-set unhonourable budget to the spawn
+  without a per-dispatch warning. The budget is warned at `queue_add` /
+  `queue_update` (where it is stated) and at `queue_dispatch`, so the operator is
+  told — but a harness-initiated dispatch emits no fresh warning of its own.
 - `runWorktreePath` matches on the `pi-parallel-<runId>` branch naming. A
   worktree provider that names branches differently resolves to null and records
   nothing — no invented path.
+- Every sweep, including `deadRunReconcile`, runs only while autopilot is ON. On
+  the incident day it WAS on (the telemetry shows sweeps throughout), so this was
+  not the cause — but a dead run in a store nobody is sweeping is still invisible.
