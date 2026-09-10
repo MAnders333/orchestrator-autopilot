@@ -103,19 +103,54 @@ export function createPiBackend(pi: PiLike, deps: PiBackendDeps = {}): SubagentB
     return "";
   }
 
+  /**
+   * One request/reply round-trip on the pi event bus.
+   *
+   * TIMEOUT SEMANTICS (load-bearing): a timeout RESOLVES `{success:false,
+   * error}` — it never rejects. Callers depend on that shape: fleetStatus()
+   * turns it into `null`, and the framework runner's degraded-episode logic
+   * (AUTOPILOT-24) tells a null answer from a throw.
+   *
+   * TIMER SAFETY (AUTOPILOT-31): `unsub` is DECLARED AND INITIALIZED before the
+   * timer is armed, and a synchronous subscribe/emit failure clears the timer.
+   * Previously the timer was armed first and its callback closed over a
+   * not-yet-initialized `const unsub`: when `pi.events.on` threw, the orphaned
+   * timer fired timeoutMs later and hit `unsub` in its temporal dead zone —
+   * a ReferenceError thrown FROM A TIMER CALLBACK, outside this promise chain,
+   * so no caller `.catch` could contain it and the HOST PROCESS died instead of
+   * degrading. Invariants: no timer callback may reference a possibly
+   * uninitialized binding, and a failed subscribe never leaves an armed timer.
+   */
   function rpc(method: string, params: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const requestId = randomUUID();
+      let unsub: () => void = () => {}; // no-op until the subscription replaces it
       const timer = setTimeout(() => {
         unsub();
         resolve({ success: false, error: { message: `${method} RPC timed out` } });
       }, timeoutMs);
-      const unsub = pi.events.on(RPC_REPLY(requestId), (reply: unknown) => {
+      try {
+        const off = pi.events.on(RPC_REPLY(requestId), (reply: unknown) => {
+          clearTimeout(timer);
+          unsub();
+          resolve(reply);
+        });
+        // a bus whose on() returns no unsubscribe would be the same
+        // host-killing throw-from-a-timer, one frame later
+        if (typeof off === "function") unsub = off;
+        pi.events.emit(RPC_REQUEST, { version: 1, requestId, method, params });
+      } catch (e) {
+        // A broken bus rejects HERE (the same failure the executor's throw
+        // already surfaced to callers) — but with the timer disarmed, so
+        // nothing fires into a dead request afterwards.
         clearTimeout(timer);
-        unsub();
-        resolve(reply);
-      });
-      pi.events.emit(RPC_REQUEST, { version: 1, requestId, method, params });
+        try {
+          unsub();
+        } catch {
+          // tearing down a half-built subscription is best-effort
+        }
+        reject(e instanceof Error ? e : new Error(String(e)));
+      }
     });
   }
 
