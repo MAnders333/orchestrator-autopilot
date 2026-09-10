@@ -29,7 +29,7 @@
 import { loadStore, mutateStore, updateItem, isFailCause, type QueueItem, type FailCause, type UpdatePatch } from "../queue-store.ts";
 import type { SubagentBackend } from "../backends/types.ts";
 import { workerTask } from "./auto-dispatch.ts";
-import { appendOverride, finisherLandedEvidence, landedOverride } from "../finisher-evidence.ts";
+import { appendOverride, captureFinisherBaseline, finisherLandedEvidence, isFinisherItem, landedOverride } from "../finisher-evidence.ts";
 import { preserveRunWorktree } from "./worktree-preservation.ts";
 import {
   loadRecoveryState,
@@ -134,7 +134,8 @@ export interface RecoveryOutcome {
    */
   nextAt: number | null;
   /** FINISHER-EVIDENCE (AUTOPILOT-34): failed items whose work is EVIDENCED AS
-   *  LANDED (the declared cwd's HEAD moved). Recovery refuses to re-dispatch
+   *  LANDED (the source they were sent to land is in the declared cwd's
+   *  history, and was not at dispatch). Recovery refuses to re-dispatch
    *  them — a re-run would duplicate a merge that already landed — and
    *  surfaces them once for the human's close-out call. */
   landedSkipped: Array<{ key: string; repo: string; sha: string; surfaced: boolean }>;
@@ -193,8 +194,8 @@ export async function autoRecoverFails(
   let changed = false;
 
   // Phase 0 — FINISHER-EVIDENCE (AUTOPILOT-34). A `failed` item whose work is
-  // EVIDENCED AS LANDED (a finisher-class dispatch whose declared cwd moved
-  // off its dispatch baseline) is NOT a recovery candidate: re-dispatching it
+  // EVIDENCED AS LANDED (a finisher-class dispatch whose declared source is now
+  // in the declared cwd's history) is NOT a recovery candidate: re-dispatching it
   // would re-run a merge that already landed (duplicate cherry-pick, or a
   // worker pointed at a moved main). The evidence + the override are RECORDED
   // on the item and it is surfaced ONCE for the human's close-out call.
@@ -277,6 +278,10 @@ export async function autoRecoverFails(
         continue;
       }
       const attempt = attempts + 1;
+      // FINISHER-EVIDENCE (AUTOPILOT-34): a recovery re-dispatch is a NEW run,
+      // so it gets its own baseline (captured before the spawn) — never the
+      // failed run's, which would make that run's commits look like this one's.
+      const baseline = item.cwd && isFinisherItem(item) ? captureFinisherBaseline(item.cwd, null, item.finisherSource ?? null) : null;
       let runId: string | null = null;
       try {
         runId = await backend.spawn(recoveryTask(item, cause), { cwd: item.cwd ?? undefined, timeoutMs: plan.budgetMs ?? undefined });
@@ -289,6 +294,7 @@ export async function autoRecoverFails(
           runId,
           recoveries: attempt,
           recoveryNotBefore: null,
+          ...(baseline ? { finisherBaseline: { ...baseline, runId } } : {}),
           ...(plan.budgetMs !== null ? { timeoutMs: plan.budgetMs } : {}),
           notes: appendNote(
             fresh.notes,

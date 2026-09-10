@@ -259,6 +259,10 @@ export async function queueUpdate(ctx: QueueOpsCtx, params: Record<string, unkno
         // Explicit param wins; absent param leaves the recorded budget alone.
         ...(params.timeoutMs !== undefined ? { timeoutMs: normalizeTimeoutMs(params.timeoutMs) } : {}),
         ...(isDispatchClass(params.dispatchClass) ? { dispatchClass: params.dispatchClass } : {}),
+        // WHAT a finisher lands (branch/tag/sha) is item state, not per-run
+        // state: the harness lanes re-dispatch without dispatch params and
+        // read it from here.
+        ...(typeof params.finisherSource === "string" ? { finisherSource: params.finisherSource.trim() || null } : {}),
         ...(override ? { overrides: appendOverride(cur, override) } : {}),
         notes: override
           ? [patchedNotes ?? cur.notes, overrideNote].filter(Boolean).join("\n\n")
@@ -317,15 +321,26 @@ export async function queueDispatch(ctx: QueueOpsCtx, params: Record<string, unk
     // FINISHER-EVIDENCE (AUTOPILOT-34): a dispatch may DECLARE that it writes
     // OUTSIDE its worktree — a merge finisher lands an approved branch in the
     // TARGET REPO'S CHECKOUT (`cwd`) and leaves its worktree untouched by
-    // design. Record the class + the cwd's HEAD as the dispatch BASELINE, so
-    // the completion path can judge that run on a HEAD move instead of on the
-    // runtime's "no worktree edits" signal (which always misreads this class).
+    // design. Record the class + the cwd's HEAD + the SOURCE it must land as
+    // the dispatch BASELINE, so the completion path can judge that run on THAT
+    // SOURCE LANDING instead of on the runtime's "no worktree edits" signal
+    // (which always misreads this class).
     const dispatchClass: DispatchClass = isDispatchClass(params.dispatchClass)
       ? params.dispatchClass
       : item.dispatchClass === "finisher"
         ? "finisher"
         : "worker";
-    const finisherBaseline = dispatchClass === "finisher" ? captureFinisherBaseline(cwd, null) : null;
+    // WHAT this finisher lands. An explicit param wins; otherwise the item's
+    // recorded source rides along (the harness re-dispatch lanes have no
+    // params). With no resolvable source there is NO landed evidence and the
+    // runtime's verdict stands unchanged — the dispatch says so out loud.
+    const finisherSource =
+      dispatchClass === "finisher"
+        ? (typeof params.finisherSource === "string" && params.finisherSource.trim()
+            ? params.finisherSource.trim()
+            : (item.finisherSource ?? null))
+        : null;
+    const finisherBaseline = dispatchClass === "finisher" ? captureFinisherBaseline(cwd, null, finisherSource) : null;
     const runId = await ctx.backend.spawn(params.task as string, { cwd, timeoutMs });
     if (!runId) return { text: "queue_dispatch: spawned but no run id returned", details: {} };
     // The spawn happens OUTSIDE the mutation (mutateStore may re-run its apply
@@ -338,6 +353,7 @@ export async function queueDispatch(ctx: QueueOpsCtx, params: Record<string, unk
           runId,
           ...(requestedTimeout ? { timeoutMs: requestedTimeout } : {}),
           dispatchClass,
+          ...(dispatchClass === "finisher" ? { finisherSource } : {}),
           ...(finisherBaseline ? { finisherBaseline: { ...finisherBaseline, runId } } : {}),
         });
       }
@@ -359,7 +375,9 @@ export async function queueDispatch(ctx: QueueOpsCtx, params: Record<string, unk
       : "";
     const finisherNote =
       dispatchClass === "finisher"
-        ? ` FINISHER-CLASS: this dispatch writes into ${cwd} (not its worktree); success is judged on a HEAD move from baseline ${finisherBaseline?.sha ? finisherBaseline.sha.slice(0, 8) : "unreadable"}, so a runtime 'no edits' failure verdict is overridden (and recorded) when the work lands.`
+        ? finisherBaseline?.sourceSha
+          ? ` FINISHER-CLASS: this dispatch writes into ${cwd} (not its worktree); success is judged on '${finisherSource}' (${finisherBaseline.sourceSha.slice(0, 8)}) entering that checkout's history from baseline ${finisherBaseline.sha ? finisherBaseline.sha.slice(0, 8) : "unreadable"}, so a runtime 'no edits' failure verdict is overridden (and recorded) when the work lands.`
+          : ` FINISHER-CLASS: this dispatch writes into ${cwd} (not its worktree), but ${finisherSource ? `the declared source '${finisherSource}' does not resolve to a commit there` : "NO source branch/sha was declared (finisherSource)"} — LANDED EVIDENCE IS OFF for this run, so a runtime 'no edits in the worktree' verdict will fail it as usual. Re-dispatch with finisherSource=<branch/sha it must land> to get the evidence path.`
         : "";
     return { text: `dispatched '${key}' — run ${runId}.${autoNote}${finisherNote}`, details: { runId, dispatchClass } };
   } catch (e) {

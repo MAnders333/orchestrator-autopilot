@@ -157,12 +157,15 @@ export class Autopilot {
           // FINISHER-EVIDENCE (AUTOPILOT-34): a FINISHER-CLASS run writes into
           // the declared cwd's checkout, NOT its worktree, so the runtime's
           // "no edits in the worktree" signal cannot judge it. Before believing
-          // a failure verdict, ask the authoritative record: did the declared
-          // cwd's HEAD move off the dispatch baseline? If it did, the work
-          // LANDED — the verdict is overridden (and the override RECORDED, so
-          // a pattern of overrides is visible), and the item takes the normal
-          // success path. A finisher whose HEAD did NOT move has no evidence,
-          // so its failure stands — the real "wrote a plan and stopped" case.
+          // a failure verdict, ask the authoritative record: did the source
+          // THIS run was dispatched to land enter the declared cwd's history
+          // during this run? If it did, the work LANDED — the verdict is
+          // overridden (and the override RECORDED, so a pattern of overrides is
+          // visible), and the item takes the normal success path (ai-review:
+          // the reviewer still verifies the landed commit). Anything short of
+          // that — no declared source, stale/absent baseline, HEAD not advanced
+          // — is no evidence, so the failure stands: the real "wrote a plan and
+          // stopped" case still fails.
           if (outcome === "failed" && isFinisherItem(it)) {
             const evidence = finisherLandedEvidence(it, now);
             if (evidence) {
@@ -273,8 +276,8 @@ export class Autopilot {
           tick: {
             reason: "review",
             message:
-              `[orch-tick: review] ${flippedKey} — the runtime reported run ${topRunId.slice(0, 8)} UNSUCCESSFUL, but this is a FINISHER-CLASS dispatch (writes outside its worktree) and its work LANDED: ` +
-              `${evidence ? `${evidence.repo} ${evidence.ref ?? "HEAD"} ${String(evidence.fromSha ?? "?").slice(0, 8)} → ${evidence.sha.slice(0, 8)}` : "HEAD moved in the declared cwd"}. ` +
+              `[orch-tick: review] ${flippedKey} — the runtime reported run ${topRunId.slice(0, 8)} UNSUCCESSFUL, but this is a FINISHER-CLASS dispatch (writes outside its worktree) and the source it was sent to land IS IN: ` +
+              `${evidence ? `${evidence.source ?? evidence.sourceSha.slice(0, 8)} → ${evidence.repo} ${evidence.ref ?? "HEAD"} ${String(evidence.fromSha ?? "?").slice(0, 8)} → ${evidence.sha.slice(0, 8)}` : "the declared source landed in the declared cwd"}. ` +
               `The failure verdict was OVERRIDDEN (recorded in the item's overrides[]) and ${flippedKey} moved to ai-review — do NOT re-dispatch it; verify the landed commit. Respond ≤2 lines.`,
             facts: { key: flippedKey, outcome: "ai-review", failureOverridden: true, ...(evidence ? { landedSha: evidence.sha, repo: evidence.repo } : {}) },
           },

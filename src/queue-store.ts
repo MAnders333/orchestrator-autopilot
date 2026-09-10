@@ -42,16 +42,20 @@ export function isFailCause(v: unknown): v is FailCause {
  *  approved branch into the target repo's main checkout) — so its worktree is
  *  untouched BY DESIGN and a runtime 'no edits' heuristic misreads it as
  *  "returned planning output". For that class the queue's own record is
- *  authoritative: the evidence is a HEAD move in the declared cwd
- *  (`landedEvidence`), not worktree file edits. */
+ *  authoritative: the evidence is the DECLARED SOURCE entering the declared
+ *  cwd's history during the run (`landedEvidence`), not worktree file edits
+ *  — and not a bare HEAD move, which other lanes and humans also produce. */
 export type DispatchClass = "worker" | "finisher";
 
 export function isDispatchClass(v: unknown): v is DispatchClass {
   return v === "worker" || v === "finisher";
 }
 
-/** The declared-cwd HEAD as it stood WHEN a finisher-class run was dispatched
- *  — the baseline the landed check compares against. */
+/** The declared-cwd HEAD as it stood WHEN a finisher-class run was dispatched,
+ *  plus the SOURCE that run was sent to land — together, the baseline the
+ *  landed check compares against. Written by EVERY lane that spawns a
+ *  finisher-class run, and cleared when the item (re-)enters `active`, so a
+ *  baseline always describes the item's most recent dispatch. */
 export interface FinisherBaseline {
   /** The checkout the finisher writes to (the item's declared cwd). */
   repo: string;
@@ -59,14 +63,20 @@ export interface FinisherBaseline {
   ref: string | null;
   /** HEAD sha at dispatch; null when the repo could not be read. */
   sha: string | null;
+  /** WHAT this dispatch was sent to land (branch/tag/sha), or null when the
+   *  dispatch declared none — with no source there is NO landed evidence. */
+  source: string | null;
+  /** `source` resolved to a commit AT DISPATCH, so a branch deleted by the
+   *  merge can still answer "is it in the target's history now?". */
+  sourceSha: string | null;
   /** The run this baseline belongs to. */
   runId: string | null;
   at: string;
 }
 
-/** PROOF that a finisher-class run's work LANDED: the declared cwd's HEAD
- *  moved off the dispatch baseline. This is the success evidence for work that
- *  never touches its own worktree. */
+/** PROOF that a finisher-class dispatch's work LANDED: the source it was sent
+ *  to land entered the declared cwd's history during the run. This is the
+ *  success evidence for work that never touches its own worktree. */
 export interface LandedEvidence {
   repo: string;
   ref: string | null;
@@ -74,6 +84,9 @@ export interface LandedEvidence {
   fromSha: string | null;
   /** HEAD after the run — the landed commit. */
   sha: string;
+  /** The source that landed, as declared at dispatch, and its commit. */
+  source: string | null;
+  sourceSha: string;
   /** The run whose work this is. */
   runId: string | null;
   at: string;
@@ -159,10 +172,14 @@ export interface QueueItem {
    *  run writes into the DECLARED cwd's checkout, so an empty worktree is
    *  expected and NEVER evidence of a run that did nothing. */
   dispatchClass?: DispatchClass;
+  /** WHAT a finisher-class dispatch lands (branch/tag/sha). Sticky across
+   *  re-dispatches — it describes the item's work, not one run — and required
+   *  for landed evidence (no declared source → no evidence). */
+  finisherSource?: string | null;
   /** The declared cwd's HEAD when the current finisher run was dispatched. */
   finisherBaseline?: FinisherBaseline | null;
-  /** Evidence that the work LANDED in the declared cwd (HEAD moved off the
-   *  baseline). Sticky: it records a historical fact about this item's work,
+  /** Evidence that the work LANDED in the declared cwd (the declared source
+   *  entered its history). Sticky: it records a fact about this item's work,
    *  and auto-recovery refuses to re-dispatch an item that carries it (a
    *  re-run would duplicate a merge that already landed). */
   landedEvidence?: LandedEvidence | null;
@@ -829,6 +846,7 @@ export interface UpdatePatch {
   /** FINISHER-EVIDENCE: the dispatch class, the dispatch-time HEAD baseline,
    *  the landed proof, and the append-only override log. */
   dispatchClass?: DispatchClass;
+  finisherSource?: string | null;
   finisherBaseline?: FinisherBaseline | null;
   landedEvidence?: LandedEvidence | null;
   overrides?: FailureOverride[];
@@ -874,11 +892,16 @@ export function updateItem(store: QueueStore, key: string, patch: UpdatePatch, n
   // reviewerRunId in the same patch wins — the caller is stamping the dispatch.
   if (to === "ai-review" && from !== "ai-review" && clean.reviewerRunId === undefined) clean.reviewerRunId = null;
   // ENTERING `active` starts a NEW run, so the PREVIOUS run's landed evidence
-  // must not survive into it (FINISHER-EVIDENCE): a re-dispatched finisher
-  // that genuinely does nothing has to fail on its own merits, and stale
-  // evidence would override that verdict forever. The dispatch lane records a
-  // fresh baseline; the override LOG (overrides[]) keeps the history.
+  // AND its dispatch baseline must not survive into it (FINISHER-EVIDENCE): a
+  // re-dispatched finisher that genuinely does nothing has to fail on its own
+  // merits, and either leftover would launder that failure into a landing (a
+  // stale baseline makes the PREVIOUS run's commit look like this run's work).
+  // Both are cleared HERE, on the lifecycle edge, so every lane that returns an
+  // item to `active` is covered — not just the dispatch tool. A lane that
+  // spawns a finisher passes a FRESH baseline in the same patch (explicit wins);
+  // the override LOG (overrides[]) and finisherSource keep the history.
   if (to === "active" && from !== "active" && clean.landedEvidence === undefined) clean.landedEvidence = null;
+  if (to === "active" && from !== "active" && clean.finisherBaseline === undefined) clean.finisherBaseline = null;
   // blocked must say WHY (parked/serialized/merge/decision) — a blocker-less
   // block would be indistinguishable from a rejected proposal.
   if (to === "blocked" && !clean.blocker) {

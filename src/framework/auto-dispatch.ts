@@ -22,6 +22,7 @@
 // checkpoints); these automations remove the mechanical round-trips.
 
 import { loadStore, mutateStore, updateItem, type QueueItem } from "../queue-store.ts";
+import { captureFinisherBaseline, isFinisherItem } from "../finisher-evidence.ts";
 import type { SubagentBackend } from "../backends/types.ts";
 import { preserveRunWorktree } from "./worktree-preservation.ts";
 import { isProviderDegraded, recordProviderFailure, recordProviderSuccess } from "./recovery-state.ts";
@@ -103,6 +104,11 @@ export async function autoDispatchEligible(
   const dispatched: Array<{ key: string; runId: string }> = [];
   for (const item of eligible.slice(0, slots)) {
     try {
+      // FINISHER-EVIDENCE (AUTOPILOT-34): a finisher-class item dispatched by
+      // the harness gets a FRESH baseline for THIS run, captured before the
+      // spawn. Without it the run has none (entering `active` clears the
+      // previous one) and its verdict stands as the runtime reported it.
+      const baseline = isFinisherItem(item) ? captureFinisherBaseline(item.cwd!, null, item.finisherSource ?? null) : null;
       // The item's recorded budget rides along — harness dispatches must not
       // silently fall back to the runtime default (the timeout-plumbing fix).
       const runId = await backend.spawn(workerTask(item), { cwd: item.cwd!, timeoutMs: item.timeoutMs ?? undefined });
@@ -116,7 +122,9 @@ export async function autoDispatchEligible(
       // in-memory snapshot across every spawn and write it whole at the end,
       // erasing anything a tool or another lane wrote during those awaits.
       mutateStore(stateDir, (s) => {
-        if (s.items[item.key]) updateItem(s, item.key, { status: "active", runId });
+        if (s.items[item.key]) {
+          updateItem(s, item.key, { status: "active", runId, ...(baseline ? { finisherBaseline: { ...baseline, runId } } : {}) });
+        }
       });
       dispatched.push({ key: item.key, runId });
       try {
@@ -150,10 +158,15 @@ export async function autoRedispatch(
   if (!item || item.status !== "active") return false; // only the FAIL→active flip is re-dispatchable
   if (typeof item.cwd !== "string" || !item.cwd.trim()) return false; // no repo → orchestrator
   try {
+    // FINISHER-EVIDENCE (AUTOPILOT-34): same rule as every other lane — this
+    // run is judged against a baseline captured for THIS run, never against the
+    // previous run's (which would let a re-run that wrote nothing inherit the
+    // first run's landing as its own evidence).
+    const baseline = isFinisherItem(item) ? captureFinisherBaseline(item.cwd, null, item.finisherSource ?? null) : null;
     const runId = await backend.spawn(workerTask(item, findings), { cwd: item.cwd, timeoutMs: item.timeoutMs ?? undefined });
     if (!runId) return false;
     mutateStore(stateDir, (s) => {
-      if (s.items[key]) updateItem(s, key, { runId });
+      if (s.items[key]) updateItem(s, key, { runId, ...(baseline ? { finisherBaseline: { ...baseline, runId } } : {}) });
     });
     try {
       preserveRunWorktree({ stateDir, repo: item.cwd, runId, key });

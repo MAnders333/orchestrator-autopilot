@@ -123,15 +123,19 @@ skeleton. The tag is ADVISORY — it never blocks approval.
   worker stopped = failed) → `failed→done`
   ("verified-complete despite the failure record") — both transitions are
   legal, no `active→ai-review` detour needed.
-- **Dispatching a MERGE FINISHER: pass `dispatchClass: "finisher"`** (KEY:
-  AUTOPILOT-34). A finisher writes into the target repo's CHECKOUT, not its own
-  worktree, so a runtime that judges children by worktree edits reports it as
-  "no edits / planning output" even when the merge landed — and a false failure
-  is an auto-recovery re-dispatch candidate, i.e. a merge that already landed
-  can be re-run. With the class declared, the dispatch records the cwd's HEAD as
-  a baseline, a HEAD move is the success evidence (`landedEvidence`), the false
-  failure is overridden + RECORDED (`overrides[]`), and auto-recovery refuses to
-  re-dispatch landed work. Overriding a failure verdict yourself: use
+- **Dispatching a MERGE FINISHER: pass `dispatchClass: "finisher"` AND
+  `finisherSource: "<branch/sha it must land>"`** (KEY: AUTOPILOT-34). A finisher
+  writes into the target repo's CHECKOUT, not its own worktree, so a runtime that
+  judges children by worktree edits reports it as "no edits / planning output"
+  even when the merge landed — and a false failure is an auto-recovery
+  re-dispatch candidate, i.e. a merge that already landed can be re-run. With the
+  class declared, the dispatch records the cwd's HEAD *and* that source as a
+  baseline; the success evidence is THAT SOURCE entering the checkout's history
+  during the run (`landedEvidence`), the false failure is overridden + RECORDED
+  (`overrides[]`), and auto-recovery refuses to re-dispatch landed work. **Omit
+  `finisherSource` and there is no evidence path** — the run fails as before (a
+  bare HEAD move is not accepted: shipping merges and human commits move the same
+  checkout). Overriding a failure verdict yourself: use
   `queue_update(key, {overrideReason: "…"})` instead of hand-writing prose into
   notes — a pattern of overrides must stay visible.
 - On **cap** (5 FAILs): the framework marked it failed — surface the options:

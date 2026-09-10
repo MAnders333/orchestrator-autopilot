@@ -22,7 +22,7 @@ export const CONTRACTS = {
     "Dispatch a queue item: spawns the worker (same executor as the subagent tool; fresh context, worktree isolation) AND records " +
     "approved→active with the run id — atomically. Call with the key of an approved item and the scoped worker prompt. " +
     "High-risk items: still surface the final checkpoint BEFORE calling this. Returns the run id. " +
-    "MERGE FINISHERS: pass dispatchClass='finisher' when the run writes into the cwd's CHECKOUT (cherry-pick/merge into main) instead of its own worktree — the dispatch records the cwd's HEAD as a baseline and success is then judged on that HEAD moving, so a runtime 'no edits in the worktree' failure verdict is overridden (and the override recorded) instead of re-dispatching a merge that already landed.",
+    "MERGE FINISHERS: pass dispatchClass='finisher' AND finisherSource=<branch/sha it must land> when the run writes into the cwd's CHECKOUT (cherry-pick/merge into main) instead of its own worktree — the dispatch records the cwd's HEAD plus that source as a baseline, and success is then judged on the source entering the cwd's history, so a runtime 'no edits in the worktree' failure verdict is overridden (and the override recorded) instead of re-dispatching a merge that already landed. Without finisherSource there is NO evidence and the runtime verdict stands.",
   queue_review:
     "Dispatch the reviewer for an `ai-review` item: spawns the reviewer subagent (read-only, no worktree) via the same executor, records the " +
     "reviewerRunId on the item, and emits orch:reviewer-dispatched. When the reviewer completes, the verdict line ('Verdict: PASS/FAIL') " +
