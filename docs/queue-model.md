@@ -281,20 +281,40 @@ For that class the queue's own record is authoritative:
   as landed is never re-dispatched. It is recorded, surfaced ONCE
   (`[orch-tick: recover] … EVIDENCED AS LANDED`), and left for the human's
   close-out call (`failed → done`) — a re-run would duplicate the merge.
+- **… and it refuses the WHOLE finisher class, evidence or not** (AUTOPILOT-46):
+  the shapes above that produce NO evidence would otherwise fall through as
+  ordinary verdict failures and be RE-DISPATCHED after the backoff — automatic,
+  unattended, and before the operator could override. Since a finisher re-run is
+  the single action that can duplicate a landing, auto-recovery HOLDS every
+  `failed` item with `dispatchClass: "finisher"`: it stays `failed`, the hold is
+  written to its notes (`[recover-hold: finisher]`) and ticked ONCE
+  (`[orch-tick: recover] … is FINISHER-CLASS and failed …`). The cost is real
+  and deliberate: a finisher that genuinely failed gets NO automatic retry — it
+  is announced and waits for your deliberate re-dispatch. Nothing is dropped
+  silently.
 - **The real case still fails**: a finisher that did not land its declared
   source has no evidence, so its failure stands — as does one dispatched with no
   `finisherSource` at all (no source → no evidence path, by design).
 - **Every run is judged on its own**: entering `active` clears BOTH the previous
   run's `landedEvidence` and its `finisherBaseline`, on the lifecycle edge in
   `updateItem`, so every lane that re-activates an item is covered (queue
-  dispatch, harness auto-dispatch, review-FAIL re-dispatch, recovery
-  re-dispatch). Each of those lanes captures a FRESH baseline for the run it
-  spawns, and the landed check additionally refuses a baseline whose `runId` is
+  dispatch, harness auto-dispatch, review-FAIL re-dispatch — the recovery lane
+  no longer re-activates this class at all, see the hold above). Each of those
+  lanes captures a FRESH baseline for the run it spawns, and the landed check
+  additionally refuses a baseline whose `runId` is
   not the item's current run — which the item only HAS while it is active: on a
   terminal status `runId` is null, and there the baseline is that item's most
   recent dispatch BY CONSTRUCTION (entering `active` clears it, and only a
   dispatch lane writes one), so there is no foreign baseline to refuse.
   `finisherSource` is sticky (it describes the item's work, not one run) and the override LOG keeps the history.
+
+**Residual on the hold, stated plainly**: the hold covers the RECOVERY lane
+(the `failed` lane). The review-FAIL re-dispatch lane is unchanged — an
+AI-reviewer `FAIL` on a finisher still flips `ai-review → active` and re-runs
+it; that path is a judged verdict on work someone read, not an unattended
+timer, and it rebaselines the new run. `dispatchClass` is sticky, so an item
+that was once dispatched as a finisher keeps the hold until a dispatch declares
+`dispatchClass: "worker"` explicitly.
 
 **Residual, stated plainly**: the evidence proves THE DECLARED SOURCE IS IN the
 target's history, not WHO put it there. A human (or another lane) merging the
@@ -474,6 +494,13 @@ deterministically, by the item's recorded `failCause`, after a short backoff
   redoing anything; commit early on the branch; never main).
 - **`spawn` / infra** (the provider rejected the run at spawn — bare 400 /
   empty api_error) → retry up to **2×** with backoff, then ESCALATE.
+- **FINISHER-CLASS items are never re-dispatched by this lane** (AUTOPILOT-46):
+  whatever the cause, a `failed` item with `dispatchClass: "finisher"` is HELD
+  and escalated once instead — a finisher re-run is the one action that can
+  duplicate an already-landed merge, and the landing shapes that leave no
+  evidence (conflict-resolved cherry-pick, multi-commit squash) are exactly the
+  ones the evidence check cannot skip for you. Re-running one is a deliberate
+  human act (`queue_dispatch`). See the finisher-evidence section above.
 - **Bounds**: every attempt (including a spawn the provider REJECTED)
   increments the item's `recoveries`; once the per-cause cap (clamped to the
   global `MAX_RECOVERIES` = 2) is spent the item STAYS `failed` and gets a
@@ -485,7 +512,8 @@ deterministically, by the item's recorded `failCause`, after a short backoff
   cooldown the next pass PROBES once; a successful spawn resets the counter.
 - **Announcements**: each move is one line —
   `[orch-tick: recover] re-dispatched <key> (attempt N, <cause>, budget <dur>)`
-  (or `… exhausted auto-recovery (N attempts, cause) — it STAYS failed …`).
+  (or `… exhausted auto-recovery (N attempts, cause) — it STAYS failed …`, or
+  `… is FINISHER-CLASS and failed … will NOT re-dispatch it …`).
 - **Recovered items carry their branch** (AUTO-SHIP-ON-DONE): the re-dispatch
   preserves the new run's parallel-branch tip exactly like every other lane,
   and the item still flows `active → ai-review → human-review`. Recovery NEVER
