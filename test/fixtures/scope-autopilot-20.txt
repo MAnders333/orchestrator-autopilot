@@ -1,0 +1,28 @@
+PROBLEM (hit live twice tonight, on AUTOPILOT-3): after a reviewer completes and its FAIL verdict is consumed, the item keeps `reviewerRunId`. Re-review is then refused forever with "a reviewer is ALREADY running … steer it or wait", and cycling ai-review→active→ai-review does NOT clear it (runIds are only cleared on done/human-review/failed). The orchestrator must bypass queue_review and dispatch the reviewer directly — which loses verdict parsing and the auto-transition, i.e. the queue silently drifts from reality.
+
+FIX 1 — liveness instead of blind trust (src/tools/queue-ops.ts:302-303).
+Replace `if (item.reviewerRunId) return <refuse>` with a liveness check. Add a small shared helper (suggested: `reviewerRunAlive(backend, runId)` in src/framework/ or alongside the queue tools) that resolves the run via `backend.asyncDirFor(runId)` and reads `status.json`:
+  - dir missing → NOT alive (the run is gone);
+  - `state` in {queued, running} → ALIVE → keep refusing, with the existing message;
+  - any terminal state (completed/failed/etc.) → NOT alive.
+When NOT alive: clear the stale `reviewerRunId`, log/emit that it was reaped, and PROCEED with the dispatch.
+DELIBERATE FAIL-OPEN: if liveness cannot be determined (no backend, `asyncDirFor` returns null, unreadable status.json), treat it as NOT alive and allow the dispatch. Rationale — reviewers are read-only, so a duplicate reviewer costs tokens; a false block costs a manual bypass, which is exactly the failure that breaks auto-routing. Say this in a comment so it is not "fixed" later by someone assuming fail-closed is safer.
+
+FIX 2 — clear on re-entry (src/queue-store.ts, the same `clean.*` stamping block that currently clears run refs for done/human-review/failed, ~:466-469).
+Entering `ai-review` from a different status starts a NEW review cycle, which by definition supersedes any prior reviewer: set `clean.reviewerRunId = null` when `to === "ai-review" && from !== "ai-review"`. Do NOT clear on an ai-review→ai-review no-op re-statement (that would drop a genuinely in-flight reviewer's id).
+
+FIX 3 — same stale guard on the automatic path (src/framework/auto-dispatch.ts:196).
+`if (!item || item.status !== "ai-review" || item.reviewerRunId) return null` has the identical defect: a stale id makes the harness silently skip auto-review forever, which is worse than the tool error because it is invisible. Route it through the same liveness helper.
+
+FIX 4 — make bypass dispatches attributable (docs, no code if `reviewerRunId` in UpdatePatch already suffices — it does, src/queue-store.ts:421).
+Document in docs/queue-model.md + skills/orchestrator-operations/SKILL.md that when a reviewer is dispatched outside queue_review, the orchestrator should record the run id via queue_update so core.ts's reviewer attribution (src/core.ts:224-230, matching on reviewerRunId) can still parse the verdict and auto-transition.
+
+TESTS (hermetic, no real runs — fake the backend/asyncDirFor + status.json like the existing backend tests):
+  1. stale reviewerRunId whose run dir is GONE → queue_review proceeds and the id is replaced with the new run;
+  2. stale reviewerRunId whose status.json says completed → proceeds;
+  3. genuinely running reviewer (state: running) → still REFUSED with the existing message;
+  4. liveness undeterminable (asyncDirFor → null) → proceeds (fail-open), with the reasoning asserted;
+  5. active→ai-review clears reviewerRunId; ai-review→ai-review does NOT;
+  6. the auto-dispatch review path skips a live reviewer but re-dispatches past a dead one.
+
+CONSTRAINTS: main-immutability — commit on your branch only. Full `bun test` green. No behavior change to the verdict→transition machinery itself.

@@ -267,6 +267,31 @@ requires the missing `cwd`, and the key then renames into the repo's real
 series (registry → history → slug) — recorded in the item's notes and echoed
 by the tool result.
 
+### The scope template — what "fully specified" means
+
+A scope IS the worker prompt. Write it against this shape (harvested from the
+scopes that dispatched cleanly — problem, then evidence, then the change):
+
+```
+PROBLEM: what is broken or missing, and where it was observed
+EVIDENCE: the file:line references that prove the problem is real
+THE CHANGE: what a worker actually does, per file
+JUDGMENT CALLS: decisions that must not be silently inverted, and why
+TESTS / ACCEPTANCE: how we know it worked (hermetic where possible)
+CONSTRAINTS: branch-only, gates that must stay green, what must not change
+```
+
+**Required at APPROVAL, optional at PROPOSAL — deliberately.** Writing
+`scope` + `cwd` is the moment "fully specified" is claimed, so that is where
+the template applies. Capture-first proposals stay cheap: a one-line "note it
+before I lose it" candidate is worth more than the proposal that never got
+written because it demanded a skeleton first. The gap is made VISIBLE instead
+of forbidden — an under-specified proposal is tagged in the proposals panel
+(`NEEDS SPEC: no scope` / `thin spec: no acceptance criteria`) and counted in
+`/autopilot status`, and refining a scope-less proposal opens the editor
+prefilled with this skeleton. The tag NEVER blocks: approving a thin scope is
+your call, not the framework's.
+
 The orchestrator keeps the buffer full: when Approved drops below ~2 ready items AND
 Backlog has candidates, propose the next batch (P4 auto-refill).
 

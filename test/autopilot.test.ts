@@ -24,8 +24,10 @@ import {
   probeStateDir,
   logStateDirProbe,
   staleProvisionalProposals,
+  underSpecifiedProposals,
   workspaceFactsPromised,
 } from "../src/config.ts";
+import { buildPanelDoc } from "../src/framework/panels.ts";
 import { isUnisolatedWorkerSpawn } from "../src/framework/auto-dispatch.ts";
 import {
   newStore,
@@ -905,5 +907,61 @@ describe("AUTOPILOT-3 provisional-linger (staleProvisionalProposals + status sur
     expect(r.message).toContain("Q-9 (8d)");
     expect(r.message).toContain("NOT a real key");
     expect(r.message).not.toContain("B-4"); // a real series key is never named
+  });
+});
+
+describe("AUTOPILOT-26 spec-completeness (underSpecifiedProposals + status surface)", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "autopilot-spec-"));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const specified = readFileSync(join(import.meta.dir, "fixtures", "scope-autopilot-20.txt"), "utf8");
+
+  test("flags ONLY proposals, and only the under-specified ones (no-scope first)", () => {
+    writeStore(dir, [
+      item({ key: "P1", status: "proposal", title: "thin", scope: "Fix the parser", cwd: "/tmp/repo" }),
+      item({ key: "P2", status: "proposal", title: "capture note", scope: "", cwd: null }),
+      item({ key: "P3", status: "proposal", title: "specified", scope: specified, cwd: "/tmp/repo" }),
+      item({ key: "A1", status: "approved", title: "approved thin", scope: "go", cwd: "/tmp/repo" }), // not a proposal
+    ]);
+    const thin = underSpecifiedProposals(dir);
+    expect(thin.map((t) => t.key)).toEqual(["P2", "P1"]); // no-scope outranks thin-scope
+    expect(thin[0].gaps).toEqual(["no-scope", "no-cwd"]);
+  });
+
+  test("never throws on a missing/corrupt store", () => {
+    expect(underSpecifiedProposals(join(dir, "missing"))).toEqual([]);
+    expect(() => underSpecifiedProposals(dir)).not.toThrow();
+  });
+
+  test("/autopilot status count MATCHES the panel count, and says nothing when every proposal is specified", () => {
+    writeStore(dir, [
+      item({ key: "P1", status: "proposal", title: "thin", scope: "Fix the parser", cwd: "/tmp/repo" }),
+      item({ key: "P2", status: "proposal", title: "capture note", scope: "", cwd: null }),
+      item({ key: "P3", status: "proposal", title: "specified", scope: specified, cwd: "/tmp/repo" }),
+    ]);
+    const r = autopilotCommand("status", undefined, { stateDir: dir, sessionId: "s1" });
+    expect(r.message).toContain("2 proposals under-specified");
+    expect(r.message).toContain("P2 (NEEDS SPEC: no scope, no repo (cwd))");
+    expect(r.message).toContain("P1 (thin spec:");
+    expect(r.message).not.toContain("P3 ("); // a specified proposal is never named
+    // the panel section title reports the SAME count (one helper, two surfaces)
+    const tagged = buildPanelDoc(dir, "proposals").sections[0].items.filter((i) => i.specGaps?.length).length;
+    expect(tagged).toBe(2);
+    expect(buildPanelDoc(dir, "proposals").sections[0].title).toContain(`${tagged} need spec`);
+
+    writeStore(dir, [item({ key: "P3", status: "proposal", title: "specified", scope: specified, cwd: "/tmp/repo" })]);
+    const clean = autopilotCommand("status", undefined, { stateDir: dir, sessionId: "s1" });
+    expect(clean.message).not.toContain("under-specified");
+  });
+
+  test("the status tag is ADVISORY — it never says blocked/refused (approval stays a human call)", () => {
+    writeStore(dir, [item({ key: "P1", status: "proposal", title: "thin", scope: "Fix the parser", cwd: "/tmp/repo" })]);
+    const r = autopilotCommand("status", undefined, { stateDir: dir, sessionId: "s1" });
+    expect(r.ok).toBe(true);
+    expect(r.message).toContain("advisory");
+    expect(r.message.toLowerCase()).not.toContain("blocked");
   });
 });

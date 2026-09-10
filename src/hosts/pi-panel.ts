@@ -41,6 +41,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { applyPanelDecision, buildPanelDoc, type PanelActionId, type PanelItem, type PanelKind } from "../framework/panels.ts";
+import { SCOPE_SKELETON, specGapTag } from "../framework/spec-completeness.ts";
 import { loadStoreOrNew, queueLengths, resolveSeries } from "../queue-store.ts";
 import { formatDurationMs } from "../duration.ts";
 
@@ -441,8 +442,12 @@ export class DecisionPanel implements Component, Focusable {
       if (item && item.actions.includes("refine")) {
         this.pendingScope = null;
         // prefill the FULL scope (the worker prompt), not the truncated summary;
-        // armed so the first keystroke REPLACES it (refine = replace, not append)
-        this.openInput("refine", item.fullScope, true);
+        // armed so the first keystroke REPLACES it (refine = replace, not append).
+        // An EMPTY scope prefills the TEMPLATE SKELETON instead of a blank
+        // buffer (AUTOPILOT-26): filling a spec is then one keystroke away from
+        // the tag that reported it missing. The arming is unchanged, so typing
+        // still replaces the skeleton wholesale rather than appending to it.
+        this.openInput("refine", item.fullScope || SCOPE_SKELETON, true);
       }
       return;
     }
@@ -573,7 +578,11 @@ export class DecisionPanel implements Component, Focusable {
         // Provisional-linger surface (AUTOPILOT-3): an old Q-<n> provisional
         // handle looks like a real key — tag it so it is never mistaken for one.
         const stale = it.staleProvisionalDays ? th.fg("warning", ` ⚠ provisional ${it.staleProvisionalDays}d`) : "";
-        lines.push(t((selected ? th.fg("accent", th.bold(head)) : th.fg("text", head)) + risk + stale));
+        // Spec-completeness tag (AUTOPILOT-26): what the scope is missing, at
+        // triage time. Advisory only — [a] approve still works on a tagged item.
+        const specTag = specGapTag(it.specGaps ?? []);
+        const spec = specTag ? th.fg("warning", ` ⚠ ${specTag}`) : "";
+        lines.push(t((selected ? th.fg("accent", th.bold(head)) : th.fg("text", head)) + risk + stale + spec));
         lines.push(...wrap(t(it.summary), 4));
         for (const target of it.targets.slice(0, 2)) {
           lines.push(...wrap(th.fg("dim", `   ↳ ${target.label}`), 4));
@@ -610,7 +619,7 @@ export class DecisionPanel implements Component, Focusable {
             : ` Re-dispatch findings — ${currentKey}:`;
       lines.push(t(th.fg("accent", th.bold(label))));
       if (this.inputFor === "refine") {
-        lines.push(...wrap(th.fg("dim", "prefilled with the current scope — typing replaces it; ctrl+s submits"), 2));
+        lines.push(...wrap(th.fg("dim", "prefilled with the current scope (or the template skeleton when empty) — typing replaces it; ctrl+s submits"), 2));
       }
       this.editor.focused = this.focused;
       const inputLines = this.editor.render(inner - 2);

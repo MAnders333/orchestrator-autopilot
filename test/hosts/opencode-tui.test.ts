@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { newStore, saveStore, type QueueItem } from "../../src/queue-store.ts";
 import { createPanelController, tui, tuiStateDir } from "../../src/hosts/opencode-tui.ts";
+import { SCOPE_SKELETON } from "../../src/framework/spec-completeness.ts";
 
 function item(p: Partial<QueueItem> & { key: string; status: QueueItem["status"] }): QueueItem {
   return {
@@ -149,7 +150,41 @@ describe("opencode TUI plugin registration + state-dir resolution", () => {
     const text = [setup.externalOutput.takeText(), setup.captureCharFrame()].join("\n");
     expect(text).toContain("Q-3");
     expect(text).toContain("⚠ provisional");
-    expect(text).not.toContain("P1 ⚠"); // the non-provisional item is never tagged
+    expect(text).not.toContain("P1 ⚠ provisional"); // the non-provisional item never gets THIS tag
+    expect(text.match(/⚠ provisional/g)).toHaveLength(1);
+  });
+
+  test("route render tags under-specified proposals (spec-completeness, AUTOPILOT-26)", async () => {
+    const { testRender } = await import("@opentui/solid");
+    seedState(stateDir, [
+      item({ key: "P1", status: "proposal", scope: "", cwd: null }),
+      item({ key: "P9", status: "proposal", scope: readFileSync(join(import.meta.dir, "..", "fixtures", "scope-autopilot-24.txt"), "utf8"), cwd: "/tmp/repo" }),
+    ]);
+    const f = makeFake(configDir);
+    await tui(f.api, {}, {});
+    const route = f.routes.find((r) => r.name === "orchestrator-panel");
+    const setup = await testRender(() => route.render({ params: {} }), { width: 100, height: 24 });
+    await setup.renderOnce();
+    await setup.flush();
+    const text = [setup.externalOutput.takeText(), setup.captureCharFrame()].join("\n");
+    expect(text).toContain("NEEDS SPEC");
+    expect(text).not.toContain("P9 ⚠"); // a fully specified proposal is never tagged
+  });
+
+  test("refine on an EMPTY scope prefills the template skeleton; a real scope still prefills itself (AUTOPILOT-26)", async () => {
+    seedState(stateDir, [item({ key: "P1", status: "proposal", scope: "", cwd: "/tmp" })]);
+    const f = makeFake(configDir);
+    await tui(f.api, {}, {});
+    const layer = f.layers.find((l: any) => l.mode === "orch-panel");
+    layer.commands.find((c: any) => c.name === "orch.refine").run();
+    const el = f.dialogs[0].render();
+    expect(el.props.value).toBe(SCOPE_SKELETON); // skeleton, not an empty buffer
+    // the confirmed value REPLACES it — the skeleton is never appended to
+    el.props.onConfirm("PROBLEM: real spec\nEVIDENCE: src/core.ts:12");
+    expect(readState(stateDir)["P1"].scope).toBe("PROBLEM: real spec\nEVIDENCE: src/core.ts:12");
+    // a non-empty scope keeps prefilling itself
+    layer.commands.find((c: any) => c.name === "orch.refine").run();
+    expect(f.dialogs[1].render().props.value).toBe("PROBLEM: real spec\nEVIDENCE: src/core.ts:12");
   });
 
   test("resolves the state dir from the opencode config's orchestrate command (config-carried)", () => {

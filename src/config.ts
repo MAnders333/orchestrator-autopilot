@@ -21,6 +21,7 @@ import {
   scheduleScheduledOff,
 } from "./session-store.ts";
 import { parseDurationMs } from "./framework/scheduled-off.ts";
+import { specCompleteness, specGapTag, type SpecGapId } from "./framework/spec-completeness.ts";
 import { loadStore } from "./queue-store.ts";
 
 // Re-exports: the state helpers' public home stays config.ts for callers
@@ -199,6 +200,29 @@ export function staleProvisionalProposals(
     // best-effort read — never throws
   }
   out.sort((a, b) => b.days - a.days);
+  return out;
+}
+
+/** SPEC-COMPLETENESS surface (AUTOPILOT-26): the proposals whose scope is
+ *  missing at least one element, each with its gap list (worst first — no
+ *  scope at all outranks a thin one). ADVISORY ONLY: this feeds the panel tag
+ *  and the /autopilot status count; it is never consulted by the approval
+ *  gate. Reading the store here (rather than in the panel) is what keeps the
+ *  panel count and the status count identical by construction. NEVER throws. */
+export function underSpecifiedProposals(stateDir: string): Array<{ key: string; gaps: SpecGapId[] }> {
+  const out: Array<{ key: string; gaps: SpecGapId[] }> = [];
+  try {
+    const store = loadStore(stateDir);
+    if (!store) return out;
+    for (const it of Object.values(store.items)) {
+      if (it.status !== "proposal") continue;
+      const gaps = specCompleteness(it);
+      if (gaps.length) out.push({ key: it.key, gaps });
+    }
+  } catch {
+    // best-effort read — never throws
+  }
+  out.sort((a, b) => Number(b.gaps.includes("no-scope")) - Number(a.gaps.includes("no-scope")) || a.key.localeCompare(b.key));
   return out;
 }
 
@@ -414,9 +438,16 @@ export function autopilotCommand(
       const linger = stale.length
         ? ` NOTE: provisional ${stale.map((s) => `${s.key} (${s.days}d)`).join(", ")} pending — resolve or reject it in the panel; a provisional Q-<n> is NOT a real key.`
         : "";
+      // Spec-completeness surface (AUTOPILOT-26): the SAME count the proposals
+      // panel tags, named here so under-specification is visible before the
+      // approval gate. Advisory — these items still approve normally.
+      const thin = underSpecifiedProposals(stateDir);
+      const spec = thin.length
+        ? ` NOTE: ${thin.length} proposal${thin.length === 1 ? "" : "s"} under-specified — ${thin.map((t) => `${t.key} (${specGapTag(t.gaps)})`).join(", ")}; refine in the panel (advisory, approval is still yours).`
+        : "";
       return {
         ok: true,
-        message: `Autopilot ${on ? "ON" : "OFF"} (this session${sessionId ? ` ${sessionId.slice(0, 8)}` : ""}) — capacity ${cfg.maxSlots} workers, queue-low < ${cfg.queueLowThreshold} ready.${suffix}${linger}`,
+        message: `Autopilot ${on ? "ON" : "OFF"} (this session${sessionId ? ` ${sessionId.slice(0, 8)}` : ""}) — capacity ${cfg.maxSlots} workers, queue-low < ${cfg.queueLowThreshold} ready.${suffix}${linger}${spec}`,
       };
     }
     case "capacity": {

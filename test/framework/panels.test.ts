@@ -4,6 +4,7 @@
 
 import { describe, test, expect } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { specCompleteness } from "../../src/framework/spec-completeness.ts";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { newStore, saveStore, type QueueItem } from "../../src/queue-store.ts";
@@ -116,6 +117,33 @@ describe("buildPanelDoc — the feed from queue state", () => {
     expect(buildPanelDoc(dir, "human-review").sections[0].title).not.toContain("stale provisional");
   });
 
+  test("proposals view TAGS under-specified scopes and counts them in the section title (AUTOPILOT-26)", () => {
+    const good = readFileSync(join(import.meta.dir, "..", "fixtures", "scope-autopilot-20.txt"), "utf8");
+    const { dir } = dirWith([
+      item({ key: "P1", status: "proposal", title: "capture note", scope: "", cwd: null }),
+      item({ key: "P2", status: "proposal", title: "thin", scope: "Fix the parser", cwd: "/tmp/repo" }),
+      item({ key: "P3", status: "proposal", title: "specified", scope: good, cwd: "/tmp/repo" }),
+      item({ key: "H1", status: "human-review", title: "reviewed", scope: "", cwd: null }),
+    ]);
+    const doc = buildPanelDoc(dir, "proposals");
+    const byKey = Object.fromEntries(doc.sections[0].items.map((i) => [i.key, i]));
+    expect(byKey["P1"].specGaps).toEqual(["no-scope", "no-cwd"]);
+    expect(byKey["P2"].specGaps).toEqual(["no-artifact", "no-acceptance", "thin-scope"]);
+    expect(byKey["P3"].specGaps).toBeUndefined(); // a fully specified scope is never tagged
+    expect(doc.sections[0].title).toContain("2 need spec");
+    // human-review is not a spec-triage surface
+    expect(buildPanelDoc(dir, "human-review").sections[0].items[0].specGaps).toBeUndefined();
+    expect(buildPanelDoc(dir, "human-review").sections[0].title).not.toContain("need spec");
+  });
+
+  test("a fully specified feed carries NO spec count in the title", () => {
+    const good = readFileSync(join(import.meta.dir, "..", "fixtures", "scope-autopilot-24.txt"), "utf8");
+    const { dir } = dirWith([item({ key: "P1", status: "proposal", scope: good, cwd: "/tmp/repo" })]);
+    const doc = buildPanelDoc(dir, "proposals");
+    expect(doc.sections[0].title).not.toContain("need spec");
+    expect(doc.sections[0].items[0].specGaps).toBeUndefined();
+  });
+
   test("human-review view shows ONLY human-review items with navigation targets", () => {
     const { dir } = dirWith([
       item({ key: "H1", status: "human-review", title: "findings doc", scope: "Produce the findings report", cwd: "/tmp/repo", notes: "wrote docs/findings.md" }),
@@ -201,6 +229,19 @@ describe("applyPanelDecision — validated store mutations", () => {
     expect(r.ok).toBe(false);
     expect(r.text).toContain("refine");
     expect(read().items["P1"].status).toBe("proposal"); // untouched
+  });
+
+  test("a TAGGED (under-specified) proposal still approves normally — the spec tag is advisory, never a second gate (AUTOPILOT-26)", () => {
+    const thin = { key: "P1", status: "proposal" as const, scope: "Fix the parser", cwd: "/tmp/repo" };
+    const { dir, read } = dirWith([item(thin)]);
+    // the item IS flagged on the feed …
+    expect(specCompleteness(thin).length).toBeGreaterThan(0);
+    expect(buildPanelDoc(dir, "proposals").sections[0].items[0].specGaps?.length).toBeGreaterThan(0);
+    // … and approving it is still a plain success: the gate stayed binary
+    const r = applyPanelDecision(dir, "P1", "approve");
+    expect(r.ok).toBe(true);
+    expect(r.text).not.toContain("spec");
+    expect(read().items["P1"].status).toBe("approved");
   });
 
   test("approve a human-review item → done (the human approval gate)", () => {

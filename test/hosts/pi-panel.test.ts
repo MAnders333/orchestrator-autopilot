@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { visibleWidth, matchesKey, Key } from "@earendil-works/pi-tui";
 import { newStore, saveStore, type QueueItem } from "../../src/queue-store.ts";
 import { DecisionPanel, refreshPanelBadge } from "../../src/hosts/pi-panel.ts";
+import { SCOPE_SKELETON } from "../../src/framework/spec-completeness.ts";
 
 const theme: Record<string, any> = {
   fg: (c: string, s: string) => (typeof s === "string" ? s : String(s)),
@@ -94,7 +95,21 @@ describe("DecisionPanel renders width-safely from queue state", () => {
     const shown = panel.render(80).join("\n");
     expect(shown).toContain("Q-3");
     expect(shown).toContain("⚠ provisional");
-    expect(shown).not.toContain("P1 ⚠"); // the non-provisional item is never tagged
+    expect(shown).not.toContain("P1 ⚠ provisional"); // the non-provisional item never gets THIS tag
+    expect(shown.match(/⚠ provisional/g)).toHaveLength(1);
+  });
+
+  test("under-specified proposals get the ⚠ spec tag in the item row (spec-completeness, AUTOPILOT-26)", () => {
+    const good = readFileSync(join(import.meta.dir, "..", "fixtures", "scope-autopilot-20.txt"), "utf8");
+    const { panel } = setup([
+      item({ key: "P1", status: "proposal", title: "capture note", scope: "", cwd: null }),
+      item({ key: "P9", status: "proposal", title: "specified", scope: good, cwd: "/tmp/repo" }),
+    ]);
+    const lines = panel.render(100);
+    const shown = lines.join("\n");
+    expect(shown).toContain("NEEDS SPEC");
+    expect(shown).not.toContain("P9 ⚠"); // a fully specified proposal is never tagged
+    expect(Math.max(...lineWidths(lines))).toBeLessThanOrEqual(100); // the tag never overflows the row
   });
 
   test("empty view says all clear; no crash at render", () => {
@@ -546,6 +561,32 @@ describe("DecisionPanel refine UX fixes — detail actions, newline safety, repl
     expect(matchesKey("\r", Key.ctrl("s"))).toBe(false); // enter never matches submit
     expect(matchesKey("\n", Key.ctrl("s"))).toBe(false);
     expect(matchesKey("\x13", Key.enter)).toBe(false);
+  });
+
+  test("refine on an EMPTY scope prefills the TEMPLATE SKELETON; typing still REPLACES it (AUTOPILOT-26)", () => {
+    const { panel, read } = setup([item({ key: "P1", status: "proposal", scope: "", cwd: "/tmp" })]);
+    panel.handleInput("e");
+    const field = panel.render(100).join("\n");
+    expect(field).toContain("PROBLEM"); // the skeleton is IN the editor, not an empty buffer
+    expect(field).toContain("TESTS / ACCEPTANCE");
+    // select-all semantics survive the new prefill source: the first keystroke
+    // wipes the skeleton instead of appending to it
+    for (const ch of "PROBLEM: mine") panel.handleInput(ch);
+    panel.handleInput("\x13"); // ctrl+s
+    expect(read()["P1"].scope).toBe("PROBLEM: mine");
+    expect(read()["P1"].scope).not.toContain("EVIDENCE"); // no skeleton residue
+  });
+
+  test("refine on a NON-empty scope still prefills the existing scope (the skeleton never overwrites real work)", () => {
+    const { panel, read } = setup([item({ key: "P1", status: "proposal", scope: "old scope", cwd: "/tmp" })]);
+    panel.handleInput("e");
+    const field = panel.render(100).join("\n");
+    expect(field).toContain("old scope");
+    expect(field).not.toContain("JUDGMENT CALLS");
+    panel.handleInput("\x7f"); // backspace keeps the prefill editable
+    panel.handleInput("\x13");
+    expect(read()["P1"].scope).toBe("old scop");
+    expect(SCOPE_SKELETON).toContain("PROBLEM"); // the skeleton is the OTHER branch's source
   });
 
   test("a navigation/deletion key collapses the select-all — the prefill stays editable", () => {

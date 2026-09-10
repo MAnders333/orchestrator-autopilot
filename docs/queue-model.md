@@ -383,3 +383,29 @@ stuck in `proposal` past `provisionalLingerDays` (default **3**, set in
 one. The decision panel tags such items (`⚠ provisional Nd`) and raises the
 count in the section header, and `/autopilot status` names them — resolve or
 reject them so no one mistakes a provisional handle for dispatched work.
+
+## Spec-completeness surface (advisory — it never blocks)
+
+`approvalReady(scope, cwd)` is a PRESENCE check by design: non-empty scope +
+cwd. `specCompleteness(item)` (`src/framework/spec-completeness.ts`) answers
+the different question — *what is missing from this scope?* — with a bounded
+list of missing elements: `no-scope`, `no-cwd`, `no-artifact` (no path,
+`file:line` or symbol named), `no-acceptance` (no test/verify/assert-style
+statement of how we know it worked), `thin-scope` (under 120 characters). No
+score, no percentage, no model call: every check is a regex or a length
+compare, so the output is predictable by reading the function.
+
+The result is surfaced exactly like the provisional-linger tag — per item in
+both panel renderers (`⚠ NEEDS SPEC: no scope` / `⚠ thin spec: …`), as a count
+in the proposals section header, and named in `/autopilot status` (one helper,
+`underSpecifiedProposals`, feeds both, so the counts cannot drift).
+
+**It is ADVISORY and stays advisory.** Nothing here is wired into the approval
+gate: a tagged proposal approves exactly like an untagged one, because a queue
+whose approvals are expensive stops being used. The one-keystroke fix is the
+other half: refining a proposal whose scope is EMPTY opens the editor prefilled
+with the scope template skeleton (`SCOPE_SKELETON`) instead of a blank buffer;
+the field keeps its select-all semantics, so typing replaces the skeleton. The
+template PROCEDURE (what belongs under each heading, and that it is required at
+approval but optional at capture time) lives in `prompts/orchestrate.md` and
+`skills/orchestrator-operations/SKILL.md`.

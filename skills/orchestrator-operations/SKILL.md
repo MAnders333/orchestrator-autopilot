@@ -45,6 +45,28 @@ only your own backend's notes.
 - **The approval gate makes this possible**: reaching `approved` REQUIRES a
   non-empty `scope` + `cwd` (enforced by `queue_add`/`queue_update` — not skill
   guidance). Approved = fully specified = the harness can act without you.`
+
+### The scope template — what "fully specified" means
+
+A scope IS the worker prompt. Write it against this shape (harvested from the
+scopes that dispatched cleanly — problem, then evidence, then the change):
+
+```
+PROBLEM: what is broken or missing, and where it was observed
+EVIDENCE: the file:line references that prove the problem is real
+THE CHANGE: what a worker actually does, per file
+JUDGMENT CALLS: decisions that must not be silently inverted, and why
+TESTS / ACCEPTANCE: how we know it worked (hermetic where possible)
+CONSTRAINTS: branch-only, gates that must stay green, what must not change
+```
+
+Required at APPROVAL (that is where "fully specified" is claimed), OPTIONAL at
+proposal time — capture-first must stay cheap, so a one-line candidate is
+still worth adding. The framework surfaces the gap instead of forbidding it:
+the proposals panel tags an under-specified proposal (`NEEDS SPEC: no scope` /
+`thin spec: no acceptance criteria`), `/autopilot status` counts them, and
+refine (`e`) on a scope-less proposal opens the editor prefilled with this
+skeleton. The tag is ADVISORY — it never blocks approval.
 - `queue_dispatch(key, task, { cwd?, timeoutMs? })` stays the MANUAL tool for
   everything auto-dispatch does NOT take: high-risk items, incomplete scope or
   missing `cwd` (blocked items are never dispatchable — unblock first).

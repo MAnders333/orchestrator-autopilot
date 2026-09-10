@@ -1,0 +1,17 @@
+FIX 1 — guard the RPC (src/framework/runner.ts:374). Wrap it so a throw degrades to `null` instead of aborting the sweep: `let fleet: {...} | null = null; try { fleet = await opts.backend.fleetStatus(); } catch { fleet = null; <visibility, see FIX 3> }`. Downstream ALREADY handles null everywhere (`fleet?.totalActive ?? 0` at :389, `zombieReconcile(fleet?.totalActive)` at :406, ticks at :408/:441, `fleet ? {...} : undefined` at :451), so this is a containment change, not a semantics change.
+
+FIX 2 — VERIFY THE ZOMBIE-NET SAFETY PROPERTY, do not assume it. The comment at :381-386 claims "the undefined guard still covers an RPC failure — never a fake 0". Confirm empirically that `autopilot.zombieReconcile(undefined)` treats unknown as UNKNOWN and refuses to flip, rather than coercing to 0 and flipping live items to `failed`. A throwing RPC must never cause a false zombie flip — that would turn a transient backend blip into destroyed work attribution. If the property does not hold, fixing it is IN SCOPE and is the most important part of this item.
+
+FIX 3 — make the degradation VISIBLE but not spammy. Emit one harness tick (`[orch-tick: harness]`) naming the RPC failure when a degraded episode STARTS, and one when it recovers — not once per sweep. Mirror the one-shot pattern already used for the provider degraded window (`heldNotified` in src/framework/recovery-state.ts). Silent degradation is the exact failure class this framework keeps getting bitten by; the point of this item is that "the orchestrator just stopped doing anything" must never again be the only symptom.
+
+FIX 4 — no unhandled rejections from sweep. Give every `void sweep(...)` call site (:567, :579, :585, :591) a `.catch(...)` that records the failure (telemetry line + one harness tick), matching the existing `.catch` at :522. Defense in depth: FIX 1 removes today's known thrower, FIX 4 ensures tomorrow's unknown one cannot kill the host.
+
+While in there: scan sweep() and its helpers for any other bare await (`await runRecoveryPass(effectiveTotalActive)` at :450 is unwrapped at the call site — check whether its internal try/catch at :258-267 actually covers the whole body, and wrap the call site if not).
+
+TESTS (hermetic, fake backend):
+  1. fleetStatus() throws → auto-dispatch AND runRecoveryPass still execute in that SAME sweep, and autopilot.sweep() still runs (assert via the eligible item reaching `active`);
+  2. fleetStatus() throws → NO zombie flips occur (seed an active item that would be flipped if unknown were read as 0) — this is the safety test;
+  3. the degraded tick fires ONCE at episode start, not on every subsequent failing sweep, and a recovery tick fires when the RPC succeeds again;
+  4. a sweep that throws internally does not produce an unhandled rejection at the call site (assert the .catch path records it).
+
+CONSTRAINTS: main-immutability — commit on your branch only, never push, do not bump the version (0.5.1). Full `bun test` green (baseline on main is 339 pass / 8 skip / 0 fail, possibly +1 once AUTOPILOT-3's finisher lands). If reality contradicts anything above (the scope was written from a static read), report it instead of forcing the design.

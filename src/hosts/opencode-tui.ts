@@ -26,6 +26,7 @@ import { onCleanup, createSignal } from "solid-js";
 import { join } from "node:path";
 import { resolveStateDir } from "../config.ts";
 import { applyPanelDecision, buildPanelDoc, type PanelActionId, type PanelItem, type PanelKind } from "../framework/panels.ts";
+import { SCOPE_SKELETON, specGapTag } from "../framework/spec-completeness.ts";
 import { loadStoreOrNew, queueLengths } from "../queue-store.ts";
 import { formatDurationMs } from "../duration.ts";
 import type { TuiPlugin } from "@opencode-ai/plugin/tui";
@@ -172,7 +173,10 @@ function renderPanelContent(api: TuiApi, ctl: PanelController): JSX.Element {
     for (const [i, it] of visible.entries()) {
       const selected = start + i === ctl.sel;
       const risk = it.risk === "high" ? " [high]" : it.risk === "medium" ? " [medium]" : "";
-      lines.push(`${selected ? "▸" : " "} ${it.key}${risk}${it.staleProvisionalDays ? ` ⚠ provisional ${it.staleProvisionalDays}d` : ""}`);
+      // Spec-completeness tag (AUTOPILOT-26): what the scope is missing, shown
+      // at triage. Advisory only — a tagged proposal still approves with [a].
+      const specTag = specGapTag(it.specGaps ?? []);
+      lines.push(`${selected ? "▸" : " "} ${it.key}${risk}${it.staleProvisionalDays ? ` ⚠ provisional ${it.staleProvisionalDays}d` : ""}${specTag ? ` ⚠ ${specTag}` : ""}`);
       lines.push(`    ${it.summary}`);
       if (it.targets[0]) lines.push(`    ↳ ${it.targets[0].label}`);
       // Destined-series hint (proposals view): provisional Q-<n> handles are
@@ -250,7 +254,10 @@ function promptFor(api: TuiApi, ctl: PanelController, which: "refine" | "redispa
   // IS the new scope, and a modal submit is explicit by nature (no
   // shift+enter-as-\r ambiguity). If a future DialogPrompt appends to `value`
   // on typing, it must adopt the same replace-on-first-edit behavior.
-  const fullScope = refine ? (loadStoreOrNew(ctl.stateDir).items[key]?.scope ?? "") : "";
+  // EMPTY scope → the template skeleton is the prefill (AUTOPILOT-26): the
+  // dialog's confirmed value REPLACES the scope either way, so the skeleton is
+  // a starting point the human edits, never text appended to a real scope.
+  const fullScope = refine ? (loadStoreOrNew(ctl.stateDir).items[key]?.scope || SCOPE_SKELETON) : "";
   api.ui.dialog.replace(
     () =>
       jsx(api.ui.DialogPrompt!, {

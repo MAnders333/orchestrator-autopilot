@@ -22,7 +22,8 @@
 import { loadStoreOrNew, saveStore, updateItem, resolveSeries, type QueueItem } from "../queue-store.ts";
 import { approvalReady, renameProvisionalKey } from "../tools/queue-ops.ts";
 import { humanReviewTargetsFor } from "./worktree-preservation.ts";
-import { loadAutopilotConfig, staleProvisionalProposals } from "../config.ts";
+import { loadAutopilotConfig, staleProvisionalProposals, underSpecifiedProposals } from "../config.ts";
+import type { SpecGapId } from "./spec-completeness.ts";
 
 export type PanelKind = "proposals" | "human-review";
 
@@ -79,6 +80,12 @@ export interface PanelItem {
    *  Q-<n> PROVISIONAL proposal past the linger threshold — a provisional
    *  handle must not be mistaken for a real key. Absent otherwise. */
   staleProvisionalDays?: number;
+  /** SPEC-COMPLETENESS (AUTOPILOT-26): the elements missing from this
+   *  proposal's scope, in report order (see specCompleteness). ADVISORY: the
+   *  approval gate does not read it — a tagged proposal approves exactly like
+   *  an untagged one. Absent when nothing is missing, and on the human-review
+   *  view (spec quality is a TRIAGE-time question). */
+  specGaps?: SpecGapId[];
   /** The FULL untruncated scope (the worker prompt). Truncation is a RENDER
    *  choice — hosts show this verbatim in detail/expand views. */
   fullScope: string;
@@ -184,10 +191,16 @@ export function buildPanelDoc(stateDir: string, kind: PanelKind): PanelDocument 
     const stale = new Map(
       staleProvisionalProposals(stateDir, { thresholdDays: loadAutopilotConfig(stateDir).provisionalLingerDays }).map((s) => [s.key, s.days]),
     );
+    // Spec-completeness surface (AUTOPILOT-26): under-specified proposals are
+    // tagged HERE, at triage, instead of surfacing as an approval refusal.
+    // Read through the same config helper /autopilot status uses, so the two
+    // counts cannot drift. The tag never changes what approve does.
+    const thin = new Map(underSpecifiedProposals(stateDir).map((t) => [t.key, t.gaps]));
     document.sections.push({
       title:
         `Proposals — awaiting your call (approve / reject / defer / refine)` +
-        (stale.size ? ` · ⚠ ${stale.size} stale provisional (Q-<n>) — resolve/reject, NOT real keys` : ""),
+        (stale.size ? ` · ⚠ ${stale.size} stale provisional (Q-<n>) — resolve/reject, NOT real keys` : "") +
+        (thin.size ? ` · ⚠ ${thin.size} need spec — refine (e) to fill the template; advisory, you can still approve` : ""),
       items: items.map((i) => ({
         key: i.key,
         title: i.title,
@@ -202,6 +215,7 @@ export function buildPanelDoc(stateDir: string, kind: PanelKind): PanelDocument 
         seriesHint: seriesHintFor(stateDir, i),
         actions: actionsForStatus(i.status),
         staleProvisionalDays: stale.get(i.key),
+        specGaps: thin.get(i.key),
         fullScope: i.scope ?? "",
         fullNotes: i.notes ?? "",
         fullTargets: [{ label: i.cwd ?? "no repo yet — refine to set cwd" }],
@@ -307,6 +321,11 @@ export function applyPanelDecision(stateDir: string, key: string, action: PanelA
   switch (action) {
     case "approve": {
       if (item.status === "proposal") {
+        // The approval gate is the SAME binary presence check the queue_* tools
+        // use (scope + cwd), deliberately. The spec-completeness tag on the
+        // feed (specGaps) is ADVISORY and is NOT consulted here: approving a
+        // thin-but-non-empty scope is the human's call, and a second gate would
+        // make approving expensive — the one property this queue depends on.
         if (!approvalReady(item.scope, item.cwd)) {
           return { ok: false, text: `panel: ${key} is not fully specified (scope + cwd) — refine it first` };
         }
