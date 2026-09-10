@@ -1,51 +1,51 @@
 {
-  "name": "orchestrator-autopilot",
-  "version": "0.5.1",
-  "type": "module",
-  "description": "Deterministic orchestrator autopilot — keeps a subagent worker fleet at capacity. One queue store + lifecycle + tools; each host loads only its own adapter.",
-  "keywords": [
-    "pi-package"
-  ],
-  "scripts": {
-    "test": "bun test",
-    "typecheck": "tsc --noEmit"
-  },
-  "pi": {
-    "extensions": [
-      "./src/hosts/pi-extension.ts"
+    "name": "orchestrator-autopilot",
+    "version": "0.6.0",
+    "type": "module",
+    "description": "Deterministic orchestrator autopilot — keeps a subagent worker fleet at capacity. One queue store + lifecycle + tools; each host loads only its own adapter.",
+    "keywords": [
+        "pi-package"
     ],
-    "skills": [
-      "./skills"
+    "scripts": {
+        "test": "bun test",
+        "typecheck": "tsc --noEmit"
+    },
+    "pi": {
+        "extensions": [
+            "./src/hosts/pi-extension.ts"
+        ],
+        "skills": [
+            "./skills"
+        ],
+        "prompts": [
+            "./prompts"
+        ]
+    },
+    "exports": {
+        ".": "./src/hosts/opencode-entry.ts",
+        "./tui": "./src/hosts/opencode-tui.ts"
+    },
+    "dependencies": {
+        "@earendil-works/pi-tui": "^0.85.1",
+        "@opencode-ai/plugin": "^1.4.7",
+        "@opentui/solid": "0.5.11",
+        "@opentui/core": "0.5.11",
+        "solid-js": "1.9.12"
+    },
+    "peerDependencies": {
+        "typebox": "*"
+    },
+    "files": [
+        "src",
+        "skills",
+        "prompts",
+        "docs",
+        "README.md",
+        "LICENSE"
     ],
-    "prompts": [
-      "./prompts"
-    ]
-  },
-  "exports": {
-    ".": "./src/hosts/opencode-entry.ts",
-    "./tui": "./src/hosts/opencode-tui.ts"
-  },
-  "dependencies": {
-    "@earendil-works/pi-tui": "^0.85.1",
-    "@opencode-ai/plugin": "^1.4.7",
-    "@opentui/solid": "0.5.11",
-    "@opentui/core": "0.5.11",
-    "solid-js": "1.9.12"
-  },
-  "peerDependencies": {
-    "typebox": "*"
-  },
-  "files": [
-    "src",
-    "skills",
-    "prompts",
-    "docs",
-    "README.md",
-    "LICENSE"
-  ],
-  "devDependencies": {
-    "typescript": "^5.9.3",
-    "@types/bun": "~1.3.14"
-  },
-  "peerDependenciesMeta": {}
+    "devDependencies": {
+        "typescript": "^5.9.3",
+        "@types/bun": "~1.3.14"
+    },
+    "peerDependenciesMeta": {}
 }
