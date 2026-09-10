@@ -42,9 +42,9 @@ export function parseVerdict(ev: CompletionEvent, reviewerAgents: string[] = [])
     const v = pick((r as { output?: unknown }).output);
     if (v) return v;
   }
-  if (typeof ev.summary === "string") {
-    const m = firstLine(ev.summary).match(VERDICT_RE);
-    if (m) return m[1] === "PASS" ? "PASS" : "FAIL";
-  }
-  return null;
+  // last resort: the event's own summary text (backends that carry the child's
+  // text there instead of results[].output). Same extraction as the results
+  // branches — one normalisation for every shape, no second dialect of the
+  // verdict format.
+  return pick(ev.summary);
 }
