@@ -13,7 +13,9 @@ import type { LoadedAutopilotConfig } from "../config.ts";
 import { loadStore, newStore, mutateStore, addItem, updateItem, queryItems, queueLengths, resolveSeries, recordSeries, isDispatchClass, type DispatchClass, type QueueStore } from "../queue-store.ts";
 import { appendOverride, captureFinisherBaseline } from "../finisher-evidence.ts";
 import { isAutoDispatchable } from "../framework/auto-dispatch.ts";
+import { assessRequestedBudget, budgetCeilingWarning } from "../framework/run-budget.ts";
 import { reviewerRunAlive } from "../framework/run-liveness.ts";
+import { formatDurationMs } from "../duration.ts";
 import { preserveRunWorktree } from "../framework/worktree-preservation.ts";
 
 export interface ToolResult {
@@ -341,6 +343,12 @@ export async function queueDispatch(ctx: QueueOpsCtx, params: Record<string, unk
             : (item.finisherSource ?? null))
         : null;
     const finisherBaseline = dispatchClass === "finisher" ? captureFinisherBaseline(cwd, null, finisherSource) : null;
+    // BUDGET REALITY (AUTOPILOT-47): the runtime silently truncates any budget
+    // above its per-step ceiling. Assess BEFORE the spawn so the receipt says
+    // what this run will actually get — a silently halved budget is what made
+    // the operator plan two hours of work into a 30-minute run.
+    const budget = assessRequestedBudget(timeoutMs);
+    const budgetNote = budgetCeilingWarning(budget, formatDurationMs);
     const runId = await ctx.backend.spawn(params.task as string, { cwd, timeoutMs });
     if (!runId) return { text: "queue_dispatch: spawned but no run id returned", details: {} };
     // The spawn happens OUTSIDE the mutation (mutateStore may re-run its apply
@@ -379,7 +387,14 @@ export async function queueDispatch(ctx: QueueOpsCtx, params: Record<string, unk
           ? ` FINISHER-CLASS: this dispatch writes into ${cwd} (not its worktree); success is judged on '${finisherSource}' (${finisherBaseline.sourceSha.slice(0, 8)}) entering that checkout's history from baseline ${finisherBaseline.sha ? finisherBaseline.sha.slice(0, 8) : "unreadable"} — EITHER as the declared commits (merge/fast-forward) OR as patch-equivalent copies (clean cherry-pick/rebase/squash of a single-commit source), so a runtime 'no edits' verdict is overridden (and recorded) when the work lands in one of those shapes. NOT DETECTED, so the failure stands and closing the item is your deliberate call (queue_update overrideReason): a CONFLICT-RESOLVED cherry-pick (resolving the conflict rewrites the patch), a squash of a MULTI-commit source, and any landing that never moves this checkout — notably shipping flow 'mrs', which only pushes the branch and opens an MR.`
           : ` FINISHER-CLASS: this dispatch writes into ${cwd} (not its worktree), but ${finisherSource ? `the declared source '${finisherSource}' does not resolve to a commit there` : "NO source branch/sha was declared (finisherSource)"} — LANDED EVIDENCE IS OFF for this run, so a runtime 'no edits in the worktree' verdict will fail it as usual. Re-dispatch with finisherSource=<branch/sha it must land> to get the evidence path.`
         : "";
-    return { text: `dispatched '${key}' — run ${runId}.${autoNote}${finisherNote}`, details: { runId, dispatchClass } };
+    return {
+      text: `dispatched '${key}' — run ${runId}.${budgetNote}${autoNote}${finisherNote}`,
+      details: {
+        runId,
+        dispatchClass,
+        ...(budget.truncated ? { budgetTruncated: true, requestedTimeoutMs: budget.requestedMs, effectiveTimeoutMs: budget.effectiveMs } : {}),
+      },
+    };
   } catch (e) {
     return err(e, "queue_dispatch");
   }
