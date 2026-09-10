@@ -24,7 +24,10 @@
 //   3. a runtime failure verdict on a finisher whose work is EVIDENCED AS
 //      LANDED is overridden — and the override is RECORDED on the item
 //      (`overrides`), so a pattern of overrides is visible instead of folklore;
-//   4. auto-recovery never re-dispatches an item carrying landed evidence.
+//   4. auto-recovery never re-dispatches an item carrying landed evidence —
+//      and, because the shapes below are UNDETECTABLE by design, it never
+//      re-dispatches a failed finisher-class item at all: it holds the item and
+//      escalates to the human instead (KEY: AUTOPILOT-46, auto-recovery.ts).
 //
 // WHAT THE EVIDENCE PROVES, EXACTLY — and what it does not.
 // The check is deliberately narrow, because "the declared cwd's HEAD moved" on
@@ -277,9 +280,14 @@ export function landedNote(evidence: LandedEvidence, runId: string | null, now =
 }
 
 /** Say WHICH landing shape the evidence found — "is now in" would be false for
- *  a cherry-pick, where the declared sha itself is not in the history at all. */
+ *  a cherry-pick, where the declared sha itself is not in the history at all.
+ *  A MISSING shape (evidence recorded before `landing` existed) gets a NEUTRAL
+ *  phrase: naming a shape that was never recorded would assert more than the
+ *  record holds (KEY: AUTOPILOT-46). */
 function landingPhrase(landing: LandingShape | undefined): string {
-  return landing === "patch-equivalent" ? "as patch-equivalent commits (cherry-pick/rebase)" : "as the declared commits (merge/fast-forward)";
+  if (landing === "patch-equivalent") return "as patch-equivalent commits (cherry-pick/rebase)";
+  if (landing === "ancestor") return "as the declared commits (merge/fast-forward)";
+  return "in that history";
 }
 
 function short(sha: string | null): string {
