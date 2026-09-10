@@ -3,7 +3,7 @@
 // decisions are validated store mutations.
 
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
 import { specCompleteness } from "../../src/framework/spec-completeness.ts";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -350,6 +350,19 @@ describe("applyPanelDecision — validated store mutations", () => {
     expect(after["B-2"].notes).toContain("renamed from Q1");
     // the event carries the FINAL key so consumers dispatch the live item
     expect(r.event?.data).toMatchObject({ key: "B-2", renamedFrom: "Q1", action: "approve", to: "approved" });
+  });
+
+  test("a decision that CANNOT be persisted reports failure — never throws into the host's TUI", () => {
+    const { dir, read } = dirWith([item({ key: "P1", status: "proposal", scope: "s", cwd: "/repo/a" })]);
+    chmodSync(dir, 0o500); // read-only state dir: the store write is impossible
+    try {
+      const r = applyPanelDecision(dir, "P1", "approve");
+      expect(r.ok).toBe(false);
+      expect(r.text).toContain("could not be applied");
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    expect(read().items["P1"].status).toBe("proposal"); // unchanged
   });
 });
 

@@ -27,7 +27,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, basename } from "node:path";
-import { loadStore, saveStore, updateItem } from "../queue-store.ts";
+import { loadStore, mutateStore, updateItem, type QueueItem, type UpdatePatch } from "../queue-store.ts";
 import { loadAutopilotConfig, type ShippingConfig, type ShippingRepoPolicy, type ShippingFlow } from "../config.ts";
 import { reviewPointersFor } from "./worktree-preservation.ts";
 import { recordExpectedMainWrite } from "./main-write-guard.ts";
@@ -428,6 +428,12 @@ export function runShippingPass(stateDir: string, now = new Date().toISOString()
     .filter((i) => i.status === "done" && typeof i.cwd === "string" && i.cwd.trim().length > 0 && !i.shippedAt)
     .sort((a, b) => (a.updatedAt < b.updatedAt ? -1 : 1)); // oldest first
   const outcomes: ShippingOutcome[] = [];
+  // The pass runs git (merges/pushes) between decisions, so it cannot hold the
+  // store's mutation window open: markers are STAGED against this snapshot and
+  // merged onto the current store in one mutateStore at the end. Each patch is
+  // a function of the item it lands on, so a note another writer appended while
+  // git ran survives instead of being overwritten.
+  const staged: Array<{ key: string; patch: (item: QueueItem) => UpdatePatch }> = [];
   for (const item of done) {
     const repo = item.cwd as string;
     const resolved = resolveRepoPolicy(stateDir, repo, cfg);
@@ -490,7 +496,8 @@ export function runShippingPass(stateDir: string, now = new Date().toISOString()
     if (result.skipped) {
       // nothing new — the work is already on the base; mark it shipped so the
       // lane never re-evaluates a done item forever.
-      updateItem(store, item.key, { shippedAt: now, notes: item.notes ? `${item.notes}\n\n[shipped] ${now} — nothing new to merge (work already on the base).` : `[shipped] ${now} — nothing new to merge (work already on the base).` });
+      const skipNote = `[shipped] ${now} — nothing new to merge (work already on the base).`;
+      staged.push({ key: item.key, patch: (fresh) => ({ shippedAt: now, notes: fresh.notes ? `${fresh.notes}\n\n${skipNote}` : skipNote }) });
       continue;
     }
     // SHIPPED — mark + announce. The shippedAt marker prevents re-merge.
@@ -509,7 +516,7 @@ export function runShippingPass(stateDir: string, now = new Date().toISOString()
       ? `merged into ${result.merges![0].base} @ ${shortSha(sha)}`
       : `MR(s): ${result.mrs!.map((m) => (m.url ? `${m.url}` : `pushed ${m.source} → ${m.base} (${shortSha(m.sha)})`)).join("; ")}`;
     const note = `[shipped] ${now} — ${flowNote} (flow ${result.flow}, policy shipping.repos['${resolved.key}'])`;
-    updateItem(store, item.key, { shippedAt: now, notes: item.notes ? `${item.notes}\n\n${note}` : note });
+    staged.push({ key: item.key, patch: (fresh) => ({ shippedAt: now, notes: fresh.notes ? `${fresh.notes}\n\n${note}` : note }) });
     const message = result.flow === "merge"
       ? `[orch-tick: ship] merged ${item.key} @ ${shortSha(sha)} (into ${result.merges![0].base}, policy ${resolved.key}, flow merge). Done deterministically shipped via the declared policy. Not a user request; respond ≤2 lines.`
       : `[orch-tick: ship] ${item.key} shipped — ${result.mrs!.map((m) => `MR into ${m.base}: ${m.url ?? `push ${m.source}@${shortSha(m.sha)}`}`).join("; ")} (policy ${resolved.key}, flow mrs). Not a user request; respond ≤2 lines.`;
@@ -532,7 +539,14 @@ export function runShippingPass(stateDir: string, now = new Date().toISOString()
       },
     });
   }
-  saveStore(stateDir, store);
+  if (staged.length) {
+    mutateStore(stateDir, (s) => {
+      for (const { key, patch } of staged) {
+        const fresh = s.items[key];
+        if (fresh) updateItem(s, key, patch(fresh));
+      }
+    });
+  }
   return outcomes;
 }
 

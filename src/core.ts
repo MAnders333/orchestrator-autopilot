@@ -27,7 +27,7 @@ import { readFileSync, writeFileSync, existsSync, renameSync, mkdirSync, appendF
 import { join } from "node:path";
 import {
   loadStore,
-  saveStore,
+  mutateStore,
   itemByRunId,
   itemByReviewerRunId,
   updateItem,
@@ -147,6 +147,9 @@ export class Autopilot {
           // failure — the work is unjudged and the recovery is a bigger-budget
           // re-dispatch — NOT the same as a run that ended with an unsuccessful
           // verdict. Recorded as the machine flag failCause + a human note.
+          // The store change goes through mutateStore (load → apply → write,
+          // serialized + CAS): a harness flip on a timer used to clobber a
+          // concurrent tool write with its own whole-file snapshot.
           if (outcome === "failed") {
             failCause = workerFailCause(ev, it.timeoutMs, it.updatedAt, now);
             const capNote = failCause === "budget-capped"
@@ -156,13 +159,19 @@ export class Autopilot {
               : failCause === "spawn"
                 ? `[failed: spawn] ${new Date(now).toISOString()} — worker run ${topRunId} died at the provider/infra layer (bare 400 / empty api_error — no deliverable produced), not a verdict on the work. The harness AUTO-RECOVERS with backoff (bounded retries, then escalates). Verify partial work on the pi-parallel-* branch.`
                 : `[failed: verdict] ${new Date(now).toISOString()} — worker run ${topRunId} ended unsuccessfully (not budget-capped). Read its output; verify partial work on the pi-parallel-* branch before re-dispatching (failed items are re-dispatchable: queue_dispatch).`;
-            updateItem(store, it.key, {
-              status: "failed",
-              failCause,
-              notes: it.notes ? `${it.notes}\n\n${capNote}` : capNote,
+            mutateStore(this.cfg.stateDir, (s) => {
+              const fresh = s.items[it.key];
+              if (!fresh || fresh.status !== "active") return;
+              updateItem(s, it.key, {
+                status: "failed",
+                failCause,
+                notes: fresh.notes ? `${fresh.notes}\n\n${capNote}` : capNote,
+              });
             });
           } else {
-            updateItem(store, it.key, { status: "ai-review" });
+            mutateStore(this.cfg.stateDir, (s) => {
+              if (s.items[it.key]?.status === "active") updateItem(s, it.key, { status: "ai-review" });
+            });
           }
           flipped = true;
           flippedKey = it.key; // capture inside the loop — the FIRST matching item, not any same-status item
@@ -170,7 +179,6 @@ export class Autopilot {
           break;
         }
       }
-      if (flipped) saveStore(this.cfg.stateDir, store);
     }
 
     // A flipped item (or a ledger-tracked run) freed a worker slot.
@@ -233,8 +241,9 @@ export class Autopilot {
         if (verdict === "PASS") {
           // AI review passed → the item enters HUMAN review (your approval),
           // not done. The harness auto-flags it; YOU make it done.
-          updateItem(store, matched.key, { status: "human-review" });
-          saveStore(this.cfg.stateDir, store);
+          mutateStore(this.cfg.stateDir, (s) => {
+            if (s.items[matched.key]) updateItem(s, matched.key, { status: "human-review" });
+          });
           domainEvents.push({ name: "orch:verdict", data: { key: matched.key, verdict: "PASS", attempts: matched.attempts ?? 0 } });
           this.logEvent("flip", { key: matched.key, outcome: "human-review", source: "verdict-pass" });
           if (!withinQuiet) this.lastReviewTickAt = now;
@@ -254,13 +263,16 @@ export class Autopilot {
           const attempts = (matched.attempts ?? 0) + 1;
           if (attempts >= this.cfg.reviewCap) {
             const causeNote = `[failed: verdict] ${new Date(now).toISOString()} — review FAIL at attempt ${attempts} (cap ${this.cfg.reviewCap}) — the work failed AI review ${attempts} times, not a budget cap. Apply the findings directly, re-scope, or drop.`;
-            updateItem(store, matched.key, {
-              status: "failed",
-              attempts,
-              failCause: "verdict",
-              notes: matched.notes ? `${matched.notes}\n\n${causeNote}` : causeNote,
+            mutateStore(this.cfg.stateDir, (s) => {
+              const fresh = s.items[matched.key];
+              if (!fresh) return;
+              updateItem(s, matched.key, {
+                status: "failed",
+                attempts,
+                failCause: "verdict",
+                notes: fresh.notes ? `${fresh.notes}\n\n${causeNote}` : causeNote,
+              });
             });
-            saveStore(this.cfg.stateDir, store);
             domainEvents.push({ name: "orch:verdict", data: { key: matched.key, verdict: "FAIL", attempts } });
             this.logEvent("flip", { key: matched.key, outcome: "failed", source: "verdict-cap" });
             if (!withinQuiet) this.lastReviewTickAt = now;
@@ -276,8 +288,9 @@ export class Autopilot {
               reviewerCompleted: true,
             };
           }
-          updateItem(store, matched.key, { status: "active", attempts, runId: null, reviewerRunId: null });
-          saveStore(this.cfg.stateDir, store);
+          mutateStore(this.cfg.stateDir, (s) => {
+            if (s.items[matched.key]) updateItem(s, matched.key, { status: "active", attempts, runId: null, reviewerRunId: null });
+          });
           domainEvents.push({ name: "orch:verdict", data: { key: matched.key, verdict: "FAIL", attempts } });
           this.logEvent("flip", { key: matched.key, outcome: "active", source: "verdict-fail", attempts });
           if (!withinQuiet) this.lastReviewTickAt = now;
@@ -424,27 +437,32 @@ export class Autopilot {
     if (fleetTotalActive > 0) return { flippedKeys: [] }; // something IS running — fleet not authoritative-idle
     const graceMs = this.cfg.zombieGraceMinutes * 60_000;
     if (graceMs <= 0) return { flippedKeys: [] }; // 0 disables the sweep
-    const store = loadStore(this.cfg.stateDir);
-    if (!store) return { flippedKeys: [] };
-    const flippedKeys: string[] = [];
-    for (const it of Object.values(store.items)) {
-      if (it.status !== "active") continue;
-      const updatedAt = Date.parse(it.updatedAt);
-      const idleMs = now - updatedAt;
-      if (!Number.isFinite(updatedAt) || idleMs < graceMs) continue;
-      const evidence =
-        `zombie reconciliation ${new Date(now).toISOString()} — fleet reported 0 active runs while this item sat active ~${Math.round(idleMs / 60_000)}m past update ` +
-        `(run ${it.runId ?? "?"}): timeout/crash/lost completion event. Partial work may exist on pi-parallel-* branches — verify before re-dispatch.`;
-      updateItem(store, it.key, {
-        status: "failed",
-        failCause: "zombie",
-        notes: it.notes ? `${it.notes}\n\n${evidence}` : evidence,
-      });
-      flippedKeys.push(it.key);
-      this.logEvent("flip", { key: it.key, runId: it.runId ?? null, outcome: "failed", source: "zombie" });
-    }
-    if (flippedKeys.length) saveStore(this.cfg.stateDir, store);
-    return { flippedKeys };
+    if (!loadStore(this.cfg.stateDir)) return { flippedKeys: [] };
+    // The whole scan runs INSIDE the mutation: deciding from one snapshot and
+    // writing a different one is the lost-update window. mutateStore may re-run
+    // this on a conflict, so it stays a pure function of the store it is given
+    // (the logging happens after it returns).
+    const flipped = mutateStore(this.cfg.stateDir, (store) => {
+      const keys: Array<{ key: string; runId: string | null }> = [];
+      for (const it of Object.values(store.items)) {
+        if (it.status !== "active") continue;
+        const updatedAt = Date.parse(it.updatedAt);
+        const idleMs = now - updatedAt;
+        if (!Number.isFinite(updatedAt) || idleMs < graceMs) continue;
+        const evidence =
+          `zombie reconciliation ${new Date(now).toISOString()} — fleet reported 0 active runs while this item sat active ~${Math.round(idleMs / 60_000)}m past update ` +
+          `(run ${it.runId ?? "?"}): timeout/crash/lost completion event. Partial work may exist on pi-parallel-* branches — verify before re-dispatch.`;
+        updateItem(store, it.key, {
+          status: "failed",
+          failCause: "zombie",
+          notes: it.notes ? `${it.notes}\n\n${evidence}` : evidence,
+        });
+        keys.push({ key: it.key, runId: it.runId ?? null });
+      }
+      return keys;
+    });
+    for (const f of flipped) this.logEvent("flip", { key: f.key, runId: f.runId, outcome: "failed", source: "zombie" });
+    return { flippedKeys: flipped.map((f) => f.key) };
   }
 
   /**

@@ -10,8 +10,10 @@
 // judgment (via queue_* tools); active→ai-review/failed are extension events
 // (async-complete). Only the two event transitions happen automatically.
 
-import { readFileSync, writeFileSync, existsSync, renameSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, renameSync, mkdirSync, linkSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { hostname } from "node:os";
+import { randomBytes } from "node:crypto";
 
 export type QueueStatus = "proposal" | "approved" | "blocked" | "active" | "ai-review" | "human-review" | "failed" | "done" | "rejected";
 export type BlockerReason = "parked" | "serialized" | "merge" | "decision" | null;
@@ -103,6 +105,18 @@ export interface QueueItem {
 
 export interface QueueStore {
   version: 1;
+  /** Monotonic revision — half of the COMPARE-AND-SWAP token. Bumped by every
+   *  mutateStore write; a mutation that finds a different rev on disk than the
+   *  one it read has been overtaken and re-applies instead of clobbering.
+   *  Backfilled to 0 on read for pre-rev stores (no schema break). */
+  rev: number;
+  /** The WRITE IDENTITY that stamped `rev` — the other half of the CAS token.
+   *  `rev` alone is not identifying: two writers that both read revision N both
+   *  stamp N+1, so each one's post-write re-read is satisfied by the OTHER's
+   *  write and both report success while one is silently gone. The nonce is
+   *  unique per write (`<pid>@<host>:<random>`), so a writer recognises its own
+   *  write and nothing else. Backfilled to null on read. */
+  revBy?: string | null;
   items: Record<string, QueueItem>;
 }
 
@@ -155,6 +169,10 @@ export function loadStore(stateDir: string): QueueStore | null {
       for (const it of Object.values(raw.items)) {
         if (it.status === "reviewing") it.status = "ai-review";
       }
+      // Pre-rev stores start at revision 0 (same backfill-on-read rule as the
+      // item fields below) — the first mutateStore write stamps rev 1.
+      if (typeof raw.rev !== "number" || !Number.isFinite(raw.rev)) raw.rev = 0;
+      if (typeof raw.revBy !== "string") raw.revBy = null;
       for (const it of Object.values(raw.items)) {
         if (it.reviewerRunId === undefined) it.reviewerRunId = null;
         if (it.timeoutMs === undefined) it.timeoutMs = null;
@@ -180,6 +198,12 @@ export function loadStore(stateDir: string): QueueStore | null {
   }
 }
 
+/** RAW whole-file write (atomic tmp+rename, so a reader never sees a torn
+ *  file). It does NOT serialize against other writers and does NOT bump `rev`
+ *  — a bare loadStore → mutate → saveStore pair is exactly the lost-update
+ *  race this module now guards against. Every mutation goes through
+ *  mutateStore; direct calls are reserved for bootstrap paths that own the
+ *  file outright (ensureMigrated) and for tests. */
 export function saveStore(stateDir: string, store: QueueStore): void {
   const p = storePath(stateDir);
   mkdirSync(stateDir, { recursive: true });
@@ -189,13 +213,257 @@ export function saveStore(stateDir: string, store: QueueStore): void {
 }
 
 export function newStore(): QueueStore {
-  return { version: 1, items: {} };
+  return { version: 1, rev: 0, revBy: null, items: {} };
 }
 
 /** The store-ownership helper both hosts used to inline (loadStore ?? newStore).
  *  One place, in the store layer. */
 export function loadStoreOrNew(stateDir: string): QueueStore {
   return loadStore(stateDir) ?? newStore();
+}
+
+// ---------------------------------------------------------------------------
+// The ONE safe mutation path (lock + compare-and-swap)
+// ---------------------------------------------------------------------------
+//
+// saveStore is atomic per write, but every caller used to do
+// loadStore → mutate → saveStore with no serialization: a writer that loaded
+// before another's rename silently erased it, whole-file (observed live — a
+// fully-specified proposal vanished with a success receipt, and its key was
+// handed out twice). The writers span PROCESSES (pi host, opencode host,
+// tools) and harness timers, so an in-process mutex is not enough.
+//
+// Two mechanisms, layered, and BOTH carry the writer's identity:
+//   1. an advisory LOCK FILE around the read-modify-write window —
+//      cross-process, stamped with the holder's nonce, and published
+//      ATOMICALLY (write a private tmp file, then link it into place) so a
+//      contender never observes a half-created lock;
+//   2. an identified COMPARE-AND-SWAP as the correctness floor — the mutation
+//      refuses to write over a revision newer than the one it read, and treats
+//      its write as landed only when the re-read shows ITS OWN nonce at
+//      rev+1 while the lock is still its own.
+// Identity is the whole point. A bare `rev === baseRev + 1` check is satisfied
+// by a COMPETITOR's stamp of the same number: two writers that both read
+// revision N both write N+1, both re-read N+1, and both report success while
+// one of the two writes is gone — bit for bit the incident this module exists
+// to prevent. So the lock is stamped with a nonce and the store records the
+// nonce that produced its revision; a writer only ever recognises its own.
+// The lock can still be stolen (a hard-killed holder must not wedge the
+// harness, so a stale/expired lock IS broken open) — the identity checks are
+// what make that steal safe: the writer whose lock was taken sees that it no
+// longer holds it, counts a conflict, and re-applies on the fresh store.
+// Liveness is the hard requirement: NOTHING here waits unboundedly — a stuck
+// sweep would be a worse failure than the bug.
+
+const LOCK_STALE_MS = 15_000;
+const LOCK_WAIT_MS = 5_000;
+/** How long an UNREADABLE lock file is given before it counts as abandoned.
+ *  Unparsable content is not proof of abandonment — it is also what a lock
+ *  looks like for the instant between its creation and its content landing on
+ *  a filesystem that reorders them. Breaking one open immediately would let a
+ *  contender delete a lock a live writer had just taken. */
+const LOCK_UNREADABLE_GRACE_MS = 250;
+const MAX_MUTATE_ATTEMPTS = 8;
+const MAX_LOCK_ROUNDS = 500;
+
+interface LockInfo {
+  pid: number;
+  host: string;
+  at: number;
+  /** the holder's WRITE IDENTITY — the same nonce it stamps into store.revBy.
+   *  "" for a lock written by a pre-nonce build (never matches a live nonce,
+   *  so such a lock is simply never mistaken for ours). */
+  nonce: string;
+}
+
+/** A globally unique write identity. Two writers can stamp the same `rev`;
+ *  they can never stamp the same nonce. */
+function newWriteNonce(): string {
+  return `${process.pid}@${hostname()}:${randomBytes(8).toString("hex")}`;
+}
+
+function lockPath(stateDir: string): string {
+  return `${storePath(stateDir)}.lock`;
+}
+
+/** Block the thread for ~ms. The store writers are synchronous end to end, so
+ *  the wait has to be too; holds are file-IO short. */
+function sleepSync(ms: number): void {
+  if (ms <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function readLock(p: string): LockInfo | null {
+  try {
+    const raw = JSON.parse(readFileSync(p, "utf8")) as LockInfo;
+    if (!raw || typeof raw.pid !== "number" || typeof raw.at !== "number") return null;
+    return { ...raw, nonce: typeof raw.nonce === "string" ? raw.nonce : "" };
+  } catch {
+    return null;
+  }
+}
+
+/** Do WE hold the lock right now? The steal-safety check: any other writer
+ *  entering the critical section must first replace this file with its own, so
+ *  a lock that is missing or carries someone else's nonce means our window was
+ *  taken and whatever we are about to write (or just wrote) is unsafe. */
+function holdsStoreLock(stateDir: string, nonce: string): boolean {
+  const info = readLock(lockPath(stateDir));
+  return info !== null && info.nonce === nonce;
+}
+
+/** Is the lock holder gone (so the lock may be broken open)? Older than the
+ *  stale timeout = abandoned; a dead pid on THIS host = abandoned (the pid
+ *  check is only meaningful on the machine that wrote it); unreadable = only
+ *  once it has sat unreadable for the grace window (see the constant). */
+function lockHolderGone(p: string, now: number, staleMs: number): boolean {
+  const info = readLock(p);
+  if (!info) {
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(p).mtimeMs;
+    } catch {
+      return true; // already gone from under us — nothing to wait for
+    }
+    return now - mtimeMs > LOCK_UNREADABLE_GRACE_MS;
+  }
+  if (now - info.at > staleMs) return true;
+  if (info.host === hostname() && info.pid !== process.pid) {
+    try {
+      process.kill(info.pid, 0);
+    } catch (e) {
+      if ((e as { code?: string }).code === "ESRCH") return true;
+    }
+  }
+  return false;
+}
+
+function acquireStoreLock(stateDir: string, nonce: string, waitMs: number, staleMs: number): void {
+  const p = lockPath(stateDir);
+  mkdirSync(stateDir, { recursive: true });
+  const deadline = Date.now() + waitMs;
+  // The lock is published CONTENT-FIRST: fill a private tmp file, then link it
+  // into place. link() is the exclusive-create primitive here, so the lock
+  // never exists in the empty/half-written state that an open("wx") +
+  // write-afterwards sequence leaves visible — a contender that read the lock
+  // in that gap saw unparsable content, called it abandoned, and deleted a lock
+  // its live owner was still about to write into (two holders, no dead pid, no
+  // staleness, no expired wait budget).
+  const tmp = `${p}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
+  try {
+    for (let round = 0; round < MAX_LOCK_ROUNDS; round++) {
+      try {
+        writeFileSync(tmp, JSON.stringify({ pid: process.pid, host: hostname(), at: Date.now(), nonce } satisfies LockInfo));
+        linkSync(tmp, p);
+        return;
+      } catch (e) {
+        if ((e as { code?: string }).code !== "EEXIST") throw e;
+      }
+      const now = Date.now();
+      if (lockHolderGone(p, now, staleMs) || now >= deadline) {
+        // NEVER WEDGE THE HARNESS: a dead/abandoned holder, or one that
+        // outlived the wait budget, gets its lock broken open rather than
+        // waited on. The identified CAS below is what keeps a broken-open lock
+        // from losing a write — the writer we stole from will see that the lock
+        // is no longer its own and re-apply instead of reporting success.
+        try {
+          unlinkSync(p);
+        } catch {
+          // someone else broke it first — just retry the create
+        }
+        continue;
+      }
+      sleepSync(4 + Math.floor(Math.random() * 12));
+    }
+  } finally {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // the tmp link is scratch — the lock file survives it
+    }
+  }
+  throw new Error(`queue: could not acquire the store lock at ${p} (contended past ${MAX_LOCK_ROUNDS} rounds)`);
+}
+
+function releaseStoreLock(stateDir: string, nonce: string): void {
+  // Only unlink OUR lock: if it was broken open and re-taken while we ran, the
+  // file belongs to the new holder and deleting it would strand them.
+  if (!holdsStoreLock(stateDir, nonce)) return;
+  try {
+    unlinkSync(lockPath(stateDir));
+  } catch {
+    // best-effort — a missing lock is already released
+  }
+}
+
+/** The on-disk revision AND the identity that stamped it — together, the CAS
+ *  comparand. (0/null when the store is absent or unreadable.) */
+function diskStamp(stateDir: string): { rev: number; revBy: string | null } {
+  const store = loadStore(stateDir);
+  return { rev: store?.rev ?? 0, revBy: store?.revBy ?? null };
+}
+
+export interface MutateOptions {
+  /** bounded CAS retries before the mutation ABORTS loudly (default 8) */
+  maxAttempts?: number;
+  /** how long to wait for a contended lock before breaking it open (default 5s) */
+  lockWaitMs?: number;
+  /** a lock older than this is abandoned (default 15s) */
+  lockStaleMs?: number;
+}
+
+/**
+ * THE safe mutation path: load → apply → write, serialized across processes and
+ * verified by compare-and-swap. `apply` receives the CURRENT store and mutates
+ * it in place (returning whatever the caller needs to report); it may be re-run
+ * on a conflict, so it must be a pure function of the store it is handed — no
+ * spawns, no git, no nested mutateStore, no side effects that must happen once.
+ * Do those before or after the call.
+ *
+ * Throws when the mutation could not be applied: an ABORT is the contract, so a
+ * caller can never report success for a write that did not survive. An
+ * exception from `apply` itself (an illegal transition, say) propagates
+ * unchanged and writes nothing.
+ */
+export function mutateStore<T>(stateDir: string, apply: (store: QueueStore) => T, opts: MutateOptions = {}): T {
+  const maxAttempts = Math.max(1, opts.maxAttempts ?? MAX_MUTATE_ATTEMPTS);
+  const lockWaitMs = opts.lockWaitMs ?? LOCK_WAIT_MS;
+  const lockStaleMs = opts.lockStaleMs ?? LOCK_STALE_MS;
+  let conflicts = 0;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    // A FRESH identity per attempt: it stamps the lock we take and the revision
+    // we write, so both the "is this still my window?" and the "is this my
+    // write?" questions have an answer no competitor can accidentally give.
+    const nonce = newWriteNonce();
+    acquireStoreLock(stateDir, nonce, lockWaitMs, lockStaleMs);
+    let landed: { value: T } | null = null;
+    try {
+      const store = loadStoreOrNew(stateDir);
+      const baseRev = store.rev ?? 0;
+      const value = apply(store);
+      if (!holdsStoreLock(stateDir, nonce) || diskStamp(stateDir).rev !== baseRev) {
+        // Our window was taken (the lock is someone else's now) or the store
+        // moved under us — either way, re-apply on the fresh store.
+        conflicts++;
+      } else {
+        store.rev = baseRev + 1;
+        store.revBy = nonce;
+        saveStore(stateDir, store);
+        const after = diskStamp(stateDir);
+        // OUR nonce at OUR revision, with the window still ours. A competitor's
+        // rev+1 does not count: that is exactly the write that erased us.
+        if (after.rev === baseRev + 1 && after.revBy === nonce && holdsStoreLock(stateDir, nonce)) landed = { value };
+        else conflicts++; // someone wrote over us — our change did NOT survive
+      }
+    } finally {
+      releaseStoreLock(stateDir, nonce);
+    }
+    if (landed) return landed.value;
+    sleepSync(3 + Math.floor(Math.random() * 12 * attempt)); // backoff + jitter
+  }
+  throw new Error(
+    `queue: store mutation ABORTED after ${maxAttempts} attempts — ${conflicts} concurrent write conflict(s) on ${storePath(stateDir)}; the change was NOT saved`,
+  );
 }
 
 /** One-time migration: import a legacy state.md into the programmatic store.
@@ -207,8 +475,13 @@ export function ensureMigrated(stateDir: string): void {
     if (loadStore(stateDir)) return;
     const mdPath = join(stateDir, "state.md");
     if (!existsSync(mdPath)) return;
-    const store = migrateFromMd(readFileSync(mdPath, "utf8"));
-    saveStore(stateDir, store);
+    const migrated = migrateFromMd(readFileSync(mdPath, "utf8"));
+    // Through the safe path like every other writer: two hosts can activate at
+    // once, and the loser must see the winner's store rather than overwrite it.
+    mutateStore(stateDir, (store) => {
+      if (Object.keys(store.items).length > 0) return; // another activation migrated first
+      store.items = migrated.items;
+    });
     const archived = `${mdPath}.migrated-${Date.now()}`;
     try {
       renameSync(mdPath, archived);

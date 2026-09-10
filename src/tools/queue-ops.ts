@@ -10,7 +10,7 @@
 import type { SubagentBackend } from "../backends/types.ts";
 import type { Autopilot } from "../core.ts";
 import type { LoadedAutopilotConfig } from "../config.ts";
-import { loadStore, saveStore, newStore, addItem, updateItem, queryItems, queueLengths, resolveSeries, recordSeries, type QueueStore } from "../queue-store.ts";
+import { loadStore, newStore, mutateStore, addItem, updateItem, queryItems, queueLengths, resolveSeries, recordSeries, type QueueStore } from "../queue-store.ts";
 import { isAutoDispatchable } from "../framework/auto-dispatch.ts";
 import { reviewerRunAlive } from "../framework/run-liveness.ts";
 import { preserveRunWorktree } from "../framework/worktree-preservation.ts";
@@ -103,7 +103,6 @@ export function nextKeyFor(store: QueueStore, prefix: string): string {
 
 export async function queueAdd(ctx: QueueOpsCtx, params: Record<string, unknown>): Promise<ToolResult> {
   try {
-    const store = ctx.storeOrNew();
     // Key allocation: explicit key (unique, semantic suffixes welcome) OR a
     // series ("B") → Jira-style auto-allocated B-<n>. Omitting both allocates
     // under the default series "Q" — keys are load-bearing identifiers
@@ -122,34 +121,50 @@ export async function queueAdd(ctx: QueueOpsCtx, params: Record<string, unknown>
     // Provisional = we had NEITHER an explicit series NOR a cwd to derive one
     // from — the Q handle is a placeholder that the approved transition renames.
     const provisional = !key && !explicitSeries && !cwd;
-    let series = explicitSeries || (cwd ? resolveSeries(ctx.stateDir, cwd) : "Q");
-    if (!key) key = nextKeyFor(store, series);
-    if (cwd) recordSeries(ctx.stateDir, cwd, series);
-    if (store.items[key]) return { text: `queue_add: key '${key}' already exists — use queue_update, or omit key to auto-allocate the next number in a series`, details: {} };
+    const series = explicitSeries || (cwd ? resolveSeries(ctx.stateDir, cwd) : "Q");
     const status: "approved" | "proposal" = params.status === "approved" ? "approved" : "proposal";
     const scope = (params.scope as string) ?? "";
     if (status === "approved" && !approvalReady(scope, cwd)) {
       return { text: "queue_add: approval requires a complete scope + cwd (the scope is the worker prompt; cwd is the repo it runs in) — add as proposal or supply both", details: {} };
     }
-    addItem(store, {
-      key,
-      status,
-      blocker: null,
-      title: params.title as string,
-      scope,
-      cwd,
-      evidence: (params.evidence as string) ?? "",
-      value: (params.value as string) ?? "",
-      urgency: (params.urgency as string) ?? "",
-      risk: (params.risk as string) ?? "",
-      runId: null,
-      reviewerRunId: null,
-      timeoutMs: normalizeTimeoutMs(params.timeoutMs),
-      attempts: 0,
-      notes: (params.notes as string) ?? "",
-      ...(provisional ? { provisionalKey: true } : {}),
+    // ALLOCATE AND INSERT IN ONE MUTATION. nextKeyFor computes max+1 from the
+    // store it can see, so allocating in a separate read-modify-write cycle is
+    // how the same key gets handed out twice (observed live: AUTOPILOT-28).
+    // Inside mutateStore the store it sees IS the store the insert lands in.
+    const explicitKey = key;
+    const outcome = mutateStore(ctx.stateDir, (store) => {
+      const allocated = explicitKey || nextKeyFor(store, series);
+      if (store.items[allocated]) return { taken: true, key: allocated };
+      addItem(store, {
+        key: allocated,
+        status,
+        blocker: null,
+        title: params.title as string,
+        scope,
+        cwd,
+        evidence: (params.evidence as string) ?? "",
+        value: (params.value as string) ?? "",
+        urgency: (params.urgency as string) ?? "",
+        risk: (params.risk as string) ?? "",
+        runId: null,
+        reviewerRunId: null,
+        timeoutMs: normalizeTimeoutMs(params.timeoutMs),
+        attempts: 0,
+        notes: (params.notes as string) ?? "",
+        ...(provisional ? { provisionalKey: true } : {}),
+      });
+      return { taken: false, key: allocated };
     });
-    saveStore(ctx.stateDir, store);
+    if (outcome.taken) return { text: `queue_add: key '${outcome.key}' already exists — use queue_update, or omit key to auto-allocate the next number in a series`, details: {} };
+    key = outcome.key;
+    if (cwd) recordSeries(ctx.stateDir, cwd, series);
+    // NO FALSE SUCCESS: the receipt is only issued for an item that is ACTUALLY
+    // in the persisted store. mutateStore already aborts loudly on a conflict;
+    // this re-read is the belt on those braces, because "added '<key>'" for an
+    // item that never existed is what made the live loss invisible.
+    if (!loadStore(ctx.stateDir)?.items[key]) {
+      return { text: `queue_add: '${key}' did NOT survive the write (concurrent writer) — NOT added, retry`, details: {} };
+    }
     // Provisional keys are ALWAYS called out in the tool text: a repo-less
     // proposal gets a Q-<n> handle by necessity (nothing to derive a series
     // from), but the caller must know it is temporary — approval with a cwd
@@ -197,43 +212,46 @@ export function renameProvisionalKey(stateDir: string, store: QueueStore, key: s
 /** queue_update — validated transitions, blocker, free-form fields. */
 export async function queueUpdate(ctx: QueueOpsCtx, params: Record<string, unknown>): Promise<ToolResult> {
   try {
-    const store = ctx.storeOrNew();
-    const cur = store.items[params.key as string];
-    if (!cur) return { text: `queue_update: no item '${params.key}'`, details: {} };
-    const nextStatus = (params.status as string | undefined) ?? cur.status;
-    const nextScope = (params.scope as string | undefined) ?? cur.scope;
-    const nextCwd = (params.cwd as string | null | undefined) ?? cur.cwd;
-    if (nextStatus === "approved" && !approvalReady(nextScope, nextCwd)) {
+    const key = params.key as string;
+    // The read (existence + approval gate), the patch, and the provisional-key
+    // rename are ONE mutation: validating against a store snapshot and writing
+    // a different one is the read-modify-write window this fix closes.
+    const outcome = mutateStore(ctx.stateDir, (store) => {
+      const cur = store.items[key];
+      if (!cur) return { kind: "missing" as const, renamedTo: null };
+      const nextStatus = (params.status as string | undefined) ?? cur.status;
+      const nextScope = (params.scope as string | undefined) ?? cur.scope;
+      const nextCwd = (params.cwd as string | null | undefined) ?? cur.cwd;
+      if (nextStatus === "approved" && !approvalReady(nextScope, nextCwd)) return { kind: "unready" as const, renamedTo: null };
+      // An approval may complete a PROVISIONAL key: run the shared rename AFTER
+      // the patch (resolveSeries excludes the item's own vote, so the rename
+      // cannot resolve to its own provisional Q).
+      const renamingProvisional = cur.provisionalKey === true && nextStatus === "approved" && !!nextCwd;
+      updateItem(store, key, {
+        status: params.status as never,
+        blocker: params.blocker as never,
+        title: params.title as string | undefined,
+        scope: params.scope as string | undefined,
+        cwd: params.cwd as string | null | undefined,
+        evidence: params.evidence as string | undefined,
+        value: params.value as string | undefined,
+        urgency: params.urgency as string | undefined,
+        risk: params.risk as string | undefined,
+        // Explicit param wins; absent param leaves the recorded budget alone.
+        ...(params.timeoutMs !== undefined ? { timeoutMs: normalizeTimeoutMs(params.timeoutMs) } : {}),
+        notes: params.notes as string | undefined,
+      });
+      return { kind: "updated" as const, renamedTo: renamingProvisional ? renameProvisionalKey(ctx.stateDir, store, key) : null };
+    });
+    if (outcome.kind === "missing") return { text: `queue_update: no item '${key}'`, details: {} };
+    if (outcome.kind === "unready") {
       return { text: "queue_update: approval requires a complete scope + cwd (the scope is the worker prompt; cwd is the repo it runs in) — blocked items are for waiting, not dispatchable work", details: {} };
     }
-    // An approval may complete a PROVISIONAL key: run the shared rename AFTER
-    // the mutation (resolveSeries excludes the item's own vote, so the rename
-    // cannot resolve to its own provisional Q).
-    const renamingProvisional = cur.provisionalKey === true && nextStatus === "approved" && !!nextCwd;
-    updateItem(store, params.key as string, {
-      status: params.status as never,
-      blocker: params.blocker as never,
-      title: params.title as string | undefined,
-      scope: params.scope as string | undefined,
-      cwd: params.cwd as string | null | undefined,
-      evidence: params.evidence as string | undefined,
-      value: params.value as string | undefined,
-      urgency: params.urgency as string | undefined,
-      risk: params.risk as string | undefined,
-      // Explicit param wins; absent param leaves the recorded budget alone.
-      ...(params.timeoutMs !== undefined ? { timeoutMs: normalizeTimeoutMs(params.timeoutMs) } : {}),
-      notes: params.notes as string | undefined,
-    });
-    saveStore(ctx.stateDir, store);
-    if (renamingProvisional) {
-      const renamedTo = renameProvisionalKey(ctx.stateDir, store, params.key as string);
-      saveStore(ctx.stateDir, store); // marker clear AND/OR the rename
-      if (renamedTo) {
-        const series = /^([A-Za-z0-9_-]+?)-\d+/.exec(renamedTo)?.[1] ?? renamedTo;
-        return { text: `updated '${params.key}' → approved; provisional key renamed to '${renamedTo}' (series ${series})`, details: { renamedFrom: params.key, key: renamedTo } };
-      }
+    if (outcome.renamedTo) {
+      const series = /^([A-Za-z0-9_-]+?)-\d+/.exec(outcome.renamedTo)?.[1] ?? outcome.renamedTo;
+      return { text: `updated '${key}' → approved; provisional key renamed to '${outcome.renamedTo}' (series ${series})`, details: { renamedFrom: key, key: outcome.renamedTo } };
     }
-    return { text: `updated '${params.key}'`, details: {} };
+    return { text: `updated '${key}'`, details: {} };
   } catch (e) {
     return err(e, "queue_update");
   }
@@ -266,8 +284,12 @@ export async function queueDispatch(ctx: QueueOpsCtx, params: Record<string, unk
     const timeoutMs = requestedTimeout ?? item.timeoutMs ?? undefined;
     const runId = await ctx.backend.spawn(params.task as string, { cwd, timeoutMs });
     if (!runId) return { text: "queue_dispatch: spawned but no run id returned", details: {} };
-    updateItem(store, key, { status: "active", runId, ...(requestedTimeout ? { timeoutMs: requestedTimeout } : {}) });
-    saveStore(ctx.stateDir, store);
+    // The spawn happens OUTSIDE the mutation (mutateStore may re-run its apply
+    // on a conflict; a spawn must happen exactly once). The store change that
+    // records the run goes through the safe path.
+    mutateStore(ctx.stateDir, (s) => {
+      if (s.items[key]) updateItem(s, key, { status: "active", runId, ...(requestedTimeout ? { timeoutMs: requestedTimeout } : {}) });
+    });
     try {
       // Worktree handoff preservation starts AT DISPATCH: journal + keep-ref
       // the parallel branch from its first commit onward (sweeps continue it).
@@ -312,8 +334,10 @@ export async function queueReview(ctx: QueueOpsCtx, params: Record<string, unkno
         return { text: `queue_review: a reviewer is ALREADY running for '${key}' (run ${item.reviewerRunId.slice(0, 8)}…) — steer it or wait for its completion`, details: {} };
       }
       clearedStaleReviewerRunId = item.reviewerRunId;
-      updateItem(store, key, { reviewerRunId: null });
-      saveStore(ctx.stateDir, store); // de-stale durably, even if the spawn below fails
+      // de-stale durably, even if the spawn below fails
+      mutateStore(ctx.stateDir, (s) => {
+        if (s.items[key]) updateItem(s, key, { reviewerRunId: null });
+      });
     }
     const task = (params.task as string | undefined)?.trim()
       ? (params.task as string)
@@ -327,8 +351,9 @@ export async function queueReview(ctx: QueueOpsCtx, params: Record<string, unkno
       timeoutMs: normalizeTimeoutMs(params.timeoutMs) ?? item.timeoutMs ?? undefined,
     });
     if (!runId) return { text: "queue_review: spawned but no run id returned", details: {} };
-    updateItem(store, key, { reviewerRunId: runId });
-    saveStore(ctx.stateDir, store);
+    mutateStore(ctx.stateDir, (s) => {
+      if (s.items[key]) updateItem(s, key, { reviewerRunId: runId });
+    });
     ctx.emit([{ name: "orch:reviewer-dispatched", data: { key, reviewerRunId: runId } }]);
     const staleNote = clearedStaleReviewerRunId
       ? ` (cleared a STALE reviewer ref ${clearedStaleReviewerRunId.slice(0, 8)}… — that run is gone/terminal)`

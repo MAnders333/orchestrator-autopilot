@@ -52,6 +52,49 @@ item there, the harness auto-flags it for you, and your
 `done` is NOT a dead end: if you later find issues, re-open via `done → approved`
 (attempts reset — a fresh agent review loop starts with your findings).
 
+## Writing the store — one safe mutation path (`mutateStore`)
+
+Every change to `queue.json` goes through `mutateStore(stateDir, apply)`, which
+owns load → apply → write. `saveStore` alone is NOT safe: it is atomic per write
+(tmp + rename, so a reader never sees a torn file), but a bare
+`loadStore → mutate → saveStore` pair has an unguarded read-modify-write window
+— a writer that loaded before another's rename erases it, whole-file. That cost
+a fully-specified proposal (with an "added" receipt) and handed the same key out
+twice, because `nextKeyFor` computes max+1 from the store it can see.
+
+The writers live in different PROCESSES (the pi host, the opencode host, the
+tools) and several fire from harness timers, so the guard is cross-process:
+
+- an advisory **lock file** (`queue.json.lock`) around the window, stamped with
+  the holder's write identity and published atomically (a private tmp file is
+  `link()`ed into place, so a contender never reads a half-created lock and
+  mistakes it for an abandoned one). A stale/abandoned/dead-pid lock is BROKEN
+  OPEN, never waited on forever: a wedged sweep would be worse than the bug —
+  and an *unreadable* lock only counts as abandoned after a short grace, since
+  unparsable content is not proof that anybody left;
+- an **identified compare-and-swap** as the correctness floor. Every write
+  carries a unique nonce (`<pid>@<host>:<random>`) which the store records in
+  `revBy` next to `rev`. The mutation refuses to write over a revision newer
+  than the one it read, and counts its write as landed only when the re-read
+  shows **its own nonce** at `rev + 1` *and* the lock is still its own.
+  Identity is load-bearing: `rev` alone is not identifying, so two writers that
+  both read revision N both stamp N+1, both see the number they expected, and
+  both report success while one write is silently gone. Bounded retries;
+  exhaustion THROWS. (`rev` backfills to 0 and `revBy` to null on read, so
+  pre-`rev` stores just work.)
+
+That identity is exactly what makes a broken-open lock safe: the writer whose
+window was stolen finds the lock is no longer its own, counts a conflict, and
+re-applies against the fresh store instead of handing back a receipt for a write
+that did not survive.
+
+Consequences for callers: `apply` may be re-run, so it must be a pure function
+of the store it is handed — spawns, git, and other side effects happen before or
+after the call, never inside it. Passes that span `await`s (auto-dispatch,
+auto-recovery, shipping) stage their patches and merge them onto the current
+store at the end. And no tool reports success for a write that did not survive:
+`queue_add` re-reads the persisted store before it says `added`.
+
 ## The reviewer run ref (`reviewerRunId`) — record it or lose the verdict
 
 `reviewerRunId` is how a reviewer completion is ATTRIBUTED back to its item: the

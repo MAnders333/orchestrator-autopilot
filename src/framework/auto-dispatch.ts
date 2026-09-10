@@ -21,7 +21,7 @@
 // The orchestrator keeps all JUDGMENT (intake scanning, approval, high-risk
 // checkpoints); these automations remove the mechanical round-trips.
 
-import { loadStore, saveStore, updateItem, type QueueItem } from "../queue-store.ts";
+import { loadStore, mutateStore, updateItem, type QueueItem } from "../queue-store.ts";
 import type { SubagentBackend } from "../backends/types.ts";
 import { preserveRunWorktree } from "./worktree-preservation.ts";
 import { isProviderDegraded, recordProviderFailure, recordProviderSuccess } from "./recovery-state.ts";
@@ -112,7 +112,12 @@ export async function autoDispatchEligible(
         break;
       }
       recordProviderSuccess(stateDir);
-      updateItem(store, item.key, { status: "active", runId });
+      // Recorded per dispatch, through the safe path: the batch used to hold one
+      // in-memory snapshot across every spawn and write it whole at the end,
+      // erasing anything a tool or another lane wrote during those awaits.
+      mutateStore(stateDir, (s) => {
+        if (s.items[item.key]) updateItem(s, item.key, { status: "active", runId });
+      });
       dispatched.push({ key: item.key, runId });
       try {
         preserveRunWorktree({ stateDir, repo: item.cwd!, runId, key: item.key });
@@ -126,7 +131,6 @@ export async function autoDispatchEligible(
       break; // a spawn failure stops the batch — the orchestrator handles it
     }
   }
-  if (dispatched.length > 0) saveStore(stateDir, store);
   return dispatched;
 }
 
@@ -148,8 +152,9 @@ export async function autoRedispatch(
   try {
     const runId = await backend.spawn(workerTask(item, findings), { cwd: item.cwd, timeoutMs: item.timeoutMs ?? undefined });
     if (!runId) return false;
-    updateItem(store!, key, { runId });
-    saveStore(stateDir, store!);
+    mutateStore(stateDir, (s) => {
+      if (s.items[key]) updateItem(s, key, { runId });
+    });
     try {
       preserveRunWorktree({ stateDir, repo: item.cwd, runId, key });
     } catch {
@@ -210,8 +215,9 @@ export async function autoReview(
       timeoutMs: item.timeoutMs ?? undefined, // the SAME fields the dispatch used — budget included
     });
     if (!runId) return null;
-    updateItem(store!, key, { reviewerRunId: runId });
-    saveStore(stateDir, store!);
+    mutateStore(stateDir, (s) => {
+      if (s.items[key]) updateItem(s, key, { reviewerRunId: runId });
+    });
     return runId;
   } catch {
     return null; // the review tick nudges the orchestrator

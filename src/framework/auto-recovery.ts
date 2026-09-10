@@ -26,7 +26,7 @@
 // human-review. Recovery NEVER short-circuits the approval gate and NEVER
 // touches main — shipping stays the post-`done` merge-finisher lane.
 
-import { loadStore, saveStore, updateItem, isFailCause, type QueueItem, type FailCause } from "../queue-store.ts";
+import { loadStore, mutateStore, updateItem, isFailCause, type QueueItem, type FailCause, type UpdatePatch } from "../queue-store.ts";
 import type { SubagentBackend } from "../backends/types.ts";
 import { workerTask } from "./auto-dispatch.ts";
 import { preserveRunWorktree } from "./worktree-preservation.ts";
@@ -171,6 +171,18 @@ export async function autoRecoverFails(
     outcome.nextAt = outcome.nextAt === null ? t : Math.min(outcome.nextAt, t);
   };
 
+  // The pass spans backend.spawn awaits, so it cannot hold the store's mutation
+  // window open: it decides against its own snapshot and STAGES each patch, then
+  // MERGES them onto the current store in one mutateStore at the end. A patch is
+  // a function of the item it lands on (notes append from the FRESH notes), so a
+  // change another writer made meanwhile survives instead of being overwritten.
+  const staged: Array<{ key: string; patch: (item: QueueItem) => UpdatePatch }> = [];
+  const stage = (key: string, patch: (item: QueueItem) => UpdatePatch): void => {
+    const local = store.items[key];
+    if (local) updateItem(store, key, patch(local)); // keep the local view honest for the rest of the pass
+    staged.push({ key, patch });
+  };
+
   // Phase 1 — escalate exhausted items. This does NOT spawn, so it runs even
   // while the degraded window pauses attempts: an item that already spent its
   // budget must still be surfaced once.
@@ -181,13 +193,13 @@ export async function autoRecoverFails(
     const attempts = item.recoveries ?? 0;
     const plan = recoveryPlan(item, cause, globalMax);
     if (attempts >= plan.maxAttempts) {
-      updateItem(store, item.key, {
+      stage(item.key, (fresh) => ({
         recoveryEscalated: true,
         notes: appendNote(
-          item.notes,
+          fresh.notes,
           `[recover-exhausted] ${new Date(now).toISOString()} — auto-recovery spent ${attempts} attempt(s) (cause: ${cause}); the item STAYS failed. Needs your call: verify the pi-parallel-* branch, re-dispatch manually with a bigger budget, or drop.`,
         ),
-      });
+      }));
       outcome.escalated.push({ key: item.key, cause, attempts });
       changed = true;
     }
@@ -213,7 +225,7 @@ export async function autoRecoverFails(
           state.providerFailures += 1;
           state.lastProviderFailureAt = now;
         }
-        updateItem(store, item.key, { recoveryNotBefore: now + backoffMs });
+        stage(item.key, () => ({ recoveryNotBefore: now + backoffMs }));
         later(now + backoffMs);
         changed = true;
         continue;
@@ -236,17 +248,17 @@ export async function autoRecoverFails(
         runId = null;
       }
       if (runId) {
-        updateItem(store, item.key, {
+        stage(item.key, (fresh) => ({
           status: "active",
           runId,
           recoveries: attempt,
           recoveryNotBefore: null,
           ...(plan.budgetMs !== null ? { timeoutMs: plan.budgetMs } : {}),
           notes: appendNote(
-            item.notes,
+            fresh.notes,
             `[recover] ${new Date(now).toISOString()} — auto-recovery re-dispatched (attempt ${attempt}, cause: ${cause}${plan.budgetMs ? `, budget ${plan.budgetMs}ms` : ""}); prior run ${item.runId ?? "?"} — verify its pi-parallel-* branch.`,
           ),
-        });
+        }));
         try {
           if (item.cwd) preserveRunWorktree({ stateDir, repo: item.cwd, runId, key: item.key });
         } catch {
@@ -263,15 +275,15 @@ export async function autoRecoverFails(
         // the degraded-window hold.
         state.providerFailures += 1;
         state.lastProviderFailureAt = now;
-        updateItem(store, item.key, {
+        stage(item.key, (fresh) => ({
           failCause: "spawn",
           recoveries: attempt,
           recoveryNotBefore: now + backoffMs,
           notes: appendNote(
-            item.notes,
+            fresh.notes,
             `[recover] ${new Date(now).toISOString()} — auto-recovery attempt ${attempt} could not spawn (provider/infra failure); retrying after backoff.`,
           ),
-        });
+        }));
         later(now + backoffMs);
       }
       changed = true;
@@ -288,6 +300,21 @@ export async function autoRecoverFails(
   outcome.spawnFailures = state.providerFailures;
   state.updatedAt = new Date(now).toISOString();
   saveRecoveryState(stateDir, state);
-  if (changed) saveStore(stateDir, store);
+  if (changed && staged.length) {
+    mutateStore(stateDir, (s) => {
+      for (const { key, patch } of staged) {
+        const fresh = s.items[key];
+        if (!fresh) continue; // the item is gone (rejected/renamed) — nothing to recover
+        try {
+          updateItem(s, key, patch(fresh));
+        } catch {
+          // The item MOVED under us (a human/tool transition this pass could not
+          // see), so the staged transition is no longer legal. That is a real
+          // conflict resolved in favour of the newer state, not a lost update:
+          // the next pass re-decides from the item's actual status.
+        }
+      }
+    });
+  }
   return outcome;
 }

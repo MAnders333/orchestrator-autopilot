@@ -19,7 +19,7 @@
 // without that path.
 // -------------------------------------------------------------------------
 
-import { loadStoreOrNew, saveStore, updateItem, resolveSeries, type QueueItem } from "../queue-store.ts";
+import { loadStoreOrNew, mutateStore, updateItem, resolveSeries, type QueueItem } from "../queue-store.ts";
 import { approvalReady, renameProvisionalKey } from "../tools/queue-ops.ts";
 import { humanReviewTargetsFor } from "./worktree-preservation.ts";
 import { loadAutopilotConfig, staleProvisionalProposals, underSpecifiedProposals } from "../config.ts";
@@ -312,6 +312,18 @@ function result(text: string, event?: HumanDecisionEvent): PanelDecisionResult {
  *  re-dispatch records the human's findings (no transition — the harness
  *  moves the item and spawns the redo, exactly like the review-FAIL path). */
 export function applyPanelDecision(stateDir: string, key: string, action: PanelActionId, payload?: { scope?: string; cwd?: string; findings?: string; blocker?: string }): PanelDecisionResult {
+  try {
+    return applyPanelDecisionOrThrow(stateDir, key, action, payload);
+  } catch (e) {
+    // The decision is validated against the CURRENT store inside mutateStore, so
+    // an item another writer moved/renamed between this panel's read and its
+    // write is REFUSED there. Report that as a failed decision — a panel
+    // keypress must never throw into the host's TUI handler.
+    return { ok: false, text: `panel: '${key}' could not be applied — ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+function applyPanelDecisionOrThrow(stateDir: string, key: string, action: PanelActionId, payload?: { scope?: string; cwd?: string; findings?: string; blocker?: string }): PanelDecisionResult {
   const store = loadStoreOrNew(stateDir);
   const item: QueueItem | undefined = store.items[key];
   if (!item) return { ok: false, text: `panel: no item '${key}'` };
@@ -329,12 +341,14 @@ export function applyPanelDecision(stateDir: string, key: string, action: PanelA
         if (!approvalReady(item.scope, item.cwd)) {
           return { ok: false, text: `panel: ${key} is not fully specified (scope + cwd) — refine it first` };
         }
-        updateItem(store, key, { status: "approved" });
         // A provisional Q-<n> handle gets its REAL series here — the same
         // rename queue_update performs at approval, so the panel and the tool
         // cannot drift. The key stays Q-<n> (identity) until this moment.
-        const renamedTo = renameProvisionalKey(stateDir, store, key);
-        saveStore(stateDir, store);
+        // Both steps are ONE mutateStore mutation (load → apply → write).
+        const renamedTo = mutateStore(stateDir, (s) => {
+          updateItem(s, key, { status: "approved" });
+          return renameProvisionalKey(stateDir, s, key);
+        });
         if (renamedTo) {
           const text = `approved '${key}' → renamed to '${renamedTo}' (provisional handle → real series)`;
           return result(text, { name: "orch:human-decision", data: { ...base, key: renamedTo, renamedFrom: key, to: "approved", note: "dispatchable" } });
@@ -342,8 +356,7 @@ export function applyPanelDecision(stateDir: string, key: string, action: PanelA
         return result(`approved '${key}' (proposal → approved, dispatchable)`, { name: "orch:human-decision", data: { ...base, to: "approved", note: "dispatchable" } });
       }
       if (item.status === "human-review") {
-        updateItem(store, key, { status: "done" });
-        saveStore(stateDir, store);
+        mutateStore(stateDir, (s) => updateItem(s, key, { status: "done" }));
         return result(`approved '${key}' (human-review → done)`, { name: "orch:human-decision", data: { ...base, to: "done" } });
       }
       return { ok: false, text: `panel: '${key}' is ${item.status} — approve is only for proposal / human-review items` };
@@ -352,16 +365,14 @@ export function applyPanelDecision(stateDir: string, key: string, action: PanelA
     case "reject": {
       const to = item.status === "proposal" ? "rejected" : item.status === "human-review" ? "rejected" : null;
       if (!to) return { ok: false, text: `panel: '${key}' is ${item.status} — reject is only for proposal / human-review items` };
-      updateItem(store, key, { status: to as never });
-      saveStore(stateDir, store);
+      mutateStore(stateDir, (s) => updateItem(s, key, { status: to as never }));
       return result(`rejected '${key}'`, { name: "orch:human-decision", data: { ...base, to } });
     }
 
     case "defer": {
       if (item.status !== "proposal") return { ok: false, text: `panel: '${key}' is ${item.status} — only proposals can be deferred` };
       const blocker = payload?.blocker && (["parked", "serialized", "merge", "decision"] as const).includes(payload.blocker as never) ? payload.blocker : "decision";
-      updateItem(store, key, { status: "blocked", blocker: blocker as never });
-      saveStore(stateDir, store);
+      mutateStore(stateDir, (s) => updateItem(s, key, { status: "blocked", blocker: blocker as never }));
       return result(`deferred '${key}' (blocked: ${blocker})`, { name: "orch:human-decision", data: { ...base, to: "blocked", note: blocker } });
     }
 
@@ -373,8 +384,7 @@ export function applyPanelDecision(stateDir: string, key: string, action: PanelA
       const patch: { scope?: string; cwd?: string } = {};
       if (scope) patch.scope = scope;
       if (cwd) patch.cwd = cwd;
-      updateItem(store, key, patch);
-      saveStore(stateDir, store);
+      mutateStore(stateDir, (s) => updateItem(s, key, patch));
       const changed = [scope ? "scope" : null, cwd ? "repo (cwd)" : null].filter(Boolean).join(" + ");
       return result(`refined '${key}' ${changed}`, { name: "orch:human-decision", data: { ...base, to: "proposal" } });
     }
@@ -387,9 +397,10 @@ export function applyPanelDecision(stateDir: string, key: string, action: PanelA
       // harness moves human-review → active and spawns the redo with these
       // findings (the same path a review FAIL takes) — the human's words must
       // be IN the re-dispatch task, and nothing is auto-sent without that path.
-      const note = item.notes ? `${item.notes}\n\n[human re-dispatch findings] ${findings}` : `[human re-dispatch findings] ${findings}`;
-      updateItem(store, key, { notes: note });
-      saveStore(stateDir, store);
+      mutateStore(stateDir, (s) => {
+        const fresh = s.items[key] ?? item; // append to the CURRENT notes, not the snapshot's
+        updateItem(s, key, { notes: fresh.notes ? `${fresh.notes}\n\n[human re-dispatch findings] ${findings}` : `[human re-dispatch findings] ${findings}` });
+      });
       return result(`recorded re-dispatch findings for '${key}' — the harness will re-dispatch with them`, { name: "orch:human-decision", data: { ...base, to: item.status, findings } });
     }
 
