@@ -534,6 +534,90 @@ export class Autopilot {
   }
 
   /**
+   * Dead-run reconciliation — the PER-RUN half of the safety net (AUTOPILOT-47).
+   *
+   * WHY zombieReconcile ALONE COULD NEVER CATCH THIS: it is gated on the fleet
+   * being AUTHORITATIVELY IDLE (`fleetTotalActive === 0`). That gate exists for
+   * a good reason — without a per-run signal, "nothing is running anywhere" was
+   * the only evidence strong enough to condemn an item. But it makes the net
+   * IMPOSSIBLE TO FIRE on a busy queue: one live worker anywhere keeps the count
+   * above zero and every dead run in the store is immune. Observed live: three
+   * runs sat dead-but-`active`/`ai-review` for 117, 287 and more minutes while
+   * other workers ran, and every item gated behind them waited on a corpse.
+   *
+   * The per-run evidence is stronger than the fleet count anyway: the run's OWN
+   * status.json says `state:"failed"`. This sweep uses exactly that and nothing
+   * weaker — see `runStateEvidence` for why `terminal` and `undeterminable` must
+   * stay distinct, and why the fail-open direction here is the OPPOSITE of the
+   * reviewer lane's. `undeterminable` NEVER flips: no backend, a missing run
+   * dir, an unreadable status.json, or an unrecognised phase all leave the item
+   * exactly where it is. Only a status file that parsed and named a terminal
+   * phase condemns a run.
+   *
+   * The grace window is the SAME `zombieGraceMinutes` the fleet-idle net uses,
+   * for the same reason: the active→ai-review flip is event-driven, so an item
+   * whose run just ended is legitimately `active` for a moment. Only an item
+   * still `active` a full grace window after its last update has provably lost
+   * its completion event.
+   */
+  deadRunReconcile(
+    runEvidence: (runId: string) => { kind: "in-flight" | "terminal" | "undeterminable"; phase?: string; error?: string },
+    now = this.now(),
+  ): { flippedKeys: string[] } {
+    const graceMs = this.cfg.zombieGraceMinutes * 60_000;
+    if (graceMs <= 0) return { flippedKeys: [] }; // 0 disables the sweep, as for zombieReconcile
+    if (!loadStore(this.cfg.stateDir)) return { flippedKeys: [] };
+    // Evidence is gathered OUTSIDE the mutation (it touches the filesystem and
+    // mutateStore may re-run its apply on a conflict); the apply below stays a
+    // pure function of the store plus this snapshot.
+    const store = loadStore(this.cfg.stateDir);
+    if (!store) return { flippedKeys: [] };
+    const condemned = new Map<string, { runId: string; phase: string; error: string | null; idleMs: number }>();
+    for (const it of Object.values(store.items)) {
+      if (it.status !== "active" || !it.runId) continue;
+      const updatedAt = Date.parse(it.updatedAt);
+      const idleMs = now - updatedAt;
+      if (!Number.isFinite(updatedAt) || idleMs < graceMs) continue;
+      let ev: { kind: string; phase?: string; error?: string };
+      try {
+        ev = runEvidence(it.runId);
+      } catch {
+        continue; // the evidence lookup itself failed — undeterminable, never death
+      }
+      if (ev.kind !== "terminal") continue; // in-flight OR undeterminable → leave it alone
+      condemned.set(it.key, { runId: it.runId, phase: ev.phase ?? "terminal", error: ev.error ?? null, idleMs });
+    }
+    if (condemned.size === 0) return { flippedKeys: [] };
+    const flipped = mutateStore(this.cfg.stateDir, (s) => {
+      const keys: Array<{ key: string; runId: string }> = [];
+      for (const [key, c] of condemned) {
+        const it = s.items[key];
+        // Re-check under the mutation: the completion event may have landed
+        // between the snapshot and the write, and the run id must still match.
+        if (!it || it.status !== "active" || it.runId !== c.runId) continue;
+        const evidence =
+          `dead-run reconciliation ${new Date(now).toISOString()} — run ${c.runId} reports state '${c.phase}' in its own status.json ` +
+          `while this item sat active ~${Math.round(c.idleMs / 60_000)}m past update: the completion event was lost.` +
+          (c.error ? ` Run error: ${c.error}` : "") +
+          ` Partial work may exist on pi-parallel-* branches — verify before re-dispatch.` +
+          // AUTOPILOT-47 C: UNCOMMITTED work survives only in the run's worktree
+          // directory; naming it here is the difference between a mechanical
+          // salvage and matching run ids to pi-worktree-* paths by hand.
+          (it.runWorktree?.path ? ` Uncommitted work (if any) is in the run's worktree: ${it.runWorktree.path}` : "");
+        updateItem(s, key, {
+          status: "failed",
+          failCause: deadRunFailCause(c.error),
+          notes: it.notes ? `${it.notes}\n\n${evidence}` : evidence,
+        });
+        keys.push({ key, runId: c.runId });
+      }
+      return keys;
+    });
+    for (const f of flipped) this.logEvent("flip", { key: f.key, runId: f.runId, outcome: "failed", source: "dead-run" });
+    return { flippedKeys: flipped.map((f) => f.key) };
+  }
+
+  /**
    * Review tick — the deterministic trigger for the orchestrator's judgment
    * step: when items are stuck in `reviewing`, the orchestrator has no other
    * way to know a reviewer finished. Fired on reviewer completion and by the
@@ -875,6 +959,15 @@ function emptyState(): QueueState {
 
 function empty(): AutopilotResult {
   return { tick: null, domainEvents: [], flipped: false, freedSlot: false, reviewerCompleted: false };
+}
+
+/** Classify a run condemned by deadRunReconcile from its status.json `error`.
+ *  The runtime spells a budget kill "Subagent timed out after <n>ms" — routing
+ *  that to `budget-capped` (not `zombie`) is what makes auto-recovery re-dispatch
+ *  it as a CAP instead of a verdict. Anything else is a lost completion event,
+ *  which is exactly what `zombie` means. */
+function deadRunFailCause(error: string | null): FailCause {
+  return error && /timed out after \d+\s*ms/i.test(error) ? "budget-capped" : "zombie";
 }
 
 /** Classify a FAILED worker run: a budget CAP cut it off (runtime reported

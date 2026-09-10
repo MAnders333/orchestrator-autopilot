@@ -2,7 +2,7 @@
 // trigger routing + gate + cooldown that BOTH hosts use (pi extension +
 // opencode plugin). Host-agnostic — mock backend, real Autopilot + store.
 import { describe, test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Autopilot } from "../../src/core.ts";
@@ -307,6 +307,43 @@ describe("framework runner (shared tick machinery)", () => {
     expect(decision).toContain("Z1 failed: active → failed (zombie)");
     // the consolidated harness line (verify-branch guidance) still rides along
     expect(f.delivered.some((m) => m.includes("[orch-tick: harness]") && m.includes("zombie reconciliation flipped Z1"))).toBe(true);
+  });
+
+  // AUTOPILOT-47: the incident the fleet-gated zombie net could never catch —
+  // a BUSY fleet keeps zombieReconcile silent forever, so a dead run's item sat
+  // active for hours. The per-run net reads the run's own status.json instead.
+  test("dead-run flips fire while the fleet is BUSY, from the run's own terminal status.json", async () => {
+    const f = setup();
+    const runsRoot = mkdtempSync(join(tmpdir(), "orch-runner-deadrun-"));
+    mkdirSync(join(runsRoot, "deadrun"), { recursive: true });
+    writeFileSync(
+      join(runsRoot, "deadrun", "status.json"),
+      JSON.stringify({ state: "failed", error: "Subagent timed out after 1800000ms." }),
+    );
+    seed(f, "D1", { status: "active", runId: "deadrun" });
+    const st = load(f);
+    st.items["D1"].updatedAt = new Date(Date.now() - 117 * 60_000).toISOString(); // the observed 117m staleness
+    save(f, st);
+    f.runner = createFrameworkRunner({
+      stateDir: f.dir,
+      autopilot: f.autopilot,
+      backend: {
+        ...backend,
+        fleetStatus: async () => ({ totalActive: 2 }), // BUSY — the old net is mute here
+        asyncDirFor: (id: string) => (id === "deadrun" ? join(runsRoot, id) : null),
+      },
+      host: { interactive: () => f.interactive, loaded: () => f.loaded, busy: () => f.busy, compacting: () => f.compacting },
+      deliver: (m) => f.delivered.push(m),
+      enabled: () => f.enabled,
+      sweepIntervalMs: 0,
+    });
+    f.runner.onTimer();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(load(f).items["D1"].status).toBe("failed");
+    expect(load(f).items["D1"].failCause).toBe("budget-capped"); // the runtime's own timeout message routes it as a CAP
+    expect(f.delivered.some((m) => m.includes("[orch-tick: harness]") && m.includes("dead-run reconciliation flipped D1"))).toBe(true);
+    expect(f.delivered.some((m) => m.includes("[orch-tick: decision]") && m.includes("D1 failed: active → failed (dead-run)"))).toBe(true);
+    rmSync(runsRoot, { recursive: true, force: true });
   });
 });
 

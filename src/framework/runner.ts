@@ -21,9 +21,10 @@ import { createTickRouter, type TickHostState } from "./tick-router.ts";
 import { autoDispatchEligible, autoRedispatch, autoReview } from "./auto-dispatch.ts";
 import { autoRecoverFails } from "./auto-recovery.ts";
 import { decisionTick } from "./panels.ts";
-import { humanReviewTargetsFor, preserveActiveItems, prunePreservedRefs, preserveRunWorktree } from "./worktree-preservation.ts";
+import { humanReviewTargetsFor, preserveActiveItems, prunePreservedRefs, preserveRunWorktree, recordActiveWorktrees } from "./worktree-preservation.ts";
 import { checkMainWrites } from "./main-write-guard.ts";
 import { runShippingPass } from "./shipping.ts";
+import { runStateEvidence } from "./run-liveness.ts";
 
 export interface RunnerOptions {
   stateDir: string;
@@ -344,6 +345,10 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     // commits late still gets captured at the next state change. Best-effort.
     try {
       preserveActiveItems(opts.stateDir);
+      // AUTOPILOT-47 C: and record WHERE each active run's worktree is, so a
+      // reaped run's UNCOMMITTED changes are found by reading the item instead
+      // of matching run ids to pi-worktree-* directories by hand.
+      recordActiveWorktrees(opts.stateDir);
     } catch {
       // preservation must never break the sweep
     }
@@ -483,6 +488,27 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       // flipped and checks pi-parallel-* branches before re-dispatching. The
       // preservation capture above already ran, so even a timed-out worker's
       // last commits were journalled while its branch still existed.
+      try {
+        // DEAD-RUN reconciliation runs FIRST and is NOT fleet-gated (AUTOPILOT-47).
+        // zombieReconcile below needs an authoritatively IDLE fleet, which a busy
+        // queue never has — one live worker made every dead run in the store
+        // immune (observed: 117m and 287m stale items while other workers ran).
+        // This pass condemns a run on its OWN status.json saying a terminal
+        // phase, and on nothing weaker: an unreadable/absent/unknown status is
+        // absence of evidence and is left alone (see run-liveness.ts).
+        const dead = autopilot.deadRunReconcile((runId) => runStateEvidence(opts.backend, runId));
+        if (dead.flippedKeys.length) {
+          harnessTick([`dead-run reconciliation flipped ${dead.flippedKeys.join(", ")} to failed (the run's own status.json reports a terminal state — its completion event was lost; verify partial work on pi-parallel-* branches before re-dispatch)`], fleet?.totalActive);
+          for (const key of dead.flippedKeys) {
+            const decision = decisionTick({ key, action: "failed", from: "active", to: "failed", note: "dead-run" });
+            if (!decision) continue;
+            const sendResult = router.send(decision, { bypassCooldown: true });
+            if (sendResult === "deferred") queueDeferred(decision, "tick");
+          }
+        }
+      } catch {
+        // never let the safety net break the sweep
+      }
       try {
         const zombies = autopilot.zombieReconcile(fleet?.totalActive); // the corrected count (RPC + async-inventory union) — only a genuine 0 may trigger the net
         if (zombies.flippedKeys.length) {

@@ -191,6 +191,16 @@ export interface QueueItem {
    *  and auto-recovery refuses to re-dispatch an item that carries it (a
    *  re-run would duplicate a merge that already landed). */
   landedEvidence?: LandedEvidence | null;
+  /** WHERE the current run's managed worktree lives on disk (AUTOPILOT-47 C).
+   *  The runtime creates `pi-parallel-<runId>-*` in a worktree it later deletes;
+   *  when a run is reaped, UNCOMMITTED changes survive in that directory but
+   *  nothing recorded which directory it was, so salvage meant matching run ids
+   *  to `pi-worktree-*` paths by hand. Resolved from `git worktree list` during
+   *  the preservation pass (the path does not exist yet at dispatch) and left in
+   *  place after the run ends — a stale path is the post-mortem's starting
+   *  point, not a lie about a live run (`runId` says which run it belonged to).
+   *  Absent = never resolved (no matching worktree, or a non-worktree run). */
+  runWorktree?: { runId: string; path: string; branch: string } | null;
   /** Recorded overrides of run-level failure verdicts (append-only). */
   overrides?: FailureOverride[];
   /** free-form notes/description — no schema constraints on content */
@@ -840,6 +850,8 @@ export interface UpdatePatch {
   recoveries?: number;
   recoveryNotBefore?: number | null;
   recoveryEscalated?: boolean;
+  /** WHERE the current run's managed worktree lives (AUTOPILOT-47 C). */
+  runWorktree?: { runId: string; path: string; branch: string } | null;
   title?: string;
   scope?: string;
   cwd?: string | null;

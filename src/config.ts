@@ -36,6 +36,12 @@ export interface AutopilotConfig {
   reviewerAgents?: string[];      // default ["orchestrator-reviewer"] (framework-owned, installed by the reviewer installer)
   reviewCap?: number;              // review-FAIL re-dispatch cap, default 5
   quietPeriodMs?: number;         // min gap between ticks, default 60_000
+  /** Minutes an `active` item may sit past its last update before the
+   *  reconciliation sweeps may condemn its run, default 30; 0 disables them.
+   *  Read by Autopilot (zombieReconcile / deadRunReconcile) and set from the
+   *  config file + AUTOPILOT_ZOMBIE_GRACE_MINUTES — it was always passed and
+   *  always read, but never declared here. */
+  zombieGraceMinutes?: number;
   log?: (line: string) => void;   // telemetry sink
   now?: () => number;             // injectable clock
 }
