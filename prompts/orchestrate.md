@@ -90,7 +90,10 @@ future opencode/claude adapters (same protocol, different transport). A tick is 
   affect other sessions sharing the same queue, and a resumed session keeps its
   setting. Capacity is configured via `autopilot.config.json` next to queue.json or
   `/autopilot capacity <n>` and MUST match the `(max N slots)` in the Active header (the
-  command keeps both in sync).
+  command keeps both in sync). A CHANGE to capacity (or to `workerAgents` / `shipping`)
+  announces itself ONCE as an `[orch-tick: config]` line naming old → new — until that
+  tick you may be holding a stale slot count, and after it you must re-read the fleet
+  (`queue_list`) before telling anyone work is gated.
 - **Scope:** ticks and the /orchestrate injection fire ONLY in the interactive TUI session.
   Subagent children (async runners, `--mode json -p`) NEVER receive the orchestrator
   command or ticks — they must stay headless task runners.
@@ -158,7 +161,7 @@ repo/workstream: read the **queue-id-series** skill.
 - `queue_list` — read path: filter by status and/or last-change timestamp (`since`), sort, compact view (heavy fields via `includeNotes`)
 - `queue_add` — new proposal/approved item
 - `queue_update` — status (validated transitions), `blocker`, notes — free-form
-- `queue_dispatch` — spawn worker (same executor as subagent; fresh context, worktree isolation) + record `approved→active` + runId — ONE call
+- `queue_dispatch` — spawn worker (same executor as subagent; fresh context, worktree isolation) + record `approved→active` + runId — ONE call. **CAPACITY BINDS THIS LANE**: it REFUSES at/above `maxSlots` (nothing spawned, the refusal names the occupancy) — over-subscribe deliberately with `overrideCapacity: true`, or raise the cap with `/autopilot capacity <n>`, or wait for a slot.
 - `queue_dispatch(..., dispatchClass: "finisher", finisherSource: "<branch/sha to land>")` — **dispatching a MERGE FINISHER**: it writes into the TARGET repo's checkout, not its worktree, so the runtime reports "no edits / planning output" even when the merge landed. Declaring the class + source lets the framework override that false failure against the recorded baseline (skill → dispatch contract). Evidence covers a merge/fast-forward or a clean cherry-pick/rebase/single-commit squash (patch-equivalent) ONLY — a conflict-resolved cherry-pick, a multi-commit squash, or an MR-only (`mrs`) landing yield none, and closing those is your explicit `queue_update(key, {overrideReason})` call; because those shapes are undetectable, auto-recovery NEVER re-dispatches a failed finisher — it holds it and escalates once, so re-running one is always your deliberate act.
 
 **Deterministic facts the extension knows (for ticks and /autopilot status):**

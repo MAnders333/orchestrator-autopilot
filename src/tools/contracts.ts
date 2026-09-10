@@ -22,6 +22,8 @@ export const CONTRACTS = {
     "Dispatch a queue item: spawns the worker (same executor as the subagent tool; fresh context, worktree isolation) AND records " +
     "approved→active with the run id — atomically. Call with the key of an approved item and the scoped worker prompt. " +
     "High-risk items: still surface the final checkpoint BEFORE calling this. Returns the run id. " +
+    "CAPACITY: this REFUSES when the fleet is at/above maxSlots (the same cap the harness honours) — nothing is spawned and the refusal names the occupancy. " +
+    "Override deliberately with overrideCapacity=true (the dispatch proceeds and is marked over-capacity), or raise the cap with /autopilot capacity <n>. " +
     "MERGE FINISHERS: pass dispatchClass='finisher' AND finisherSource=<branch/sha it must land> when the run writes into the cwd's CHECKOUT (cherry-pick/merge into main) instead of its own worktree — the dispatch records the cwd's HEAD plus that source as a baseline, and success is then judged on the source entering the cwd's history, so a runtime 'no edits in the worktree' failure verdict is overridden (and the override recorded) instead of re-dispatching a merge that already landed. Without finisherSource there is NO evidence and the runtime verdict stands.",
   queue_review:
     "Dispatch the reviewer for an `ai-review` item: spawns the reviewer subagent (read-only, no worktree) via the same executor, records the " +

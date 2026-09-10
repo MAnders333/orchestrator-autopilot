@@ -23,6 +23,7 @@ import { autoRecoverFails } from "./auto-recovery.ts";
 import { decisionTick } from "./panels.ts";
 import { humanReviewTargetsFor, preserveActiveItems, prunePreservedRefs, preserveRunWorktree, recordActiveWorktrees } from "./worktree-preservation.ts";
 import { checkMainWrites } from "./main-write-guard.ts";
+import { configChangeTick, detectConfigChanges, recordConfigSnapshot } from "./config-watch.ts";
 import { runShippingPass } from "./shipping.ts";
 import { runStateEvidence } from "./run-liveness.ts";
 
@@ -222,10 +223,14 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     if (r === "deferred") queueDeferred(t.message, "tick", t); // hold the ENGINE tick — its facts refresh at delivery
   };
   /** Framework-crafted one-line ticks (recovery announcements) through the
-   *  SAME gate: deferred → held for the settle flush; never lost. */
-  const sendTickText = (message: string): void => {
+   *  SAME gate: deferred → held for the settle flush; never lost. Returns the
+   *  router verdict so a caller with once-only state (the config watcher) can
+   *  tell "nobody was listening" (dropped) from "held for the settle"
+   *  (deferred) and re-announce instead of silently consuming the change. */
+  const sendTickText = (message: string): "delivered" | "dropped" | "deferred" => {
     const r = router.send(message, { bypassCooldown: true });
     if (r === "deferred") queueDeferred(message, "tick");
+    return r;
   };
 
   // The auto-actions opt-out: env (AUTOPILOT_AUTO_DISPATCH=0) or the option.
@@ -351,6 +356,26 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
       recordActiveWorktrees(opts.stateDir);
     } catch {
       // preservation must never break the sweep
+    }
+    // CONFIG CHANGE SIGNAL (KEY: AUTOPILOT-48) — a fleet-wide config edit
+    // (`/autopilot capacity 6` writes autopilot.config.json) used to reach the
+    // HUMAN's TUI only: the orchestrator kept dispatching against the cached
+    // cap and told the user work was gated after the cap had doubled. The
+    // change now rides the SAME [orch-tick] channel as queue decisions, ONCE
+    // per change (the surfaced values are snapshotted next to the harness
+    // state). A permanently dropped tick (no loaded orchestrator) is NOT
+    // recorded as surfaced — the next sweep re-announces it.
+    try {
+      const current = cfg();
+      const changes = detectConfigChanges(opts.stateDir, current);
+      const message = configChangeTick(changes);
+      if (!message) {
+        recordConfigSnapshot(opts.stateDir, current); // baseline / unchanged
+      } else if (sendTickText(message) !== "dropped") {
+        recordConfigSnapshot(opts.stateDir, current);
+      }
+    } catch {
+      // the config notice must never break the sweep
     }
     // MAIN-IMMUTABILITY GUARD (KEY: MAIN-IMMUTABILITY-GUARD) — the MECHANICAL
     // enforcement of "nothing merges to main before human approval" (the rule

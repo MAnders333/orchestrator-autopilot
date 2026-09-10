@@ -71,6 +71,23 @@ export function workerTask(item: QueueItem, findings?: string): string {
   return task;
 }
 
+/** Occupied slots as the MANUAL lane must count them (KEY: AUTOPILOT-48).
+ *  Same parity rule the runner applies before auto-dispatch
+ *  (`effectiveTotalActive`): the highest of the store's `active` items, the
+ *  engine's own ledger, and the backend's fleet count. The maximum is the
+ *  honest floor — an undercount (a status RPC lagging a just-started run, or
+ *  a fleet view this backend cannot provide at all) must never invent free
+ *  capacity. An UNKNOWN fleet (null/undefined) contributes nothing rather than
+ *  a fake 0, so the store/ledger still bind. */
+export function effectiveOccupiedSlots(
+  stateDir: string,
+  opts: { ledgerRunning?: number; fleetTotalActive?: number | null } = {},
+): number {
+  const store = loadStore(stateDir);
+  const active = store ? Object.values(store.items).filter((i) => i.status === "active").length : 0;
+  return Math.max(active, opts.ledgerRunning ?? 0, opts.fleetTotalActive ?? 0);
+}
+
 /** The number of free slots (fleet-aware; falls back to the store's active count). */
 function freeSlots(stateDir: string, backend: SubagentBackend, maxSlots: number, fleetTotalActive?: number): number {
   const store = loadStore(stateDir);
