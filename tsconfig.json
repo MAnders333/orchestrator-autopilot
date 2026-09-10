@@ -1,0 +1,35 @@
+{
+  // Type-check-only config for the bun runtime. `bun run typecheck` is the gate;
+  // nothing here ever emits. The settings describe how the code is ALREADY
+  // written (ESM, explicit .ts specifiers, bun globals) — the code is not
+  // reshaped to suit the compiler.
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["esnext"],
+
+    // Load-bearing for this repo: every internal import names the file with its
+    // .ts extension (`from "./core.ts"`), which is how bun resolves them.
+    // allowImportingTsExtensions requires noEmit, which is what we want anyway.
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+
+    // bun globals (Bun.*, bun:test, bun:sqlite) come from @types/bun.
+    "types": ["bun"],
+
+    "moduleDetection": "force",
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+
+    // We gate OUR sources, not our dependencies' shipped .d.ts files. Without
+    // this, third-party declarations (@opentui, solid-js) dominate the output
+    // and drown the errors this gate exists to surface.
+    "skipLibCheck": true,
+
+    "strict": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}
