@@ -123,6 +123,17 @@ skeleton. The tag is ADVISORY — it never blocks approval.
   worker stopped = failed) → `failed→done`
   ("verified-complete despite the failure record") — both transitions are
   legal, no `active→ai-review` detour needed.
+- **Dispatching a MERGE FINISHER: pass `dispatchClass: "finisher"`** (KEY:
+  AUTOPILOT-34). A finisher writes into the target repo's CHECKOUT, not its own
+  worktree, so a runtime that judges children by worktree edits reports it as
+  "no edits / planning output" even when the merge landed — and a false failure
+  is an auto-recovery re-dispatch candidate, i.e. a merge that already landed
+  can be re-run. With the class declared, the dispatch records the cwd's HEAD as
+  a baseline, a HEAD move is the success evidence (`landedEvidence`), the false
+  failure is overridden + RECORDED (`overrides[]`), and auto-recovery refuses to
+  re-dispatch landed work. Overriding a failure verdict yourself: use
+  `queue_update(key, {overrideReason: "…"})` instead of hand-writing prose into
+  notes — a pattern of overrides must stay visible.
 - On **cap** (5 FAILs): the framework marked it failed — surface the options:
   apply the findings directly / review the work as-is / drop.
 - `queue_review(key, task?)` remains the tool for dispatching the reviewer on

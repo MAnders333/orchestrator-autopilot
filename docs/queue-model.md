@@ -221,6 +221,43 @@ incident root). The policy lives in `autopilot.config.json`:
   sha right now AND the recorded baseline is that sha's first parent (the
   `merge --no-ff` shape), so any other main write still raises the violation.
 
+## Finisher-class dispatches — evidence for work that lands OUTSIDE the worktree
+
+A normal worker writes only inside its isolated worktree, so "did this run
+touch any files?" is a fair proxy for "did it do anything?". A **merge
+finisher** does not: it lands an approved branch in the TARGET REPO'S CHECKOUT
+(its declared `cwd`) and leaves its worktree untouched by design. A runtime
+that judges by worktree edits therefore reports the class whose success matters
+most as *"returned planning or scratchpad output instead of applying changes"*
+— observed live, on a merge that had already landed with a green suite. That is
+not only noise: auto-recovery treats `failed` as a re-dispatch candidate, so a
+false failure can RE-RUN A MERGE THAT ALREADY LANDED.
+
+For that class the queue's own record is authoritative:
+
+- **The dispatch declares the class**: `queue_dispatch(..., dispatchClass:
+  "finisher")` records `dispatchClass` on the item and captures the declared
+  cwd's HEAD as `finisherBaseline` (repo, ref, sha, run). Default is `worker` —
+  nothing about plain workers changes.
+- **Success evidence is a HEAD move, not file edits**: on completion, a
+  finisher-class run reported unsuccessful is checked against the baseline. If
+  the declared cwd's HEAD moved, the work LANDED: the item takes the normal
+  success path (`active → ai-review`), the proof is stored as `landedEvidence`
+  (repo/ref/fromSha/sha/run), and an `[orch-tick: review]` tick tells the
+  operator the runtime verdict was overridden.
+- **Overrides are RECORDED, not folklore**: every override of a failure verdict
+  appends to the item's `overrides[]` (`by: framework` with the evidence, or
+  `by: orchestrator` via `queue_update(..., overrideReason: "…")`). A PATTERN of
+  overrides is then visible — either the runtime verdict is systematically wrong
+  for a class of work, or failures are being waved through.
+- **Auto-recovery refuses landed work**: a `failed` item whose work is evidenced
+  as landed is never re-dispatched. It is recorded, surfaced ONCE
+  (`[orch-tick: recover] … EVIDENCED AS LANDED`), and left for the human's
+  close-out call (`failed → done`) — a re-run would duplicate the merge.
+- **The real case still fails**: a finisher whose declared cwd did NOT move has
+  no evidence, so its failure stands. Entering `active` clears the previous
+  run's `landedEvidence`, so a re-dispatched finisher is judged on its own run.
+
 ## Worker-time budget governance (timeoutMs)
 
 Every item can carry a requested wall-clock budget (`timeoutMs`, set via
