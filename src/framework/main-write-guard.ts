@@ -19,6 +19,10 @@
 // ref (either can carry a main write — merge-to-main without a remote vs a
 // push to the remote). Both are compared independently against their own
 // baseline; a single pull can legitimately move both.
+//
+// The ONE legitimate main writer — the post-approval shipping lane — declares
+// its own write through `recordExpectedMainWrite` (see below), because that
+// merge lands AFTER this sweep's baseline was taken.
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -95,6 +99,54 @@ export function preDoneKeysFor(store: QueueStore, repo: string): string[] {
  * store failures skip the repo and leave the state untouched — this guard
  * must never break a sweep.
  */
+function writeMainHeads(stateDir: string, repos: Record<string, Record<string, string>>): boolean {
+  try {
+    const p = mainHeadsPath(stateDir);
+    mkdirSync(stateDir, { recursive: true });
+    const tmp = `${p}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify({ version: 1, repos }, null, 2) + "\n", "utf8");
+    renameSync(tmp, p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * THE EXPECTED-WRITE HANDSHAKE (KEY: AUTO-SHIP-ON-DONE × MAIN-IMMUTABILITY-GUARD).
+ *
+ * The post-approval shipping lane is the only legitimate main writer, and its
+ * merge lands AFTER this sweep's `checkMainWrites` already recorded the
+ * PRE-merge baseline. Without this handshake the NEXT sweep sees the lane's
+ * own merge as an unexplained main move — and `preDoneKeysFor` still counts
+ * every other in-flight item on that repo — so the guard would fire a FALSE
+ * violation on its own shipping step. The lane therefore declares exactly what
+ * it wrote and the baseline advances to THAT sha, nothing else.
+ *
+ * Deliberately NARROW — the baseline is refused (so the violation still fires
+ * on the next sweep) unless BOTH hold:
+ *   - the ref is at `sha` RIGHT NOW (the lane's own commit, not a later one), and
+ *   - the recorded baseline is `sha`'s FIRST PARENT — the exact shape a
+ *     `git merge --no-ff` on the base produces. Anything else moved the base
+ *     in between, which is precisely the pre-approval write the guard exists
+ *     to catch, so that write keeps its baseline and stays reportable.
+ *
+ * Returns whether the baseline was advanced.
+ */
+export function recordExpectedMainWrite(stateDir: string, repo: string, branch: string, sha: string): boolean {
+  if (!(MAIN_REFS as readonly string[]).includes(branch)) return false; // not a tracked main ref — nothing to exempt
+  if (mainRefHead(repo, branch) !== sha) return false; // the ref is not where the lane says it left it
+  const heads = readMainHeads(stateDir);
+  const prev = heads[repo]?.[branch];
+  if (prev === sha) return true; // already the baseline
+  if (prev) {
+    const firstParent = git(repo, ["rev-parse", "--verify", "--quiet", `${sha}^1`]);
+    if (firstParent !== prev) return false; // an unexplained move sits in between — keep the baseline, let the guard fire
+  }
+  heads[repo] = { ...(heads[repo] ?? {}), [branch]: sha };
+  return writeMainHeads(stateDir, heads);
+}
+
 export function checkMainWrites(stateDir: string, ts = new Date().toISOString()): MainWriteWarning[] {
   const store = loadStore(stateDir);
   if (!store) return [];
@@ -125,15 +177,7 @@ export function checkMainWrites(stateDir: string, ts = new Date().toISOString())
       warnings.push({ repo, ref, sha, previousSha: prev[ref], keys, ts });
     }
   }
-  try {
-    if (!Object.keys(next).length) return warnings; // nothing resolvable — leave the state file untouched
-    const p = mainHeadsPath(stateDir);
-    mkdirSync(stateDir, { recursive: true });
-    const tmp = `${p}.tmp-${process.pid}`;
-    writeFileSync(tmp, JSON.stringify({ version: 1, repos: next }, null, 2) + "\n", "utf8");
-    renameSync(tmp, p);
-  } catch {
-    // best-effort recording — the guard still warns from this call's comparison
-  }
+  // best-effort recording — the guard still warns from this call's comparison
+  if (Object.keys(next).length) writeMainHeads(stateDir, next);
   return warnings;
 }

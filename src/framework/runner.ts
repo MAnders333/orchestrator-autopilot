@@ -353,6 +353,11 @@ export function createFrameworkRunner(opts: RunnerOptions): FrameworkRunner {
     // auto is the default. Every action lands as a `[orch-tick: ship]` tick +
     // a domain event; shippedAt markers prevent re-merge. Best-effort like the
     // guard above: a git/store failure must never break the sweep.
+    // ORDERING: this runs AFTER the guard, so a flow 'merge' ship moves main
+    // past the baseline the guard just took. The lane closes that gap itself
+    // via recordExpectedMainWrite (the narrow expected-write handshake) — its
+    // own legitimate merge must never fire a main-immutability violation, and
+    // any OTHER main move still does.
     try {
       for (const o of runShippingPass(opts.stateDir)) {
         if (o.event && opts.emit) opts.emit([o.event]);

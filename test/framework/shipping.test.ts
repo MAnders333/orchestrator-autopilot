@@ -88,6 +88,30 @@ function seedDone(stateDir: string, repo: string, key: string, runId: string): v
   return void tip; // the journal carries the tip — the item does not need it
 }
 
+/** Seed a NOT-yet-approved item on `repo` — the precondition that makes any
+ *  main move on that repo a main-immutability violation candidate. */
+function seedPreDone(stateDir: string, repo: string, key: string): void {
+  const store = loadStore(stateDir) ?? newStore();
+  addItem(store, {
+    key,
+    title: key.toLowerCase(),
+    status: "active",
+    blocker: null,
+    scope: "still in flight",
+    cwd: repo,
+    evidence: "",
+    value: "",
+    urgency: "",
+    risk: "low",
+    runId: `run-${key}`,
+    reviewerRunId: null,
+    timeoutMs: null,
+    attempts: 0,
+    notes: "",
+  });
+  saveStore(stateDir, store);
+}
+
 function policy(flow: "mrs" | "merge", baseBranches: string[]): ShippingRepoPolicy {
   return { flow, baseBranches };
 }
@@ -269,6 +293,94 @@ describe("shipping — policy-inquiry (fires once, resumes after the orchestrato
     // the inquiry is cleared — the intercom asks no more
     const after = JSON.parse(readFileSync(shippingStatePath(stateDir), "utf8"));
     expect(after.inquiries[key]).toBeUndefined();
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+});
+
+describe("shipping × main-immutability guard (the expected-write handshake)", () => {
+  /** The runner fixture — the guard runs BEFORE the lane in every sweep, which
+   *  is exactly why the lane's own merge needs the handshake. */
+  function guardedRunner(stateDir: string) {
+    const events: Array<{ name: string; data?: Record<string, unknown> }> = [];
+    const delivered: string[] = [];
+    const runner = createFrameworkRunner({
+      stateDir,
+      autopilot: new Autopilot({ stateDir }),
+      backend: backendIdle,
+      host: { interactive: () => true, loaded: () => true, busy: () => false, compacting: () => false },
+      deliver: (m) => delivered.push(m),
+      emit: (evs) => events.push(...evs),
+      enabled: () => true,
+      sweepIntervalMs: 0,
+    });
+    const violations = (): Array<{ name: string; data?: Record<string, unknown> }> =>
+      events.filter((e) => e.name === "orch:main-write-pre-approval");
+    const violationTicks = (): string[] => delivered.filter((m) => m.includes("[orch-tick: main-write]"));
+    return { runner, events, delivered, violations, violationTicks };
+  }
+
+  test("the lane's OWN merge is not a violation — no main-write tick/event on the following sweep", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "orch-ship-guard-"));
+    const repo = initRepo();
+    saveAutopilotConfig(stateDir, { shipping: { repos: { [suggestedPolicyKey(repo)]: policy("merge", ["main"]) } } });
+    seedDone(stateDir, repo, "K-SHIP", "run-guard-8");
+    seedPreDone(stateDir, repo, "K-INFLIGHT"); // a pre-done sibling: without the handshake the merge looks like a violation
+    const mainBefore = g(repo, "rev-parse", "main");
+    const { runner, delivered, violations, violationTicks } = guardedRunner(stateDir);
+
+    runner.onTimer(); // sweep 1: guard takes the PRE-merge baseline, then the lane merges past it
+    await waitFor("K-SHIP shipped", () => Boolean(loadStore(stateDir)?.items["K-SHIP"].shippedAt));
+    const merged = g(repo, "rev-parse", "main");
+    expect(merged).not.toBe(mainBefore);
+    expect(delivered.some((m) => m.includes("[orch-tick: ship]") && m.includes("merged K-SHIP"))).toBe(true);
+
+    runner.onSettled(); // sweep 2: the guard compares against the baseline the lane refreshed
+    await new Promise((r) => setTimeout(r, 120));
+    expect(violations()).toEqual([]);
+    expect(violationTicks()).toEqual([]);
+    runner.onSettled(); // and it stays quiet
+    await new Promise((r) => setTimeout(r, 80));
+    expect(violations()).toEqual([]);
+    runner.stop();
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  test("an UNRELATED pre-approval main move after a ship still fires the violation tick + event", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "orch-ship-guard-"));
+    const repo = initRepo();
+    saveAutopilotConfig(stateDir, { shipping: { repos: { [suggestedPolicyKey(repo)]: policy("merge", ["main"]) } } });
+    seedDone(stateDir, repo, "K-SHIP", "run-guard-9");
+    seedPreDone(stateDir, repo, "K-INFLIGHT");
+    const { runner, violations, violationTicks } = guardedRunner(stateDir);
+
+    runner.onTimer(); // sweep 1: baseline + the lane's legitimate merge
+    await waitFor("K-SHIP shipped", () => Boolean(loadStore(stateDir)?.items["K-SHIP"].shippedAt));
+    runner.onSettled();
+    await new Promise((r) => setTimeout(r, 120));
+    expect(violations()).toEqual([]); // the exemption held for the lane's own sha…
+
+    // …and covers ONLY that sha: a pre-approval commit straight onto main is
+    // still caught (the exemption is not a repo-wide whitelist).
+    g(repo, "checkout", "-q", "main");
+    writeFileSync(join(repo, "sneaky.txt"), "pre-approval main write\n");
+    g(repo, "add", ".");
+    g(repo, "commit", "-q", "-m", "worker wrote to main pre-approval");
+    const sneaky = g(repo, "rev-parse", "main");
+
+    runner.onSettled();
+    await waitFor("main-write violation raised", () => violations().length > 0);
+    const ev = violations()[0];
+    expect(ev.data!.repo).toBe(repo);
+    expect(ev.data!.ref).toBe("main");
+    expect(ev.data!.sha).toBe(sneaky);
+    expect(ev.data!.keys).toEqual(["K-INFLIGHT"]); // the shipped item is done — not an offender
+    const tick = violationTicks()[0];
+    expect(tick).toContain("MAIN-IMMUTABILITY VIOLATION");
+    expect(tick).toContain("K-INFLIGHT");
+    expect(tick).toContain(sneaky.slice(0, 8));
+    runner.stop();
     rmSync(repo, { recursive: true, force: true });
     rmSync(stateDir, { recursive: true, force: true });
   });

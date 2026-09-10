@@ -132,6 +132,15 @@ incident root). The policy lives in `autopilot.config.json`:
   referencing a repo is `done` (or `rejected`), a main write advances the
   guard's recorded baseline silently — the merge-finisher's shipping step is
   exactly the case that must NOT warn.
+- **The shipping lane declares its own write (expected-write handshake).** The
+  guard runs BEFORE the lane in a sweep, so a flow `merge` ship moves main past
+  the baseline the guard just took — and a repo usually still has other
+  in-flight items, so the next sweep would flag the lane's own legitimate merge.
+  The lane therefore hands the guard the exact sha it produced
+  (`recordExpectedMainWrite`) and the baseline advances to that sha only. The
+  exemption is narrow by construction: it is refused unless the ref is at that
+  sha right now AND the recorded baseline is that sha's first parent (the
+  `merge --no-ff` shape), so any other main write still raises the violation.
 
 ## Worker-time budget governance (timeoutMs)
 

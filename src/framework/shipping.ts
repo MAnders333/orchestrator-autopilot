@@ -30,6 +30,7 @@ import { join, basename } from "node:path";
 import { loadStore, saveStore, updateItem } from "../queue-store.ts";
 import { loadAutopilotConfig, type ShippingConfig, type ShippingRepoPolicy, type ShippingFlow } from "../config.ts";
 import { reviewPointersFor } from "./worktree-preservation.ts";
+import { recordExpectedMainWrite } from "./main-write-guard.ts";
 
 export type { ShippingConfig, ShippingRepoPolicy, ShippingFlow };
 
@@ -493,6 +494,16 @@ export function runShippingPass(stateDir: string, now = new Date().toISOString()
       continue;
     }
     // SHIPPED — mark + announce. The shippedAt marker prevents re-merge.
+    //
+    // First, the EXPECTED-WRITE HANDSHAKE with the main-immutability guard: a
+    // flow 'merge' ship moves the LOCAL base, and this sweep's guard pass
+    // already took its baseline before the merge — so the guard must be told
+    // about this one write or it flags its own lane on the next sweep. The
+    // exemption is narrow by construction: only the exact sha this merge just
+    // produced, only for this human-approved item's base (the guard itself
+    // refuses anything that is not the ref's current head sitting directly on
+    // the recorded baseline).
+    for (const m of result.merges ?? []) recordExpectedMainWrite(stateDir, repo, m.base, m.sha);
     const sha = result.flow === "merge" ? result.merges![0].sha : tip.sha;
     const flowNote = result.flow === "merge"
       ? `merged into ${result.merges![0].base} @ ${shortSha(sha)}`
