@@ -244,14 +244,34 @@ For that class the queue's own record is authoritative:
   bare HEAD move**: on completion, a finisher-class run reported unsuccessful is
   checked against the baseline. Evidence requires all of: the baseline belongs to
   THIS run, a source was declared and resolved, HEAD ADVANCED from the baseline
-  (baseline is an ancestor of HEAD), and the source is an ancestor of HEAD now
-  but was NOT at dispatch. Then the work LANDED: the item takes the normal
+  (baseline is an ancestor of HEAD), and the source is IN the checkout's history
+  now but was NOT at dispatch. Then the work LANDED: the item takes the normal
   success path (`active → ai-review`, so the reviewer still verifies the commit),
   the proof is stored as `landedEvidence`
   (repo/ref/fromSha/sha/source/sourceSha/run), and an `[orch-tick: review]` tick
   tells the operator the runtime verdict was overridden. A bare HEAD move is
   deliberately NOT enough: the same checkout is written by the shipping lane's
   `merge --no-ff` for other items, by a second finisher, and by humans.
+- **Which landing shapes count — exactly**: "IN the history" means EITHER the
+  declared commits are ancestors of HEAD (`merge --no-ff`, fast-forward) OR
+  every source commit has a PATCH-EQUIVALENT commit in HEAD's history
+  (`git cherry`, i.e. patch-id equality: clean cherry-pick, rebase, squash of a
+  single-commit source). Patch equivalence is not optional garnish: finishers in
+  this project routinely CHERRY-PICK because the approved branch's base is
+  stale, which creates new commits, so an ancestry-only check would evidence
+  almost nothing. The recorded evidence names the shape it found
+  (`landing: "ancestor" | "patch-equivalent"`).
+- **What produces NO evidence — say it out loud**: a **conflict-resolved**
+  cherry-pick/rebase (resolving the conflict rewrites the patch, so patch-id
+  equality fails; deciding it landed needs content judgment, which is the
+  reviewer's call, not a git predicate), a **squash of a multi-commit source**
+  (one combined patch matches none of the source patch-ids), and any landing
+  that never moves the declared checkout — notably the shipping lane's **`mrs`
+  flow**, which pushes the branch and opens an MR, leaving the local HEAD where
+  it was. In all of those the runtime's failure verdict STANDS: the operator
+  verifies the commit and overrides deliberately with
+  `queue_update(..., overrideReason: "…")`. That is the fail-closed side of the
+  trade — a check that quietly covered these would be worse than no check.
 - **Overrides are RECORDED, not folklore**: every override of a failure verdict
   appends to the item's `overrides[]` (`by: framework` with the evidence, or
   `by: orchestrator` via `queue_update(..., overrideReason: "…")`). A PATTERN of
@@ -270,8 +290,11 @@ For that class the queue's own record is authoritative:
   dispatch, harness auto-dispatch, review-FAIL re-dispatch, recovery
   re-dispatch). Each of those lanes captures a FRESH baseline for the run it
   spawns, and the landed check additionally refuses a baseline whose `runId` is
-  not the item's current run. `finisherSource` is sticky (it describes the
-  item's work, not one run) and the override LOG keeps the history.
+  not the item's current run — which the item only HAS while it is active: on a
+  terminal status `runId` is null, and there the baseline is that item's most
+  recent dispatch BY CONSTRUCTION (entering `active` clears it, and only a
+  dispatch lane writes one), so there is no foreign baseline to refuse.
+  `finisherSource` is sticky (it describes the item's work, not one run) and the override LOG keeps the history.
 
 **Residual, stated plainly**: the evidence proves THE DECLARED SOURCE IS IN the
 target's history, not WHO put it there. A human (or another lane) merging the
@@ -280,7 +303,9 @@ purpose: the item is moved off the failure path and LEFT FOR A HUMAN —
 auto-recovery declines to re-dispatch, and nothing closes the item — which is
 also the right handling when someone else landed it, because a re-run would
 still duplicate the merge. Everything else fails closed (unreadable repo,
-unresolvable source, missing/foreign baseline, non-advancing HEAD → no evidence).
+unresolvable source, missing/foreign baseline, non-advancing HEAD, a git
+question git cannot answer, or a landing shape outside the two above → no
+evidence).
 
 **Where this belongs eventually**: the pi runtime has a per-agent
 `completionGuard` flag — the right home for "this class of child writes outside

@@ -212,6 +212,13 @@ export async function autoRecoverFails(
     stage(item.key, (fresh) => ({
       landedEvidence: evidence,
       ...(fresh.landedEvidence ? {} : { overrides: appendOverride(fresh, landedOverride(evidence, fresh.runId ?? item.runId, now)) }),
+      // `recoveryEscalated` here means BOTH "already announced" (the skip is
+      // surfaced once, never re-ticked) and "phases 1-2 stay off this item".
+      // Entering `active` does NOT clear it, so a deliberate human re-open
+      // keeps auto-recovery hands-off even if the new run fails — INTENDED:
+      // this item's declared source is already in the target's history, so an
+      // automatic retry is the one action that can duplicate the landing. Who
+      // re-opened it is driving it; the escalation notes say what to check.
       recoveryEscalated: true,
       notes: appendNote(
         fresh.notes,

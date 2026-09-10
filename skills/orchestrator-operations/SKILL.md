@@ -132,7 +132,18 @@ skeleton. The tag is ADVISORY — it never blocks approval.
   class declared, the dispatch records the cwd's HEAD *and* that source as a
   baseline; the success evidence is THAT SOURCE entering the checkout's history
   during the run (`landedEvidence`), the false failure is overridden + RECORDED
-  (`overrides[]`), and auto-recovery refuses to re-dispatch landed work. **Omit
+  (`overrides[]`), and auto-recovery refuses to re-dispatch landed work.
+  **Detected landing shapes** (be precise — the check covers these and nothing
+  else): the declared commits themselves becoming ancestors (`merge --no-ff`,
+  fast-forward), OR patch-equivalent copies of every source commit (`git cherry`
+  — clean cherry-pick, rebase, squash of a SINGLE-commit source). **NOT
+  detected, so the failure verdict stands and the close-out is your explicit
+  call** (`queue_update(key, {overrideReason})` after you verify the commit): a
+  **conflict-resolved** cherry-pick/rebase (resolving the conflict rewrites the
+  patch, so patch-id equality legitimately fails — no git predicate can settle
+  it), a **squash of a multi-commit source**, and any landing that never moves
+  the declared checkout — notably shipping flow **`mrs`**, which pushes the
+  branch and opens an MR without a local landing. **Omit
   `finisherSource` and there is no evidence path** — the run fails as before (a
   bare HEAD move is not accepted: shipping merges and human commits move the same
   checkout). Overriding a failure verdict yourself: use
